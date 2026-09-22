@@ -1,4 +1,4 @@
-"""bot.py — Telegram-бот HW Screener."""
+"""bot.py — Telegram-бот HW Screener + Mini App HTTP."""
 import asyncio
 import logging
 import os
@@ -11,11 +11,14 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
+    WebAppInfo,
+    MenuButtonWebApp,
 )
 
 import storage
 from screener import run_scan
 from storage import TEMPLATES
+from webapp_server import start_web_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,15 +26,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ["TG_BOT_TOKEN"]
+TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL_MIN", "15")) * 60  # секунды
+WEBAPP_URL = (os.environ.get("WEBAPP_URL") or "").rstrip("/")
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=TOKEN) if TOKEN else None
 dp = Dispatcher()
 
 # ── Подписчики ────────────────────────────────────────────────────────────────
-# Простое хранилище в памяти (дополнительно можно вынести в SQLite)
 _subscribers: set[int] = set()
+
+
+def _webapp_keyboard() -> InlineKeyboardMarkup | None:
+    if not WEBAPP_URL:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="📱 Открыть скринер",
+            web_app=WebAppInfo(url=WEBAPP_URL),
+        )
+    ]])
 
 
 def _format_card(card: dict) -> str:
@@ -74,7 +88,8 @@ async def send_signal(card: dict, chat_ids: list[int]):
 async def cmd_start(msg: Message):
     _subscribers.add(msg.chat.id)
     storage.get_filter(msg.chat.id)  # инициализировать запись
-    await msg.answer(
+    kb = _webapp_keyboard()
+    text = (
         "👋 <b>HW Screener Bot</b> запущен!\n\n"
         "Я буду присылать сигналы пробоев по методике Герчика каждые "
         f"{SCAN_INTERVAL // 60} минут.\n\n"
@@ -82,8 +97,24 @@ async def cmd_start(msg: Message):
         "/status — текущие настройки\n"
         "/filter — выбрать шаблон фильтра\n"
         "/scan — запустить скан прямо сейчас\n"
-        "/stop — остановить сигналы",
-        parse_mode="HTML",
+        "/app — открыть Mini App скринер\n"
+        "/stop — остановить сигналы"
+    )
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(Command("app"))
+async def cmd_app(msg: Message):
+    kb = _webapp_keyboard()
+    if not kb:
+        await msg.answer(
+            "Mini App не настроен. Задайте переменную окружения WEBAPP_URL "
+            "(публичный HTTPS URL Railway)."
+        )
+        return
+    await msg.answer(
+        "📱 Нажми кнопку, чтобы открыть скринер внутри Telegram:",
+        reply_markup=kb,
     )
 
 
@@ -99,16 +130,19 @@ async def cmd_status(msg: Message):
     subscribed = chat_id in _subscribers
     tpl_name = storage.get_template_name(chat_id)
     f = storage.get_filter(chat_id)
+    _, active_html = storage.get_html_templates(chat_id)
     await msg.answer(
         f"📋 <b>Статус</b>\n\n"
         f"Подписка: {'✅ активна' if subscribed else '❌ остановлена'}\n"
         f"Шаблон: <b>{tpl_name}</b>\n"
+        f"HTML active: <b>{active_html or '—'}</b>\n"
         f"Описание: {f.get('desc', '—')}\n\n"
         f"Сила уровня ≥ {f['strength_min']}\n"
         f"Дистанция ≤ {f['dist_atr_max']} ATR\n"
         f"Направления: {', '.join(f['sides'])}\n"
         f"Только по тренду: {'да' if f.get('bias_filter') else 'нет'}\n\n"
-        f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин",
+        f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин\n"
+        f"Mini App: {'✅ ' + WEBAPP_URL if WEBAPP_URL else '❌ WEBAPP_URL не задан'}",
         parse_mode="HTML",
     )
 
@@ -174,10 +208,37 @@ async def scan_loop():
         await asyncio.sleep(SCAN_INTERVAL)
 
 
+async def _setup_menu_button():
+    if not WEBAPP_URL or not bot:
+        return
+    try:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Скринер",
+                web_app=WebAppInfo(url=WEBAPP_URL),
+            )
+        )
+        logger.info("Menu button WebApp set → %s", WEBAPP_URL)
+    except Exception:
+        logger.exception("Не удалось установить MenuButtonWebApp")
+
+
 async def main():
+    if not TOKEN:
+        raise SystemExit("TG_BOT_TOKEN is required")
+    global bot
+    if bot is None:
+        bot = Bot(token=TOKEN)
+
     storage.init()
+    port = int(os.environ.get("PORT", "8080"))
+    runner = await start_web_server(port=port)
+    await _setup_menu_button()
     asyncio.create_task(scan_loop())
-    await dp.start_polling(bot)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
