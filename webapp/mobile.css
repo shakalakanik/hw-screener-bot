@@ -1,0 +1,158 @@
+/* Portrait-friendly overrides for Telegram Mini App — does not break desktop */
+
+body {
+  padding: 10px;
+  padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  -webkit-text-size-adjust: 100%;
+  overflow-x: hidden;
+}
+
+.wrap {
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+.tabs {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.tabs button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+select.flt {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+table {
+  white-space: nowrap;
+}
+
+/* Telegram sticky bar injected by bridge.js */
+#tg-bridge-bar {
+  position: sticky;
+  top: 0;
+  z-index: 9999;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  margin: -10px -10px 10px;
+  background: var(--panel, #1b1d27);
+  border-bottom: 1px solid var(--line, #2c2f3d);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+#tg-bridge-bar button {
+  background: var(--accent, #7aa2f7);
+  color: #0d1017;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+#tg-bridge-bar button:active {
+  opacity: 0.85;
+}
+
+#tg-bridge-status {
+  font-size: 12px;
+  color: var(--muted, #9aa0b5);
+  flex: 1 1 auto;
+  min-width: 120px;
+}
+
+#tg-bridge-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  background: var(--panel, #1b1d27);
+  color: var(--fg, #e6e8ef);
+  border: 1px solid var(--line, #2c2f3d);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  z-index: 10000;
+  max-width: 90vw;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+
+#tg-bridge-toast.show {
+  opacity: 1;
+}
+
+@media (max-width: 700px) {
+  body {
+    padding: 8px;
+    font-size: 13px;
+  }
+
+  .wrap {
+    max-width: 100%;
+  }
+
+  .row,
+  .frow {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .row > *,
+  .frow > * {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
+  select.flt,
+  select,
+  input[type="text"],
+  input[type="number"],
+  button {
+    max-width: 100%;
+  }
+
+  .tabs {
+    margin-left: -4px;
+    margin-right: -4px;
+    padding: 0 4px;
+  }
+
+  /* Avoid awkward wrapping of long filter labels */
+  label,
+  .muted,
+  .hint {
+    white-space: normal;
+    word-break: break-word;
+  }
+
+  #tg-bridge-bar {
+    margin: -8px -8px 8px;
+  }
+}
