@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
@@ -517,6 +518,17 @@ async def handle_sync(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "count": len(names)})
 
 
+
+async def handle_index(request: web.Request) -> web.Response:
+    """Отдать HTML-скринер (Mini App / браузер)."""
+    base = Path(__file__).resolve().parent
+    for name in ("HW_FBO_scanner_6.html", "webapp/screener.html"):
+        path = base / name
+        if path.is_file():
+            return web.FileResponse(path)
+    return web.Response(text="screener html missing", status=404)
+
+
 async def handle_health(request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
@@ -547,6 +559,8 @@ async def main():
     app.router.add_post("/sync/{token}", handle_sync)
     app.router.add_get("/watchlist/{token}", handle_watchlist)
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/app", handle_index)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
