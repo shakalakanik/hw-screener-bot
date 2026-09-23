@@ -29,6 +29,7 @@ webapp/
 | `ALLOW_DEBUG_WEBAPP` | `1` — разрешить `?debug_user_id=` без initData (только для отладки) |
 | `GEMINI_API_KEY` | ключ Google Gemini для ИИ-чата (`/ai`). Без ключа бот не падает — вежливо пишет, что ключ не задан |
 | `GEMINI_MODEL` | опционально, по умолчанию `gemini-3.6-flash` |
+| `GEMINI_FALLBACK_MODELS` | опционально, comma-list запасных моделей при 503/429 |
 
 ## Локальный запуск
 

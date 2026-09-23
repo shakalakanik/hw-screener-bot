@@ -761,7 +761,8 @@ async def _send_ai_proposal_confirm(chat_id: int, proposal: dict, base_text: str
 async def cmd_ai_on(msg: Message):
     storage.set_ai_enabled(msg.chat.id, True)
     hint = (
-        "🤖 ИИ-режим <b>включён</b>. Пиши обычным текстом — помогу с настройками и сигналами.\n"
+        "🤖 ИИ-режим <b>включён</b>. Пиши свободно по-русски "
+        "(«включи мосбиржу», вопросы про сигналы/шаблоны) — свободный текст поддерживается.\n"
         "Команды с / по-прежнему работают.\n"
         "Выключить: /ai_off или кнопка «🤖 ИИ ✓»."
     )
@@ -803,10 +804,12 @@ async def cmd_ai(msg: Message):
         storage.set_ai_enabled(chat_id, True)
         await msg.answer(
             "🤖 <b>ИИ-помощник HW Screener</b>\n\n"
-            "Режим включён. Спроси, например:\n"
+            "Свободный текст на русском <b>поддерживается</b> — пиши как удобно.\n"
+            "Примеры:\n"
+            "• включи мосбиржу / выключи крипту\n"
+            "• подпишись / стоп сигналы\n"
             "• что значит сила и ATR на карточке\n"
             "• чем fbo отличается от brk\n"
-            "• включи только мосбиржу\n"
             "• поставь шаблону X стратегию both\n\n"
             "Любое изменение настроек сначала покажу и применю только после «да».\n"
             "/ai_off — выключить режим.",
@@ -831,15 +834,26 @@ async def _handle_ai_question(msg: Message, question: str):
     history = storage.get_ai_history(chat_id)
     # history for model should not include the current turn
     reply = await ai_chat.chat(question, history=history, context=_ai_user_context(chat_id))
+    out = (reply.text or "").strip() or "Пустой ответ."
+    # User-facing text must stay short — never dump raw 503/JSON bodies
+    if reply.error and (
+        len(out) > 400
+        or out.lstrip().startswith("{")
+        or ("503" in out and ("error" in out.lower() or "UNAVAILABLE" in out))
+    ):
+        out = (
+            "⏳ Google перегружен или временно недоступен. "
+            "Попробуй через минуту — свободный текст поддерживается."
+        )
     storage.append_ai_message(chat_id, "user", question)
-    storage.append_ai_message(chat_id, "model", reply.text)
+    storage.append_ai_message(chat_id, "model", out)
     if reply.proposal:
-        await _send_ai_proposal_confirm(chat_id, reply.proposal, reply.text)
+        await _send_ai_proposal_confirm(chat_id, reply.proposal, out)
     else:
         try:
-            await msg.answer(reply.text, parse_mode="HTML", reply_markup=main_keyboard(chat_id))
+            await msg.answer(out, parse_mode="HTML", reply_markup=main_keyboard(chat_id))
         except Exception:
-            await msg.answer(reply.text, reply_markup=main_keyboard(chat_id))
+            await msg.answer(out, reply_markup=main_keyboard(chat_id))
 
 
 @dp.callback_query(F.data.startswith("ai_confirm:"))

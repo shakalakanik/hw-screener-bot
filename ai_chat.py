@@ -3,9 +3,13 @@
 Minimal text chat: explains signals/settings, proposes setting changes.
 NEVER applies settings itself — returns optional structured proposals for
 the bot confirm flow («да» / callback).
+
+Free-form Russian is supported. Obvious intents (включи мосбиржу, …) are
+handled locally before calling Gemini so 503 overload cannot block them.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +27,32 @@ def _model() -> str:
     return (os.environ.get("GEMINI_MODEL") or "gemini-3.6-flash").strip() or "gemini-3.6-flash"
 
 
+_DEFAULT_FALLBACK_MODELS = (
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.7-flash",
+)
+
+
+def _fallback_models() -> list[str]:
+    """Primary model first, then GEMINI_FALLBACK_MODELS or defaults (deduped, order kept)."""
+    primary = _model()
+    raw = (os.environ.get("GEMINI_FALLBACK_MODELS") or "").strip()
+    if raw:
+        extras = [m.strip() for m in raw.split(",") if m.strip()]
+    else:
+        extras = list(_DEFAULT_FALLBACK_MODELS)
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in [primary, *extras]:
+        if m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
 # Back-compat aliases (tests / status); prefer _api_key()/_model() at call time
 GEMINI_API_KEY = _api_key()
 GEMINI_MODEL = _model()
@@ -33,7 +63,22 @@ MAX_HISTORY_MESSAGES = 16      # last N messages sent to the model
 MAX_REPLY_CHARS = 3500
 ACTION_MARKER = "---ACTION---"
 
+_OVERLOAD_FRIENDLY = (
+    "⏳ Google Gemini сейчас перегружен (высокий спрос). "
+    "Попробуй через минуту — свободный текст поддерживается, "
+    "это временная недоступность API."
+)
+
 SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Screener (скринер Герчика).
+
+ВАЖНО ПРО СВОБОДНЫЙ ТЕКСТ:
+Пользователь пишет СВОБОДНО на естественном русском — любой формулировкой,
+не только командами и не только про шаблоны. Примеры нормальных запросов:
+«включи мосбиржу», «выключи крипту», «подпишись на сигналы», «что такое ATR»,
+«мало сигналов — что сделать», «чем fbo отличается от brk».
+Шаблоны и стратегии — инструменты, которыми ты можешь помочь управлять,
+а НЕ единственная тема разговора. Отвечай на любой вопрос про этот бот,
+сигналы, рынки, фильтры, подписку, Mini App, Герчика (пробой/ЛП).
 
 О боте:
 - Рынки: крипта (Bybit→OKX) и Мосбиржа/MOEX (TQBR).
@@ -56,12 +101,16 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
 8) Подсказать, что делать если сигналов мало/много.
 9) Разобрать, почему ночные сигналы режутся.
 10) Помочь с MOEX vs crypto различиями.
-…и похожие вопросы про этот бот.
+11) Выполнить просьбу включить/выключить рынок или подписку — через ---ACTION---.
+…и любые похожие вопросы про этот бот свободным текстом.
 
 Правила:
 - Отвечай ТОЛЬКО на русском, кратко и по делу (Telegram).
 - Не выдумывай наличие шаблонов/рынков — опирайся на блок «Контекст пользователя».
 - Не проси API-ключи и не обсуждай чужие секреты.
+- Оставайся помощником ЭТОГО скринер-бота. Если вопрос совсем не про бот/торговлю/
+  сигналы/настройки (быт, медицина, общие советы и т.п.) — коротко скажи, что
+  ты только про HW Screener, и предложи спросить про рынки/шаблоны/сигналы.
 - Ты НЕ меняешь настройки сам. Если пользователь просит изменить настройку,
   опиши изменение простым языком и в КОНЦЕ ответа добавь ровно один блок:
 
@@ -202,18 +251,138 @@ def format_user_context(ctx: dict) -> str:
     return "\n".join(lines)
 
 
+# ── Local fast-path (no Gemini) for obvious Russian intents ───────────────────
+
+_RE_MOEX = re.compile(
+    r"(?i)(?:"
+    r"мосбирж\w*|мос[\s\-]?бирж\w*|moex|мoex|"
+    r"акци\w*\s+рф|рф\s+акци\w*|российск\w*\s+акци\w*"
+    r")"
+)
+_RE_CRYPTO = re.compile(r"(?i)(?:крипт\w*|crypto|биткоин|bitcoin|bybit|okx)")
+_RE_ON = re.compile(r"(?i)(?:включи|включить|добавь|добавить|вруби|включить|enable|on\b)")
+_RE_OFF = re.compile(r"(?i)(?:выключи|выключить|отключи|отключить|убери|убрать|disable|off\b)")
+_RE_SUB = re.compile(
+    r"(?i)(?:подпишись|подписаться|подписка\s+на\s+сигнал|включи\s+сигнал|"
+    r"старт\s+сигнал|subscribe)"
+)
+_RE_UNSUB = re.compile(
+    r"(?i)(?:стоп\s+сигнал|останови\s+сигнал|отпишись|отписаться|"
+    r"выключи\s+сигнал|unsubscribe|/stop)"
+)
+
+
+def try_local_intent(user_text: str) -> AiReply | None:
+    """Parse obvious RU intents without Gemini. Returns AiReply+proposal or None.
+
+    Never auto-applies — only proposes. Ambiguous text → None (fall through).
+    """
+    text = (user_text or "").strip()
+    if not text or len(text) > 120:
+        return None
+
+    # Subscribe / unsubscribe (check before markets — "стоп сигналы" ≠ market)
+    if _RE_UNSUB.search(text) and not _RE_MOEX.search(text) and not _RE_CRYPTO.search(text):
+        # avoid "стоп" alone if it's about something else with market words already excluded
+        if re.search(r"(?i)сигнал|подпис|unsubscribe|stop", text) or re.search(
+            r"(?i)^(?:стоп|отпишись|отписаться)\b", text
+        ):
+            return AiReply(
+                text="Остановить авто-сигналы? Подтверди ниже.",
+                proposal={
+                    "action": "unsubscribe",
+                    "params": {},
+                    "summary": "остановить сигналы",
+                },
+            )
+    if _RE_SUB.search(text) and not _RE_MOEX.search(text) and not _RE_CRYPTO.search(text):
+        return AiReply(
+            text="Включить подписку на сигналы? Подтверди ниже.",
+            proposal={
+                "action": "subscribe",
+                "params": {},
+                "summary": "подписка на сигналы",
+            },
+        )
+
+    has_moex = bool(_RE_MOEX.search(text))
+    has_crypto = bool(_RE_CRYPTO.search(text))
+    wants_on = bool(_RE_ON.search(text))
+    wants_off = bool(_RE_OFF.search(text))
+
+    if has_moex and has_crypto:
+        return None  # ambiguous — let Gemini decide
+    if wants_on and wants_off:
+        return None
+    if not (has_moex or has_crypto):
+        return None
+    if not (wants_on or wants_off):
+        return None
+
+    market = "ru" if has_moex else "crypto"
+    enabled = wants_on
+    label = "мосбиржу" if market == "ru" else "крипту"
+    verb = "Включить" if enabled else "Выключить"
+    return AiReply(
+        text=f"{verb} рынок <b>{label}</b>? Подтверди ниже — без «да» ничего не меняю.",
+        proposal={
+            "action": "set_market",
+            "params": {"market": market, "enabled": enabled},
+            "summary": f"{'включить' if enabled else 'выключить'} {label}",
+        },
+    )
+
+
+def _is_overload_error(err: str) -> bool:
+    u = (err or "").upper()
+    return (
+        "503" in err
+        or "429" in err
+        or "UNAVAILABLE" in u
+        or "RESOURCE_EXHAUSTED" in u
+        or "HIGH DEMAND" in u
+        or "HIGH_DEMAND" in u
+        or "OVERLOADED" in u
+        or "TRY AGAIN LATER" in u
+    )
+
+
+def _friendly_error(exc: BaseException) -> AiReply:
+    err = str(exc)
+    if "API_KEY" in err.upper() or "401" in err or "403" in err:
+        return AiReply(
+            text="⚠️ Ошибка ключа Gemini. Проверь <code>GEMINI_API_KEY</code> в Railway.",
+            error="auth",
+        )
+    if _is_overload_error(err):
+        return AiReply(text=_OVERLOAD_FRIENDLY, error="overload")
+    # Never dump raw JSON / long traceback to the user
+    return AiReply(
+        text="⚠️ Временная ошибка ИИ. Попробуй ещё раз через минуту.",
+        error="api",
+    )
+
+
 async def chat(
     user_text: str,
     history: list[dict],
     context: dict,
 ) -> AiReply:
     """Call Gemini. history: list of {role: user|model, content: str} oldest→newest."""
+    # Local fast-path — works even without API key / during 503
+    local = try_local_intent(user_text)
+    if local is not None:
+        local.proposal = sanitize_proposal(local.proposal)
+        return local
+
     if not _api_key():
         return AiReply(
             text=(
                 "🔑 Ключ Gemini не задан.\n\n"
                 "Добавь переменную <code>GEMINI_API_KEY</code> в Railway → Variables "
-                "и сделай Redeploy. Ключ: aistudio.google.com → API keys."
+                "и сделай Redeploy. Ключ: aistudio.google.com → API keys.\n\n"
+                "Простые команды вроде «включи мосбиржу» / «подпишись» "
+                "работают и без ключа (локальный разбор)."
             ),
             error="missing_key",
         )
@@ -226,10 +395,8 @@ async def chat(
         content = (msg.get("content") or "").strip()
         if not content or role not in ("user", "model"):
             continue
-        # Gemini roles: user / model
         contents.append(types.Content(role=role, parts=[types.Part(text=content)]))
 
-    # Current user turn with fresh context
     prompt = (
         "Контекст пользователя (актуальный):\n"
         f"{format_user_context(context)}\n\n"
@@ -243,35 +410,57 @@ async def chat(
         max_output_tokens=1024,
     )
 
+    models = _fallback_models()
+    last_exc: BaseException | None = None
+
     try:
         client = _client()
-        resp = await client.aio.models.generate_content(
-            model=_model(),
-            contents=contents,
-            config=config,
-        )
-        raw = (resp.text or "").strip() if resp is not None else ""
-        if not raw:
-            return AiReply(text="Пустой ответ модели. Попробуй переформулировать вопрос.", error="empty")
-        text, proposal = _parse_action_block(raw)
-        proposal = sanitize_proposal(proposal)
-        if not text:
-            text = "Готово." if proposal else "Не понял запрос — уточни, пожалуйста."
-        return AiReply(text=text, proposal=proposal)
     except Exception as e:
-        logger.exception("Gemini chat failed")
-        err = str(e)
-        if "API_KEY" in err.upper() or "401" in err or "403" in err:
-            return AiReply(
-                text="⚠️ Ошибка ключа Gemini. Проверь <code>GEMINI_API_KEY</code> в Railway.",
-                error="auth",
-            )
-        if "429" in err or "RESOURCE_EXHAUSTED" in err.upper():
-            return AiReply(
-                text="⏳ Лимит Gemini (RPM/RPD). Подожди минуту и попробуй снова.",
-                error="rate",
-            )
-        return AiReply(
-            text=f"⚠️ Ошибка ИИ: <code>{err[:200]}</code>",
-            error="api",
-        )
+        logger.exception("Gemini client init failed")
+        return _friendly_error(e)
+
+    for idx, model_name in enumerate(models):
+        if idx > 0:
+            # brief pause before switching models after overload
+            await asyncio.sleep(1.6)
+
+        for attempt in range(2):  # initial + one retry on same model
+            if attempt == 1:
+                await asyncio.sleep(0.8)
+            try:
+                resp = await client.aio.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+                raw = (resp.text or "").strip() if resp is not None else ""
+                if not raw:
+                    logger.warning("Gemini empty response model=%s", model_name)
+                    break  # next model
+                text, proposal = _parse_action_block(raw)
+                proposal = sanitize_proposal(proposal)
+                if not text:
+                    text = "Готово." if proposal else "Не понял запрос — уточни, пожалуйста."
+                return AiReply(text=text, proposal=proposal)
+            except Exception as e:
+                last_exc = e
+                err = str(e)
+                logger.warning(
+                    "Gemini fail model=%s attempt=%s: %s",
+                    model_name,
+                    attempt,
+                    err[:300],
+                )
+                if "API_KEY" in err.upper() or "401" in err or "403" in err:
+                    return _friendly_error(e)
+                if _is_overload_error(err):
+                    if attempt == 0:
+                        continue  # retry same model after 0.8s
+                    break  # next model after 1.6s
+                # non-overload API error — try next model
+                break
+
+    if last_exc is not None:
+        logger.exception("Gemini chat failed after fallbacks")
+        return _friendly_error(last_exc)
+    return AiReply(text=_OVERLOAD_FRIENDLY, error="overload")
