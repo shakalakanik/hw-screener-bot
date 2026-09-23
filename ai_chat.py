@@ -208,7 +208,7 @@ async def chat(
     context: dict,
 ) -> AiReply:
     """Call Gemini. history: list of {role: user|model, content: str} oldest→newest."""
-    if not GEMINI_API_KEY:
+    if not _api_key():
         return AiReply(
             text=(
                 "🔑 Ключ Gemini не задан.\n\n"
