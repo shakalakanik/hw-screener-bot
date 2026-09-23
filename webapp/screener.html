@@ -406,16 +406,25 @@ progress{width:100%;height:6px;margin-top:8px}
 <div id="paneWatch" style="display:none">
 <div class="card">
   <div class="row" style="justify-content:space-between">
-    <div class="note">Отслеживаемые сохраняются в этом браузере. «Обновить» подтягивает текущие цены.</div>
+    <div class="note">Отслеживаемые сохраняются в этом браузере и делятся на крипту и акции РФ автоматически — по тому, на каком рынке был найден сигнал. «Обновить» подтягивает текущие цены по обоим рынкам сразу.</div>
     <div style="display:flex;gap:8px"><button id="refreshWatch">Обновить</button><button id="clearWatch" class="ghost">Очистить всё</button></div>
   </div>
 </div>
 <div class="card">
-  <div class="kpi" id="wkpi"></div>
+  <div class="sect"><span>Крипта</span></div>
+  <div class="kpi" id="wkpi_crypto"></div>
   <div class="scroll"><table><thead><tr>
     <th></th><th></th><th>Тикер</th><th>Добавлен</th><th>Сторона</th><th>Уровень</th><th>p</th>
     <th>Вход</th><th>Стоп</th><th>Тейк</th><th>Сейчас</th><th>Результат</th>
-  </tr></thead><tbody id="wtb"></tbody></table></div>
+  </tr></thead><tbody id="wtb_crypto"></tbody></table></div>
+</div>
+<div class="card">
+  <div class="sect"><span>Акции РФ (MOEX)</span></div>
+  <div class="kpi" id="wkpi_ru"></div>
+  <div class="scroll"><table><thead><tr>
+    <th></th><th></th><th>Тикер</th><th>Добавлен</th><th>Сторона</th><th>Уровень</th><th>p</th>
+    <th>Вход</th><th>Стоп</th><th>Тейк</th><th>Сейчас</th><th>Результат</th>
+  </tr></thead><tbody id="wtb_ru"></tbody></table></div>
 </div>
 </div>
 
@@ -1523,6 +1532,11 @@ const MOEX={
     return issBars(rows,'1h',now);
   }
 };
+async function pickCrypto(pref){
+  const order=pref==='bybit'?[Bybit]:pref==='okx'?[OKX]:[Bybit,OKX];
+  for(const ex of order){ try{ const t=await ex.tickers(); if(t.length) return {ex,tk:t}; }catch(e){} }
+  throw new Error('источник недоступен из браузера');
+}
 async function pickSource(pref){
   if(MKT==='ru'){
     let t;
@@ -1531,9 +1545,15 @@ async function pickSource(pref){
     if(t.length) return {ex:MOEX,tk:t};
     throw new Error('MOEX вернула пустой список бумаг — попробуй ещё раз');
   }
-  const order=pref==='bybit'?[Bybit]:pref==='okx'?[OKX]:[Bybit,OKX];
-  for(const ex of order){ try{ const t=await ex.tickers(); if(t.length) return {ex,tk:t}; }catch(e){} }
-  throw new Error('источник недоступен из браузера');
+  return pickCrypto(pref);
+}
+// биржа для КОНКРЕТНОЙ записи watch-листа/графика — по её собственному t.mkt
+let EX_CRYPTO=null;
+async function resolveEx(mkt){
+  if(mkt==='ru') return MOEX;
+  if(EX_CRYPTO) return EX_CRYPTO;
+  try{ const s=await pickCrypto(el('#src')?el('#src').value:'auto'); EX_CRYPTO=s.ex; return EX_CRYPTO; }
+  catch(e){ return null; }
 }
 
 
@@ -1874,7 +1894,7 @@ async function expandRow(tr,t,cols){
   const td=document.createElement('td'); td.colSpan=cols||12;
   const rr=t.o==='take'?(t.tgtR||3):(t.o==='stop'?-1:0);
   td.innerHTML=`<div class="tradeInfo">
-      <div><span>${MKT==='ru'?'бумага':'монета'}</span> <b>${t.base}</b></div>
+      <div><span>${(t.mkt||MKT)==='ru'?'бумага':'монета'}</span> <b>${t.base}</b></div>
       <div><span>сигнал</span> <b>${new Date(t.t).toLocaleString('ru-RU')}</b></div>
       <div><span>сторона</span> <b class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</b></div>
       <div><span>уровень</span> <b>${fmt(t.lv)}</b></div>
@@ -1903,9 +1923,10 @@ async function expandRow(tr,t,cols){
      </div>`;
   d.appendChild(td); tr.parentNode.insertBefore(d,tr.nextSibling);
   const tfMs={d1:86400000,h1:3600000,m5:300000};
-  if(!EX){ d.querySelectorAll('canvas').forEach(cv=>drawChart(cv,null,t,3600000)); return; }
+  const exx=await resolveEx(t.mkt||MKT);
+  if(!exx){ d.querySelectorAll('canvas').forEach(cv=>drawChart(cv,null,t,3600000)); return; }
   try{
-    const [d1,h1,m5]=await Promise.all([EX.kline(t.sym,'1d',200),EX.kline(t.sym,'1h',400),EX.m5(t.sym,300,t.t+30*300000)]);
+    const [d1,h1,m5]=await Promise.all([exx.kline(t.sym,'1d',200),exx.kline(t.sym,'1h',400),exx.m5(t.sym,300,t.t+30*300000)]);
     d.querySelectorAll('canvas').forEach(cv=>{
       const tf=cv.dataset.tf;
       const src=tf==='d1'?winAround(d1,t.t,45,12):tf==='h1'?winAround(h1,t.t,70,30):winAround(m5,t.t,80,40);
@@ -1915,15 +1936,30 @@ async function expandRow(tr,t,cols){
 }
 
 /* ===== отслеживаемые ===== */
-function watchKey(){ return MKT==='ru'?'hw_fbo_watch_ru':'hw_fbo_watch'; }
+// Общий список hw_fbo_watch_all; у каждой записи mkt из сигнала (t.mkt||MKT).
+// Разделы Крипта / MOEX — автоматически, без ручного выбора.
+function watchKey(){ return 'hw_fbo_watch_all'; }
+function migrateWatch(){
+  try{
+    if(localStorage.getItem('hw_fbo_watch_all')!=null) return;
+    const c=JSON.parse(localStorage.getItem('hw_fbo_watch')||'[]').map(x=>({...x,mkt:x.mkt||'crypto'}));
+    const r=JSON.parse(localStorage.getItem('hw_fbo_watch_ru')||'[]').map(x=>({...x,mkt:x.mkt||'ru'}));
+    localStorage.setItem('hw_fbo_watch_all',JSON.stringify(c.concat(r)));
+  }catch(e){}
+}
+migrateWatch();
 function loadWatch(){ try{return JSON.parse(localStorage.getItem(watchKey())||'[]');}catch(e){return [];} }
 function saveWatch(w){ try{localStorage.setItem(watchKey(),JSON.stringify(w));}catch(e){} }
-function isWatched(t){ return loadWatch().some(w=>w.base===t.base&&w.t===t.t); }
+function isWatched(t){
+  const m=t.mkt||MKT;
+  return loadWatch().some(w=>w.base===t.base&&w.t===t.t&&(w.mkt||'crypto')===m);
+}
 function toggleWatch(t){
   let w=loadWatch();
-  const i=w.findIndex(x=>x.base===t.base&&x.t===t.t);
+  const m=t.mkt||MKT;
+  const i=w.findIndex(x=>x.base===t.base&&x.t===t.t&&(x.mkt||'crypto')===m);
   if(i>=0) w.splice(i,1);
-  else w.push({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
+  else w.push({mkt:m,type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
                strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,added:Date.now()});
   saveWatch(w); updCounts();
 }
@@ -1961,17 +1997,17 @@ function renderScan(){
   }
   el('#resCard').style.display='';
 }
-async function renderWatch(){
-  updCounts();
-  const w=loadWatch().sort((a,b)=>b.t-a.t);
-  const tb=el('#wtb'); tb.innerHTML='';
+function renderWatchSection(mkt,tbSel,kpiSel){
+  const w=loadWatch().filter(x=>(x.mkt||'crypto')===mkt).sort((a,b)=>b.t-a.t);
+  const tb=el(tbSel); if(!tb) return;
+  tb.innerHTML='';
   let done=0,win=0;
   for(const t of w){
     const tr=document.createElement('tr'); tr.className='clickable';
     let res='<span class="muted">в работе</span>';
     if(t._res==='take'){res='<span class="take">тейк</span>';done++;win++;}
     else if(t._res==='stop'){res='<span class="stop">стоп −1R</span>';done++;}
-    else if(t._res==='be'){res=outcomeHtml('be');}          // в винрейт не входит
+    else if(t._res==='be'){res=outcomeHtml('be');}
     else if(t._now!=null){
       const r=(t.d?(t._now-t.e):(t.e-t._now))/Math.abs(t.e-t.st);
       res=`<span class="${r>=0?'take':'stop'}">${r>=0?'+':''}${r.toFixed(2)}R</span>`;
@@ -1986,28 +2022,38 @@ async function renderWatch(){
     tb.appendChild(tr);
   }
   const wr=done?win/done:0;
-  el('#wkpi').innerHTML=`<div><label>Отслеживаю</label><b>${w.length}</b></div>`+
+  const kpi=el(kpiSel); if(kpi) kpi.innerHTML=`<div><label>Отслеживаю</label><b>${w.length}</b></div>`+
     `<div><label>Завершено</label><b>${done}</b></div>`+
     `<div><label>Тейк / Стоп</label><b><span class="take">${win}</span> / <span class="stop">${done-win}</span></b></div>`+
     `<div><label>Винрейт</label><b class="${wr>=0.5?'take':'stop'}">${done?(wr*100).toFixed(0)+'%':'—'}</b></div>`;
 }
+async function renderWatch(){
+  updCounts();
+  renderWatchSection('crypto','#wtb_crypto','#wkpi_crypto');
+  renderWatchSection('ru','#wtb_ru','#wkpi_ru');
+}
 async function refreshWatch(){
   const w=loadWatch(); if(!w.length){renderWatch();return;}
-  if(!EX){ try{ const s=await pickSource(el('#src').value); EX=s.ex; }catch(e){ renderWatch(); return; } }
-  for(const t of w){
-    try{
-      const h1=await EX.kline(t.sym,'1h',400);
-      const after=h1.filter(b=>b.ts>t.t);
-      t._now=h1.length?h1[h1.length-1].c:null; t._res=null;
-      const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
-      let curStop=t.st, moved=false;
-      for(const b of after){
-        const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
-        if(hs){t._res=moved?'be':'stop';break;} if(ht){t._res='take';break;}
-        if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
-      }
-      t._beMoved=moved;
-    }catch(e){}
+  const byMkt={crypto:[],ru:[]};
+  for(const t of w) byMkt[(t.mkt||'crypto')==='ru'?'ru':'crypto'].push(t);
+  for(const mkt of ['crypto','ru']){
+    const items=byMkt[mkt]; if(!items.length) continue;
+    const ex=await resolveEx(mkt); if(!ex) continue;
+    for(const t of items){
+      try{
+        const h1=await ex.kline(t.sym,'1h',400);
+        const after=h1.filter(b=>b.ts>t.t);
+        t._now=h1.length?h1[h1.length-1].c:null; t._res=null;
+        const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
+        let curStop=t.st, moved=false;
+        for(const b of after){
+          const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
+          if(hs){t._res=moved?'be':'stop';break;} if(ht){t._res='take';break;}
+          if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
+        }
+        t._beMoved=moved;
+      }catch(e){}
+    }
   }
   saveWatch(w); renderWatch();
 }
@@ -2072,80 +2118,207 @@ function renderRegime(){
      Оставлена как справочная информация о рынке, а не как сигнал к действию.</div>`;
 }
 
-/* ===== сканирование ===== */
-el('#run').addEventListener('click',async()=>{
-  const btn=el('#run'); btn.disabled=true;
-  const prog=el('#prog'); prog.style.display=''; prog.value=0;
+
+/* ===== фоновый скан на сервере (Mini App) ===== */
+function extractSyncToken(){
+  const u = (typeof getBotSyncUrl==='function' ? getBotSyncUrl() : '')
+    || (function(){ try{ return localStorage.getItem('hw_fbo_sync_url')||localStorage.getItem('hw_bot_sync_url')||''; }catch(e){ return ''; } })();
+  if(!u) return '';
+  const m = String(u).match(/\/sync\/([A-Za-z0-9_-]+)/);
+  return m ? m[1] : '';
+}
+function isTelegramMiniApp(){
   try{
-    setStatus('подключаюсь…');
-    const {ex,tk}=await pickSource(el('#src').value); EX=ex;
-    const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
-    const noStocks=MKT==='crypto'&&el('#noStocks').checked;
-    let list=tk.filter(t=>t.turn>=minVol&&t.last>0);
-    if(noStocks) list=list.filter(t=>!isStock(t.base));
-    list=list.sort((a,b)=>b.turn-a.turn).slice(0,nInst);
-    const winH=windowHours(), need=Math.min(9100,winH+280);
-    const estMin=Math.ceil(list.length*(need/1000)*(ex.name==='OKX'?3:ex.name==='MOEX'?1.6:1)/40);
-    setStatus(`${ex.name}: ${list.length} инструментов, окно ${winH}ч — загрузка займёт примерно ${estMin} мин…`);
-    const opt={noNight:MKT==='crypto'&&el('#noNight').checked,scanBars:winH+8};
-    let raw=[],i=0,brk=0,rev=0;
-    for(const it of list){
-      i++; prog.value=i/list.length*100;
-      if(i%5===0) setStatus(`${i}/${list.length} — ${it.base} (сигналов: ${raw.length})`);
-      try{
-        const d1n=Math.min(450, Math.ceil(winH/24)+60);
-        const [d1,h1]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need)]);
-        raw=raw.concat(scanSymbol(it.base,it.sym,d1,h1,opt).map(s=>(s.mkt=MKT,s)));
-        const h1c=lastClosed(h1),d1c=lastClosed(d1);
-        if(h1c.length>60&&d1c.length>45){
-          const aD=atr(d1c), lv=aD>0?V0.buildLevels(d1c,[]):[];
-          for(const L of lv){
-            const s=V0.sideOf(L.kind);
-            for(let j=Math.max(1,h1c.length-168);j<h1c.length;j++){
-              const b=h1c[j],p=h1c[j-1];
-              if((s==='long'?b.c>L.price:b.c<L.price)&&!(s==='long'?p.c>L.price:p.c<L.price)){
-                brk++;
-                if(h1c.slice(j+1,j+13).some(x=>s==='long'?x.c<L.price:x.c>L.price)) rev++;
-              }
+    return !!(window.Telegram && window.Telegram.WebApp && (window.Telegram.WebApp.initData || window.Telegram.WebApp.initDataUnsafe));
+  }catch(e){ return false; }
+}
+function preferServerScan(){
+  // В Telegram Mini App — всегда сервер; вне TG — если есть sync-токен тоже сервер по умолчанию
+  return isTelegramMiniApp() || !!extractSyncToken();
+}
+function collectManualScanPayload(){
+  const winH = (typeof windowHours==='function') ? windowHours() : (+el('#win').value||3);
+  const tplSel = el('#sc_tpl');
+  let templateName = '';
+  if(tplSel && tplSel.value && tplSel.value.startsWith('u:')) templateName = tplSel.value.slice(2);
+  const filters = (typeof currentTplObj==='function') ? currentTplObj('sc') : {};
+  // strategy: form sc_strat OR template _strat
+  let strategy = (el('#sc_strat') && el('#sc_strat').value) || 'fbo';
+  if(filters && filters._strat) strategy = filters._strat;
+  const payload = {
+    market: (typeof MKT!=='undefined' ? MKT : 'crypto'),
+    strategy: strategy,
+    source: (el('#src') && el('#src').value) || 'auto',
+    minVol: +(el('#minVol') && el('#minVol').value) || 1,
+    nInst: +(el('#nInst') && el('#nInst').value) || 300,
+    winH: winH,
+    noNight: !!(el('#noNight') && el('#noNight').checked),
+    noStocks: !!(el('#noStocks') && el('#noStocks').checked),
+    templateName: templateName,
+    filters: filters || {},
+  };
+  return payload;
+}
+async function pollManualJob(jobId, token, onTick){
+  const base = (location.origin || '') + '/api/manual-scan/' + encodeURIComponent(jobId);
+  const headers = token ? { 'X-Sync-Token': token } : {};
+  for(let i=0;i<900;i++){ // ~30 мин при 2с
+    await new Promise(r=>setTimeout(r, 2000));
+    let res;
+    try{
+      res = await fetch(base + (token?('?token='+encodeURIComponent(token)):''), { headers });
+    }catch(e){ continue; }
+    if(!res.ok) continue;
+    const j = await res.json();
+    if(onTick) onTick(j);
+    if(j.status==='done' || j.status==='error') return j;
+  }
+  return { status:'error', error:'timeout', message:'таймаут ожидания' };
+}
+async function startServerManualScan(){
+  const token = extractSyncToken();
+  if(!token) throw new Error('нет sync-токена — открой Mini App из бота или /syncurl');
+  const payload = collectManualScanPayload();
+  payload.token = token;
+  setStatus('фоновый скан на сервере…');
+  const res = await fetch((location.origin||'') + '/api/manual-scan', {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json', 'X-Sync-Token': token },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(()=>({}));
+  if(res.status===409 && data.job_id){
+    setStatus('уже идёт фоновый скан — жду…');
+    return await pollManualJob(data.job_id, token, j=>{
+      setStatus(`фоновый скан: ${j.message||j.status} (${Math.round(j.progress||0)}%)`);
+    });
+  }
+  if(!res.ok){
+    const err = new Error(data.error || data.message || ('HTTP '+res.status));
+    err.status = res.status;
+    throw err;
+  }
+  const jobId = data.job_id;
+  setStatus('фоновый скан запущен — можно свернуть Mini App; карточки придут в Telegram');
+  return await pollManualJob(jobId, token, j=>{
+    setStatus(`фоновый скан: ${j.message||j.status} (${Math.round(j.progress||0)}%)`);
+  });
+}
+async function runLocalBrowserScan(){
+  setStatus('подключаюсь…');
+  const {ex,tk}=await pickSource(el('#src').value); EX=ex;
+  const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
+  const noStocks=MKT==='crypto'&&el('#noStocks').checked;
+  let list=tk.filter(t=>t.turn>=minVol&&t.last>0);
+  if(noStocks) list=list.filter(t=>!isStock(t.base));
+  list=list.sort((a,b)=>b.turn-a.turn).slice(0,nInst);
+  const winH=windowHours(), need=Math.min(9100,winH+280);
+  const estMin=Math.ceil(list.length*(need/1000)*(ex.name==='OKX'?3:ex.name==='MOEX'?1.6:1)/40);
+  setStatus(`${ex.name}: ${list.length} инструментов, окно ${winH}ч — загрузка займёт примерно ${estMin} мин…`);
+  const opt={noNight:MKT==='crypto'&&el('#noNight').checked,scanBars:winH+8};
+  let raw=[],i=0,brk=0,rev=0;
+  const prog=el('#prog'); if(prog){ prog.style.display=''; prog.value=0; }
+  for(const it of list){
+    i++; if(prog) prog.value=i/list.length*100;
+    if(i%5===0) setStatus(`${i}/${list.length} — ${it.base} (сигналов: ${raw.length})`);
+    try{
+      const d1n=Math.min(450, Math.ceil(winH/24)+60);
+      const [d1,h1]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need)]);
+      raw=raw.concat(scanSymbol(it.base,it.sym,d1,h1,opt).map(s=>(s.mkt=MKT,s)));
+      const h1c=lastClosed(h1),d1c=lastClosed(d1);
+      if(h1c.length>60&&d1c.length>45){
+        const aD=atr(d1c), lv=aD>0?V0.buildLevels(d1c,[]):[];
+        for(const L of lv){
+          const s=V0.sideOf(L.kind);
+          for(let j=Math.max(1,h1c.length-168);j<h1c.length;j++){
+            const b=h1c[j],p=h1c[j-1];
+            if((s==='long'?b.c>L.price:b.c<L.price)&&!(s==='long'?p.c>L.price:p.c<L.price)){
+              brk++;
+              if(h1c.slice(j+1,j+13).some(x=>s==='long'?x.c<L.price:x.c>L.price)) rev++;
             }
           }
         }
-      }catch(e){}
-      await new Promise(r=>setTimeout(r,0));
-    }
-    LAST=raw.sort((a,b)=>b.t-a.t);   // дедуп уже сделан внутри scanSymbol
-    const f=readF('sc');
-    const weekAgo=Date.now()-7*86400000;
-    const wk=applyAll(byStrat(LAST.filter(s=>s.t>=weekAgo),stratOf('sc')),f);
-    const closed=wk.filter(t=>t.o==='take'||t.o==='stop');
-    const wins=closed.filter(t=>t.o==='take').length;
-    const wr=closed.length?wins/closed.length:0, revertRate=brk?rev/brk:0;
-    let trendiness=0;
-    try{
-      const bh=lastClosed(ex.bench?await ex.bench(300):await ex.kline(ex===Bybit?'BTCUSDT':'BTC-USDT-SWAP','1h',300)).slice(-168);
-      if(bh.length>24){
-        const move=Math.abs(bh[bh.length-1].c/bh[0].c-1);
-        const avgRng=bh.reduce((a,b)=>a+(b.h-b.l)/b.c,0)/bh.length;
-        trendiness=avgRng>0?move/(avgRng*Math.sqrt(bh.length)):0;
       }
     }catch(e){}
-    const sRev=Math.max(0,Math.min(5,(revertRate-0.25)/0.35*5));
-    const sWr=closed.length>=5?Math.max(0,Math.min(3,(wr-0.25)/0.45*3)):1.5;
-    const sTr=Math.max(0,Math.min(2,(1.0-Math.min(trendiness,1.0))*2));
-    REGIME={score:sRev+sWr+sTr,revertRate,wr,closed:closed.length,signals:wk.length,trendiness};
-    renderRegime(); renderScan();
-    setStatus(`готово: ${ex.name}, ${list.length} инструментов, сырых ${raw.length}, после дедупа ${LAST.length}, показано ${el('#tb').children.length}`);
+    await new Promise(r=>setTimeout(r,0));
+  }
+  LAST=raw.sort((a,b)=>b.t-a.t);
+  const f=readF('sc');
+  const weekAgo=Date.now()-7*86400000;
+  const wk=applyAll(byStrat(LAST.filter(s=>s.t>=weekAgo),stratOf('sc')),f);
+  const closed=wk.filter(t=>t.o==='take'||t.o==='stop');
+  const wins=closed.filter(t=>t.o==='take').length;
+  const wr=closed.length?wins/closed.length:0, revertRate=brk?rev/brk:0;
+  let trendiness=0;
+  try{
+    const bh=lastClosed(ex.bench?await ex.bench(300):await ex.kline(ex===Bybit?'BTCUSDT':'BTC-USDT-SWAP','1h',300)).slice(-168);
+    if(bh.length>24){
+      const move=Math.abs(bh[bh.length-1].c/bh[0].c-1);
+      const avgRng=bh.reduce((a,b)=>a+(b.h-b.l)/b.c,0)/bh.length;
+      trendiness=avgRng>0?move/(avgRng*Math.sqrt(bh.length)):0;
+    }
+  }catch(e){}
+  const sRev=Math.max(0,Math.min(5,(revertRate-0.25)/0.35*5));
+  const sWr=closed.length>=5?Math.max(0,Math.min(3,(wr-0.25)/0.45*3)):1.5;
+  const sTr=Math.max(0,Math.min(2,(1.0-Math.min(trendiness,1.0))*2));
+  REGIME={score:sRev+sWr+sTr,revertRate,wr,closed:closed.length,signals:wk.length,trendiness};
+  renderRegime(); renderScan();
+  setStatus(`готово: ${ex.name}, ${list.length} инструментов, сырых ${raw.length}, после дедупа ${LAST.length}, показано ${el('#tb').children.length}`);
+}
+
+
+/* ===== сканирование ===== */
+el('#run').addEventListener('click',async()=>{
+  const btn=el('#run'); btn.disabled=true;
+  const prog=el('#prog'); if(prog){ prog.style.display=''; prog.value=0; }
+  try{
+    if(preferServerScan()){
+      try{
+        const j = await startServerManualScan();
+        if(j && j.status==='done'){
+          setStatus(`готово (сервер): отправлено в Telegram ${j.n_sent||0}`);
+          if(prog) prog.value=100;
+          return;
+        }
+        if(j && j.status==='error'){
+          setStatus('ошибка сервера: '+(j.error||j.message||''));
+          // fallback?
+          if(confirm('Серверный скан не удался. Запустить локальный в браузере?')){
+            await runLocalBrowserScan();
+          }
+          return;
+        }
+      }catch(e){
+        console.warn('server scan failed', e);
+        if(isTelegramMiniApp()){
+          // В TG по умолчанию сервер; предложить локальный
+          if(confirm('Не удалось запустить фоновый скан ('+e.message+'). Локальный скан в WebView?')){
+            await runLocalBrowserScan();
+          } else {
+            setStatus('ошибка: '+e.message);
+          }
+          return;
+        }
+        // вне TG без токена / с ошибкой — локальный
+        await runLocalBrowserScan();
+        return;
+      }
+    } else {
+      await runLocalBrowserScan();
+    }
   }catch(e){ setStatus('ошибка: '+e.message+' — попробуй сменить источник'); }
-  finally{ btn.disabled=false; prog.style.display='none'; }
+  finally{ btn.disabled=false; if(prog) prog.style.display='none'; }
 });
+
 
 el('#addWatch').addEventListener('click',()=>{
   const rows=window.__SCAN_ROWS__||[];
   if(!rows.length){ setStatus('нечего добавлять — сначала отсканируй'); return; }
   let w=loadWatch(), added=0;
   for(const t of rows){
-    if(w.some(x=>x.base===t.base&&x.t===t.t)) continue;
-    w.push({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
+    const m=t.mkt||MKT;
+    if(w.some(x=>x.base===t.base&&x.t===t.t&&(x.mkt||'crypto')===m)) continue;
+    w.push({mkt:m,type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
             strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,added:Date.now()});
     added++;
   }
@@ -3077,24 +3250,30 @@ el('#sc_tplsync').addEventListener('click', async () => {
 
 /* ===== загрузка отслеживаемых из Telegram-бота ===== */
 (async function loadBotWatchlist() {
-  const syncUrl = localStorage.getItem('hw_bot_sync_url') || '';
+  const syncUrl = (typeof getBotSyncUrl==='function' ? getBotSyncUrl() : '')
+    || (function(){ try{ return localStorage.getItem('hw_fbo_sync_url')||localStorage.getItem('hw_bot_sync_url')||''; }catch(e){ return ''; } })();
   if (!syncUrl) return;
-  // /sync/TOKEN → /watchlist/TOKEN
-  const wlUrl = syncUrl.replace('/sync/', '/watchlist/') + '?market=' + (localStorage.getItem('hw_fbo_mkt') || 'crypto');
+  if (typeof migrateWatch==='function') migrateWatch();
+  const wlUrl = syncUrl.replace('/sync/', '/watchlist/') + '?market=all';
   try {
     const res = await fetch(wlUrl);
     if (!res.ok) return;
     const data = await res.json();
     if (!data.ok || !data.watchlist || !data.watchlist.length) return;
-    const key = (localStorage.getItem('hw_fbo_mkt') || 'crypto') === 'ru' ? 'hw_fbo_watch_ru' : 'hw_fbo_watch';
-    let w; try { w = JSON.parse(localStorage.getItem(key) || '[]'); } catch(e) { w = []; }
+    let w = loadWatch();
     let added = 0;
     for (const item of data.watchlist) {
-      if (!w.some(x => x.base === item.base && x.t === item.t)) { w.push(item); added++; }
+      const m = item.mkt || item.market || 'crypto';
+      const row = Object.assign({}, item, { mkt: m });
+      if (!w.some(x => x.base === row.base && x.t === row.t && (x.mkt||'crypto') === m)) {
+        w.push(row); added++;
+      }
     }
     if (added > 0) {
-      try { localStorage.setItem(key, JSON.stringify(w)); } catch(e) {}
+      saveWatch(w);
       console.log('[HW Bot] загружено из бота: ' + added + ' отслеживаемых');
+      if (typeof renderWatch==='function') renderWatch();
+      if (typeof updCounts==='function') updCounts();
     }
   } catch(e) { /* бот недоступен — ок */ }
 })();
