@@ -101,6 +101,7 @@ progress{width:100%;height:6px;margin-top:8px}
         <div class="field"><label>Шаблон фильтров</label>
           <select id="sc_tpl" style="min-width:230px"><option value="">— выбрать —</option></select></div>
         <button id="sc_tplsave" class="ghost" style="padding:6px 12px">Сохранить как шаблон</button>
+        <button id="sc_tplren" class="ghost" style="padding:6px 12px">✏️ Переименовать</button>
         <button id="sc_tpldel" class="ghost" style="padding:6px 12px">Удалить шаблон</button>
         <button id="sc_tplsync" class="ghost" style="padding:6px 12px;border-color:#4caf50;color:#4caf50">📬 Синхронизировать с ботом</button>
       </div>
@@ -429,6 +430,7 @@ progress{width:100%;height:6px;margin-top:8px}
         <div class="field"><label>Шаблон фильтров</label>
           <select id="bt_tpl" style="min-width:230px"><option value="">— выбрать —</option></select></div>
         <button id="bt_tplsave" class="ghost" style="padding:6px 12px">Сохранить как шаблон</button>
+        <button id="bt_tplren" class="ghost" style="padding:6px 12px">✏️ Переименовать</button>
         <button id="bt_tpldel" class="ghost" style="padding:6px 12px">Удалить шаблон</button>
       </div>
       <div id="bt_filters">
@@ -3007,6 +3009,29 @@ for(const pfx of ['sc','bt']){
     const v=el('#'+pfx+'_tpl').value;
     if(!v.startsWith('u:')){ alert('встроенные шаблоны удалить нельзя — выбери свой'); return; }
     const u=loadTpl(); delete u[v.slice(2)]; saveTplStore(u); fillTplSelects();
+  });
+  const rn=el('#'+pfx+'_tplren');
+  if(rn) rn.addEventListener('click',()=>{
+    const v=el('#'+pfx+'_tpl').value;
+    if(!v || !v.startsWith('u:')){
+      alert('Выбери свой шаблон в списке (встроенные переименовать нельзя)');
+      return;
+    }
+    const oldName=v.slice(2);
+    const newName=(prompt('Новое имя шаблона:', oldName)||'').trim();
+    if(!newName || newName===oldName) return;
+    const u=loadTpl();
+    if(u[newName]!==undefined){ alert('Шаблон «'+newName+'» уже есть'); return; }
+    if(u[oldName]===undefined){ alert('Шаблон не найден'); return; }
+    u[newName]=u[oldName];
+    delete u[oldName];
+    saveTplStore(u);
+    fillTplSelects();
+    el('#'+pfx+'_tpl').value='u:'+newName;
+    // Если sync URL уже сохранён — тихо переотправить, чтобы имя ушло в бота
+    if(typeof pushTemplatesToBot==='function' && getBotSyncUrl()){
+      pushTemplatesToBot({ silent:true });
+    }
   });
 }
 fillTplSelects();
