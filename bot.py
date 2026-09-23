@@ -92,6 +92,14 @@ def _format_card(card: dict) -> str:
 
 
 async def send_signal(card: dict, chat_ids: list[int]):
+    # Hard cap: never deliver a card older than 12h (defense in depth).
+    signal_ts = int(card.get("signal_ts") or 0)
+    if not signal_ts or (int(time.time() * 1000) - signal_ts) > 12 * 3600 * 1000:
+        logger.info(
+            "Drop stale card %s ts=%s (age>12h)",
+            card.get("ticker"), signal_ts,
+        )
+        return
     text = _format_card(card)
     for chat_id in chat_ids:
         try:
@@ -363,14 +371,15 @@ async def cb_filter_done(call: CallbackQuery):
 # ── /scan ─────────────────────────────────────────────────────────────────────
 @dp.message(Command("scan"))
 async def cmd_scan(msg: Message):
-    await msg.answer("🔍 Запускаю скан... 1–3 минуты.")
+    await msg.answer("🔍 Запускаю скан... 1–3 минуты.\nТолько новые сигналы ≤12ч (без дампа истории).")
     try:
-        await run_scan(
+        n = await run_scan(
             on_signal=send_signal,
             subscribers=[msg.chat.id],
             chat_filters=_build_filter_for_chat,
+            incremental=True,
         )
-        await msg.answer("✅ Скан завершён.")
+        await msg.answer(f"✅ Скан завершён. Новых карточек: <b>{n}</b>.", parse_mode="HTML")
     except Exception as e:
         logger.exception("Ошибка скана")
         await msg.answer(f"❌ Ошибка: {e}")
@@ -550,11 +559,13 @@ async def scan_loop():
         if _subscribers:
             logger.info("Авто-скан для %d подписчиков", len(_subscribers))
             try:
-                await run_scan(
+                n = await run_scan(
                     on_signal=send_signal,
                     subscribers=list(_subscribers),
                     chat_filters=_build_filter_for_chat,
+                    incremental=True,
                 )
+                logger.info("Авто-скан: отправлено новых карточек=%d", n)
             except Exception:
                 logger.exception("Ошибка авто-скана")
         await asyncio.sleep(SCAN_INTERVAL)

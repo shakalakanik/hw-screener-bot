@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import time
 from typing import Callable, Awaitable
 
 import httpx
@@ -30,6 +31,14 @@ MIN_VOL_USD_24H = 1_000_000.0   # жёсткий пол — меньше не б
 # HTML post-filters: applyCoinLimit (12h) + capCluster (default 3)
 COIN_WINDOW_H = 12
 CAP_CLUSTER = 3
+
+# Жёсткий потолок возраста сигнала для любой отправки в Telegram.
+MAX_SIGNAL_AGE_H = 12
+MAX_SIGNAL_AGE_MS = MAX_SIGNAL_AGE_H * 3_600_000
+# Lookback детекции = max age (не ищем то, что всё равно не отправим).
+SCAN_LOOKBACK_H = MAX_SIGNAL_AGE_H
+# Cold-start watermark: не дампить историю — только последний час.
+COLD_WATERMARK_LOOKBACK_MS = 3_600_000
 
 # Активная биржа текущего скана: "bybit" | "okx"
 _active_exchange = "bybit"
@@ -231,7 +240,10 @@ async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
         # Порог модели для FBO — пол HTML DEF.thr=0.20 на этапе скана; более строгий thr
         # шаблона досчитывается в match_filter/_matches_single.
         # no_night=True — соответствует чекбоксу «без ночи» в HTML, включённому по умолчанию.
-        result = evaluate(symbol, last, bid, ask, d1, h4, h1, m5, vol24, fbo_threshold=0.20, no_night=True)
+        result = evaluate(
+            symbol, last, bid, ask, d1, h4, h1, m5, vol24,
+            fbo_threshold=0.20, no_night=True, lookback_hours=SCAN_LOOKBACK_H,
+        )
         return result.get("cards", [])
     except Exception as e:
         logger.debug("scan_one %s error: %s", symbol, e)
@@ -439,17 +451,48 @@ async def run_scan(
     on_signal: Callable[[dict, list[int]], Awaitable[None]],
     subscribers: list[int],
     chat_filters: Callable[[int], dict],
-):
+    incremental: bool = True,
+) -> int:
     """Один полный скан. on_signal вызывается для каждого прошедшего сигнала.
+
     Ночной фильтр (23:00–09:00 МСК) применяется ВНУТРИ hwv1.evaluate() к каждому
     часу-кандидату отдельно, как в HTML (opt.noNight) — не блокирует скан целиком.
+
+    incremental=True (autoscan и /scan): только signal_ts новее watermark + age≤12h.
+    Никогда не отправляем карточки старше MAX_SIGNAL_AGE_H часов.
+    Возвращает число отправленных карточек (вызовов on_signal).
     """
+    now_ms = int(time.time() * 1000)
+    min_ts = 0
+    if incremental:
+        wm = storage.get_send_watermark_ms()
+        if wm is None:
+            # Cold start: не дампить 12ч истории — только самый свежий час.
+            min_ts = now_ms - COLD_WATERMARK_LOOKBACK_MS
+            storage.set_send_watermark_ms(min_ts)
+            logger.info(
+                "Watermark cold-start → %d (только сигналы новее ~1ч)",
+                min_ts,
+            )
+        else:
+            min_ts = int(wm)
+        # Дополнительно: watermark не может быть древнее окна age (защита от битых значений)
+        floor = now_ms - MAX_SIGNAL_AGE_MS
+        if min_ts < floor:
+            min_ts = floor
+
     async with httpx.AsyncClient() as client:
         tickers = await fetch_tickers(client)
         ex_label = "OKX" if _active_exchange == "okx" else "Bybit"
-        logger.info("Скан: %d инструментов через %s", len(tickers), ex_label)
+        logger.info(
+            "Скан: %d инструментов через %s (age≤%dh, incremental=%s, min_ts=%s)",
+            len(tickers), ex_label, MAX_SIGNAL_AGE_H, incremental, min_ts or "-",
+        )
 
         pending: list[dict] = []
+        skipped_age = 0
+        skipped_wm = 0
+        skipped_dup = 0
 
         # Пакетами по 20, чтобы не перегружать API
         batch_size = 20
@@ -467,8 +510,20 @@ async def run_scan(
                     side = card["side"]
                     level = card["level"]
                     strategy = card.get("strategy", "brk")
+                    signal_ts = int(card.get("signal_ts") or 0)
+
+                    # Жёсткое правило: никогда не слать старше 12ч
+                    if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+                        skipped_age += 1
+                        continue
+
+                    # Incremental: только новее предыдущей отправки
+                    if incremental and signal_ts <= min_ts:
+                        skipped_wm += 1
+                        continue
 
                     if storage.is_duplicate(ticker, side, level, strategy):
+                        skipped_dup += 1
                         continue
 
                     by_template: dict[str, list[int]] = {}
@@ -493,6 +548,13 @@ async def run_scan(
                 before, len(pending), COIN_WINDOW_H, CAP_CLUSTER,
             )
 
+        logger.info(
+            "Скан фильтры: age=%d wm=%d dup=%d → pending=%d",
+            skipped_age, skipped_wm, skipped_dup, len(pending),
+        )
+
+        sent_count = 0
+        max_sent_ts = 0
         for item in pending:
             card = item["card"]
             by_template = item["by_template"]
@@ -500,10 +562,26 @@ async def run_scan(
             side = card["side"]
             level = card["level"]
             strategy = card.get("strategy", "brk")
+            signal_ts = int(card.get("signal_ts") or 0)
+            # Повторная проверка age непосредственно перед отправкой
+            if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+                continue
             sent_any = False
             for tpl_name, chat_ids in by_template.items():
                 card_out = {**card, "matched_template": tpl_name}
                 await on_signal(card_out, chat_ids)
                 sent_any = True
+                sent_count += 1
             if sent_any:
                 storage.mark_sent(ticker, side, level, strategy)
+                if signal_ts > max_sent_ts:
+                    max_sent_ts = signal_ts
+
+        if incremental:
+            # Поднимаем watermark по факту отправки и/или сдвигаем пол (now−1ч),
+            # чтобы пустые сканы не копили растущий бэклог «ещё не отправленных».
+            advance_to = max(max_sent_ts, now_ms - COLD_WATERMARK_LOOKBACK_MS)
+            new_wm = storage.bump_send_watermark_ms(advance_to)
+            logger.info("Watermark → %d (sent=%d)", new_wm, sent_count)
+
+        return sent_count

@@ -75,8 +75,55 @@ def init():
             expires  INTEGER NOT NULL,
             PRIMARY KEY (ticker, side, level, strategy)
         );
+
+        CREATE TABLE IF NOT EXISTS bot_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         """)
         _migrate(c)
+
+
+# ── Watermark: max signal_ts already sent (incremental autoscan) ──────────────
+
+_WM_KEY = "send_watermark_ms"
+
+
+def get_send_watermark_ms() -> int | None:
+    """Последний отправленный signal_ts (ms), либо None если ещё не было."""
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS bot_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        row = c.execute(
+            "SELECT value FROM bot_meta WHERE key=?", (_WM_KEY,)
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        return int(row["value"])
+    except (TypeError, ValueError):
+        return None
+
+
+def set_send_watermark_ms(ts_ms: int) -> None:
+    with _conn() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS bot_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO bot_meta(key, value) VALUES(?, ?)",
+            (_WM_KEY, str(int(ts_ms))),
+        )
+
+
+def bump_send_watermark_ms(ts_ms: int) -> int:
+    """Поднять watermark до ts_ms, если он больше текущего. Вернуть новое значение."""
+    cur = get_send_watermark_ms()
+    if cur is None or ts_ms > cur:
+        set_send_watermark_ms(ts_ms)
+        return int(ts_ms)
+    return cur
 
 
 # ── Дедупликация (правило: один сигнал на монету+уровень+стратегию раз в 12 ч) ─
@@ -93,7 +140,7 @@ def is_duplicate(ticker: str, side: str, level: float, strategy: str = "brk") ->
         return False
 
 
-def mark_sent(ticker: str, side: str, level: float, strategy: str = "brk", ttl_hours: int = 12):
+def mark_sent(ticker: str, side: str, level: float, strategy: str = "brk", ttl_hours: int = 36):
     expires = int(time.time()) + ttl_hours * 3600
     with _conn() as c:
         c.execute(
