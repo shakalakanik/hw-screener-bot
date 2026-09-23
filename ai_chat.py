@@ -16,7 +16,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
 
 # Soft limits (free tier ~10 RPM / 250 RPD — keep prompts small)
 MAX_HISTORY_TURNS = 8          # user+model pairs kept in DB (we store messages)

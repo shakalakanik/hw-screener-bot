@@ -28,7 +28,7 @@ webapp/
 | `PORT` | порт HTTP (Railway задаёт сам; по умолчанию `8080`) |
 | `ALLOW_DEBUG_WEBAPP` | `1` — разрешить `?debug_user_id=` без initData (только для отладки) |
 | `GEMINI_API_KEY` | ключ Google Gemini для ИИ-чата (`/ai`). Без ключа бот не падает — вежливо пишет, что ключ не задан |
-| `GEMINI_MODEL` | опционально, по умолчанию `gemini-2.5-flash` |
+| `GEMINI_MODEL` | опционально, по умолчанию `gemini-3.6-flash` |
 
 ## Локальный запуск
 
