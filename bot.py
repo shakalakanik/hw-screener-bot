@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from aiohttp import web
@@ -21,7 +22,7 @@ from aiogram.types import (
 from urllib.parse import quote
 
 import storage
-from screener import run_scan
+from screener import run_scan, run_manual_scan
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ _filter_tab: dict[int, str] = {}       # chat_id → "crypto" | "ru"
 
 # ── Sync-токены: chat_id → token ──────────────────────────────────────────────
 _sync_tokens: dict[str, int] = {}   # token → chat_id
+
+# Ручные фоновые сканы из Mini App: job_id → state; один активный на chat
+_manual_jobs: dict[str, dict] = {}
+_manual_job_by_chat: dict[int, str] = {}
 
 # ── Sync-токен: стабильный per chat (без hourly bucket) ───────────────────────
 def _make_token(chat_id: int) -> str:
@@ -806,7 +811,7 @@ async def cb_watch(call: CallbackQuery):
         "kind":      card.get("kind", ""),
         "prob":      card.get("prob", 0) or 0,
         "risk_pct":  risk_pct,
-        "signal_ts": int(time.time() * 1000),
+        "signal_ts": int(card.get("signal_ts") or time.time() * 1000),
     }
     watch_id = storage.add_to_watchlist(chat_id, item)
 
@@ -848,7 +853,8 @@ async def handle_watchlist(request: web.Request) -> web.Response:
     chat_id = _resolve_sync_chat(token)
     if not chat_id:
         return web.json_response({"error": "invalid or expired token"}, status=401)
-    market  = request.rel_url.query.get("market", "crypto")
+    # Mini App split-watch: market=all → оба раздела; иначе фильтр
+    market  = request.rel_url.query.get("market", "all")
     items   = storage.get_watchlist(chat_id, market)
     return web.json_response({"ok": True, "watchlist": items})
 
@@ -890,6 +896,202 @@ async def handle_sync(request: web.Request) -> web.Response:
 
     return web.json_response({"ok": True, "count": len(names)})
 
+
+
+
+# ── Manual scan API (Mini App «Сканировать» → сервер) ─────────────────────────
+def _extract_sync_token(request: web.Request, body: dict | None = None) -> str:
+    """Токен: X-Sync-Token | ?token= | body.token | Authorization Bearer."""
+    h = request.headers.get("X-Sync-Token") or request.headers.get("x-sync-token") or ""
+    if h.strip():
+        return h.strip()
+    q = request.rel_url.query.get("token") or ""
+    if q.strip():
+        return q.strip()
+    auth = request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    if body and isinstance(body.get("token"), str):
+        return body["token"].strip()
+    return ""
+
+
+def _manual_job_snapshot(job: dict) -> dict:
+    out = {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "progress": job.get("progress", 0),
+        "message": job.get("message", ""),
+        "n_sent": job.get("n_sent", 0),
+    }
+    if job.get("error"):
+        out["error"] = job["error"]
+    return out
+
+
+async def handle_manual_scan_post(request: web.Request) -> web.Response:
+    """POST /api/manual-scan — старт фонового скана с params HTML + filters."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    token = _extract_sync_token(request, body)
+    chat_id = _resolve_sync_chat(token) if token else None
+    if not chat_id:
+        return web.json_response({"error": "unauthorized"}, status=401)
+
+    # Один активный manual job на чат
+    existing_id = _manual_job_by_chat.get(chat_id)
+    if existing_id:
+        existing = _manual_jobs.get(existing_id)
+        if existing and existing.get("status") in ("queued", "running"):
+            return web.json_response(
+                {
+                    "error": "busy",
+                    "message": "уже идёт ручной скан",
+                    "job_id": existing_id,
+                    **{k: existing.get(k) for k in ("status", "progress", "message", "n_sent")},
+                },
+                status=409,
+            )
+
+    market = body.get("market") or "crypto"
+    if market not in ("crypto", "ru"):
+        market = "crypto"
+    strategy = body.get("strategy") or body.get("sc_strat") or "fbo"
+    if strategy not in ("fbo", "brk", "both"):
+        strategy = "fbo"
+    source = (body.get("source") or "auto").strip().lower()
+    if source not in ("auto", "bybit", "okx"):
+        source = "auto"
+
+    def _num(key, default):
+        v = body.get(key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+
+    # HTML: minVol в млн ($ или ₽) → абсолютные единицы * 1e6
+    min_vol_raw = body.get("minVol", body.get("min_vol", 1))
+    try:
+        min_vol_m = float(min_vol_raw)
+    except (TypeError, ValueError):
+        min_vol_m = 1.0
+    # Если уже передали абсолют (>1e5) — не умножаем
+    min_vol = min_vol_m if min_vol_m >= 100_000 else min_vol_m * 1_000_000.0
+
+    n_inst = int(_num("nInst", body.get("n_inst", 300)) or 300)
+    win_h = int(_num("winH", body.get("win_h", body.get("windowHours", 12))) or 12)
+    no_night = bool(body.get("noNight", body.get("no_night", True)))
+    no_stocks = bool(body.get("noStocks", body.get("no_stocks", True)))
+    template_name = str(body.get("templateName") or body.get("template_name") or "").strip()
+    filters = body.get("filters")
+    if filters is not None and not isinstance(filters, dict):
+        return web.json_response({"error": "filters must be object"}, status=400)
+    filters = filters or {}
+
+    job_id = uuid.uuid4().hex[:16]
+    job = {
+        "job_id": job_id,
+        "chat_id": chat_id,
+        "status": "queued",
+        "progress": 0,
+        "message": "в очереди",
+        "n_sent": 0,
+        "error": None,
+        "created_at": time.time(),
+    }
+    _manual_jobs[job_id] = job
+    _manual_job_by_chat[chat_id] = job_id
+
+    async def _on_progress(info: dict):
+        job["progress"] = float(info.get("progress") or job["progress"])
+        job["message"] = str(info.get("message") or job["message"])
+        if "n_sent" in info:
+            job["n_sent"] = int(info["n_sent"])
+
+    async def _runner():
+        job["status"] = "running"
+        job["message"] = "сканирование…"
+        try:
+            # Уведомить в Telegram о старте
+            try:
+                await bot.send_message(
+                    chat_id,
+                    (
+                        "🔍 Фоновый скан Mini App…\n"
+                        f"Рынок: <b>{'🇷🇺 MOEX' if market == 'ru' else '🌐 crypto'}</b>, "
+                        f"стратегия: <b>{strategy}</b>, окно: <b>{win_h}ч</b> "
+                        "(карточки ≤12ч).\n"
+                        f"Шаблон: <b>{template_name or 'текущие фильтры'}</b>"
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning("manual-scan notify start %s: %s", chat_id, e)
+
+            n = await run_manual_scan(
+                on_signal=send_signal,
+                chat_id=chat_id,
+                market=market,
+                strategy=strategy,
+                source=source,
+                min_vol=min_vol,
+                n_inst=n_inst,
+                win_h=win_h,
+                no_night=no_night,
+                no_stocks=no_stocks,
+                template_name=template_name,
+                filters=filters,
+                on_progress=_on_progress,
+            )
+            job["n_sent"] = n
+            job["status"] = "done"
+            job["progress"] = 100
+            job["message"] = f"готово, отправлено {n}"
+            try:
+                await bot.send_message(
+                    chat_id,
+                    f"✅ Фоновый скан завершён. Карточек: <b>{n}</b>.",
+                    parse_mode="HTML",
+                )
+            except Exception as e:
+                logger.warning("manual-scan notify done %s: %s", chat_id, e)
+        except Exception as e:
+            logger.exception("manual-scan failed chat=%s", chat_id)
+            job["status"] = "error"
+            job["error"] = str(e)
+            job["message"] = f"ошибка: {e}"
+            try:
+                await bot.send_message(chat_id, f"❌ Фоновый скан: {e}")
+            except Exception:
+                pass
+        finally:
+            # освободить слот чата, если это всё ещё наш job
+            if _manual_job_by_chat.get(chat_id) == job_id:
+                _manual_job_by_chat.pop(chat_id, None)
+
+    asyncio.create_task(_runner())
+    return web.json_response({"ok": True, **_manual_job_snapshot(job)}, status=202)
+
+
+async def handle_manual_scan_get(request: web.Request) -> web.Response:
+    """GET /api/manual-scan/{job_id} — статус джоба."""
+    job_id = request.match_info.get("job_id", "")
+    job = _manual_jobs.get(job_id)
+    if not job:
+        return web.json_response({"error": "not found"}, status=404)
+    # Опционально проверить токен — чтобы чужой job_id не светить
+    token = _extract_sync_token(request)
+    if token:
+        chat_id = _resolve_sync_chat(token)
+        if chat_id and chat_id != job.get("chat_id"):
+            return web.json_response({"error": "forbidden"}, status=403)
+    return web.json_response(_manual_job_snapshot(job))
 
 
 async def handle_index(request: web.Request) -> web.Response:
@@ -945,6 +1147,8 @@ async def main():
     app = web.Application()
     app.router.add_post("/sync/{token}", handle_sync)
     app.router.add_get("/watchlist/{token}", handle_watchlist)
+    app.router.add_post("/api/manual-scan", handle_manual_scan_post)
+    app.router.add_get("/api/manual-scan/{job_id}", handle_manual_scan_get)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/", handle_index)
     app.router.add_get("/app", handle_index)

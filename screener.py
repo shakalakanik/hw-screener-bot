@@ -83,8 +83,14 @@ def _okx_inst_to_symbol(inst_id: str) -> str:
     return inst_id.replace("-SWAP", "").replace("-", "")
 
 
-async def fetch_tickers_bybit(client: httpx.AsyncClient) -> list[dict]:
+async def fetch_tickers_bybit(
+    client: httpx.AsyncClient,
+    min_vol: float | None = None,
+    top_n: int | None = None,
+) -> list[dict]:
     """Топ-N USDT-perp Bybit по обороту за сутки."""
+    floor = MIN_VOL_USD_24H if min_vol is None else float(min_vol)
+    n = TOP_N if top_n is None else max(1, int(top_n))
     data = await _get_bybit(client, "/v5/market/tickers", {"category": "linear"})
     items = data.get("result", {}).get("list", [])
     usdt = [
@@ -99,14 +105,20 @@ async def fetch_tickers_bybit(client: httpx.AsyncClient) -> list[dict]:
         }
         for t in items
         if t["symbol"].endswith("USDT")
-        and float(t.get("turnover24h", 0) or 0) >= MIN_VOL_USD_24H
+        and float(t.get("turnover24h", 0) or 0) >= floor
     ]
     usdt.sort(key=lambda t: t["turnover24h"], reverse=True)
-    return usdt[:TOP_N]
+    return usdt[:n]
 
 
-async def fetch_tickers_okx(client: httpx.AsyncClient) -> list[dict]:
+async def fetch_tickers_okx(
+    client: httpx.AsyncClient,
+    min_vol: float | None = None,
+    top_n: int | None = None,
+) -> list[dict]:
     """Топ-N USDT-SWAP OKX. Оборот: volCcy24h * last (как HTML OKX.tickers)."""
+    floor = MIN_VOL_USD_24H if min_vol is None else float(min_vol)
+    n = TOP_N if top_n is None else max(1, int(top_n))
     data = await _get_okx(
         client, "/api/v5/market/tickers", {"instType": "SWAP"}
     )
@@ -119,7 +131,7 @@ async def fetch_tickers_okx(client: httpx.AsyncClient) -> list[dict]:
         last = float(t.get("last") or 0)
         # HTML: turn = volCcy24h * last (volCcy24h ≈ base currency volume)
         turn = float(t.get("volCcy24h") or 0) * last
-        if turn < MIN_VOL_USD_24H:
+        if turn < floor:
             continue
         out.append({
             "symbol": _okx_inst_to_symbol(inst),  # BTCUSDT для evaluate/карточек
@@ -131,25 +143,32 @@ async def fetch_tickers_okx(client: httpx.AsyncClient) -> list[dict]:
             "exchange": "okx",
         })
     out.sort(key=lambda t: t["turnover24h"], reverse=True)
-    return out[:TOP_N]
+    return out[:n]
 
 
-async def fetch_tickers(client: httpx.AsyncClient) -> list[dict]:
-    """Выбрать источник по DATA_SOURCE; в auto — Bybit, при 403/CloudFront → OKX."""
+async def fetch_tickers(
+    client: httpx.AsyncClient,
+    source: str | None = None,
+    min_vol: float | None = None,
+    top_n: int | None = None,
+) -> list[dict]:
+    """Выбрать источник по DATA_SOURCE (или source); в auto — Bybit, при 403 → OKX."""
     global _active_exchange
-    pref = DATA_SOURCE
+    pref = (source or DATA_SOURCE or "auto").strip().lower()
+    if pref not in ("auto", "bybit", "okx"):
+        pref = "auto"
 
     if pref == "okx":
         _active_exchange = "okx"
-        return await fetch_tickers_okx(client)
+        return await fetch_tickers_okx(client, min_vol=min_vol, top_n=top_n)
 
     if pref == "bybit":
         _active_exchange = "bybit"
-        return await fetch_tickers_bybit(client)
+        return await fetch_tickers_bybit(client, min_vol=min_vol, top_n=top_n)
 
     # auto: Bybit → OKX (HTML pickSource)
     try:
-        tickers = await fetch_tickers_bybit(client)
+        tickers = await fetch_tickers_bybit(client, min_vol=min_vol, top_n=top_n)
         if tickers:
             _active_exchange = "bybit"
             return tickers
@@ -160,7 +179,7 @@ async def fetch_tickers(client: httpx.AsyncClient) -> list[dict]:
         logger.warning("Bybit tickers error (%s) — пробую OKX", e)
 
     _active_exchange = "okx"
-    return await fetch_tickers_okx(client)
+    return await fetch_tickers_okx(client, min_vol=min_vol, top_n=top_n)
 
 
 async def fetch_klines_bybit(
@@ -225,10 +244,17 @@ async def fetch_klines(
     return await fetch_klines_bybit(client, symbol, interval, limit)
 
 
-async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
+async def scan_one(
+    client: httpx.AsyncClient,
+    ticker: dict,
+    *,
+    lookback_hours: int | None = None,
+    no_night: bool = True,
+) -> list[dict]:
     """Проверить один инструмент, вернуть список карточек (может быть пустым)."""
     symbol = ticker["symbol"]
     inst_id = ticker.get("inst_id") or symbol
+    lb = SCAN_LOOKBACK_H if lookback_hours is None else max(1, int(lookback_hours))
 
     try:
         last = float(ticker.get("lastPrice", 0))
@@ -245,10 +271,10 @@ async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
 
         # Порог модели для FBO — пол HTML DEF.thr=0.20 на этапе скана; более строгий thr
         # шаблона досчитывается в match_filter/_matches_single.
-        # no_night=True — соответствует чекбоксу «без ночи» в HTML, включённому по умолчанию.
+        # no_night — чекбокс «без ночи» в HTML (по умолчанию включён).
         result = evaluate(
             symbol, last, bid, ask, d1, h4, h1, m5, vol24,
-            fbo_threshold=0.20, no_night=True, lookback_hours=SCAN_LOOKBACK_H,
+            fbo_threshold=0.20, no_night=bool(no_night), lookback_hours=lb,
         )
         return result.get("cards", [])
     except Exception as e:
@@ -608,6 +634,9 @@ async def run_scan(
         skipped_age, skipped_wm, skipped_dup, len(pending),
     )
 
+    # Отправка: сначала самые старые (дальние), потом новые — по signal_ts.
+    pending.sort(key=lambda it: int(it["card"].get("signal_ts") or 0))
+
     sent_count = 0
     max_sent_ts = 0
     for item in pending:
@@ -620,6 +649,9 @@ async def run_scan(
         signal_ts = int(card.get("signal_ts") or 0)
         # Повторная проверка age непосредственно перед отправкой
         if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+            continue
+        # Дедуп ещё раз перед отправкой (гонка с параллельным сканом)
+        if storage.is_duplicate(ticker, side, level, strategy):
             continue
         sent_any = False
         for tpl_name, chat_ids in by_template.items():
@@ -639,4 +671,231 @@ async def run_scan(
         new_wm = storage.bump_send_watermark_ms(advance_to)
         logger.info("Watermark → %d (sent=%d)", new_wm, sent_count)
 
+    return sent_count
+
+
+# HTML noStocks — американские акции/ETF на крипто-биржах (как isStock в HTML)
+_STOCK_BASES = frozenset(
+    "QQQ SPY SPX IWM DIA GLD SLV USO ARKK TQQQ SQQQ SOXL SOXS TSLA AAPL NVDA MSFT META "
+    "AMZN GOOGL GOOG COIN HOOD MSTR CRCL ORCL AMD NFLX BMNR SPCX SKHYNIX DRAM PLTR AVGO "
+    "INTC BABA NIO GME AMC UNH JPM V MA DIS BA WMT XOM CVX PFE KO PEP MCD NKE SBUX CRM "
+    "ADBE CSCO QCOM TXN MU SMCI ARM DELL UBER ABNB SQ PYPL SHOP SNOW NET DDOG CRWD RBLX "
+    "DKNG F GM T VZ".split()
+)
+_STOCK_PREFIXES = ("NCCO", "NCSI", "CSOP")
+
+
+def _is_stock_base(symbol: str) -> bool:
+    base = (symbol or "").upper()
+    if base.endswith("USDT"):
+        base = base[:-4]
+    if base in _STOCK_BASES:
+        return True
+    return any(base.startswith(p) for p in _STOCK_PREFIXES)
+
+
+async def run_manual_scan(
+    on_signal: Callable[[dict, list[int]], Awaitable[None]],
+    chat_id: int,
+    *,
+    market: str = "crypto",
+    strategy: str = "fbo",
+    source: str = "auto",
+    min_vol: float = MIN_VOL_USD_24H,
+    n_inst: int = TOP_N,
+    win_h: int = SCAN_LOOKBACK_H,
+    no_night: bool = True,
+    no_stocks: bool = True,
+    template_name: str = "",
+    filters: dict | None = None,
+    on_progress: Callable[[dict], Awaitable[None]] | None = None,
+) -> int:
+    """Ручной скан из Mini App: параметры формы HTML + выбранный шаблон.
+
+    Не Playwright — серверный Python зеркалит params/filters/strategy HTML.
+    incremental=False (без watermark), но дедуп mark_sent соблюдается.
+    Жёсткий age ≤12ч; lookback детекции = min(winH, 12).
+    Отправка: oldest → newest по signal_ts.
+    """
+    market = "ru" if market == "ru" else "crypto"
+    strategy = strategy if strategy in ("fbo", "brk", "both") else "fbo"
+    filters = dict(filters or {})
+    tpl_name = (template_name or "").strip() or "manual"
+    # Lookback детекции не больше окна отправки (старше 12ч всё равно отбросим)
+    lookback = max(1, min(int(win_h or SCAN_LOOKBACK_H), MAX_SIGNAL_AGE_H))
+    n_inst = max(1, min(int(n_inst or TOP_N), 600))
+    min_vol = float(min_vol if min_vol is not None else MIN_VOL_USD_24H)
+    # noNight только для crypto (как HTML fldNight)
+    use_no_night = bool(no_night) if market == "crypto" else False
+    use_no_stocks = bool(no_stocks) if market == "crypto" else False
+
+    chat_filter = {
+        "markets": [market],
+        "_multi": [{
+            "_name": tpl_name,
+            "_market": market,
+            "_strategy": strategy,
+            "filters": filters,
+        }],
+    }
+
+    async def _progress(pct: float, message: str, **extra):
+        if on_progress:
+            payload = {"progress": round(pct, 1), "message": message, **extra}
+            try:
+                await on_progress(payload)
+            except Exception:
+                pass
+
+    now_ms = int(time.time() * 1000)
+    pending: list[dict] = []
+    skipped_age = 0
+    skipped_dup = 0
+
+    async def _ingest(cards_list):
+        nonlocal skipped_age, skipped_dup
+        for cards in cards_list:
+            if isinstance(cards, Exception):
+                continue
+            for card in cards:
+                card["market"] = market
+                ticker = card["ticker"]
+                side = card["side"]
+                level = card["level"]
+                strat = card.get("strategy", "brk")
+                signal_ts = int(card.get("signal_ts") or 0)
+
+                if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+                    skipped_age += 1
+                    continue
+                # Уже отправленные — не повторяем (ручной скан тоже уважает дедуп)
+                if storage.is_duplicate(ticker, side, level, strat):
+                    skipped_dup += 1
+                    continue
+
+                matched = match_filter(card, chat_filter)
+                if matched is None:
+                    continue
+                pending.append({
+                    "card": card,
+                    "by_template": {matched: [chat_id]},
+                })
+
+    await _progress(1, "загрузка тикеров…")
+
+    if market == "crypto":
+        async with httpx.AsyncClient() as client:
+            tickers = await fetch_tickers(
+                client, source=source, min_vol=min_vol, top_n=n_inst,
+            )
+            if use_no_stocks:
+                tickers = [t for t in tickers if not _is_stock_base(t.get("symbol", ""))]
+            tickers = tickers[:n_inst]
+            ex_label = "OKX" if _active_exchange == "okx" else "Bybit"
+            logger.info(
+                "Manual scan crypto chat=%s: %d via %s lookback=%dh age≤%dh strat=%s tpl=%s",
+                chat_id, len(tickers), ex_label, lookback, MAX_SIGNAL_AGE_H, strategy, tpl_name,
+            )
+            await _progress(5, f"{ex_label}: {len(tickers)} инструментов…")
+            batch_size = 20
+            total = max(1, len(tickers))
+            for i in range(0, len(tickers), batch_size):
+                batch = tickers[i: i + batch_size]
+                results = await asyncio.gather(
+                    *[
+                        scan_one(
+                            client, t,
+                            lookback_hours=lookback,
+                            no_night=use_no_night,
+                        )
+                        for t in batch
+                    ],
+                    return_exceptions=True,
+                )
+                await _ingest(results)
+                done = min(i + batch_size, total)
+                await _progress(
+                    5 + 85 * done / total,
+                    f"{done}/{total} — сигналов: {len(pending)}",
+                    n_pending=len(pending),
+                )
+                await asyncio.sleep(0.3)
+    else:
+        from moex import fetch_tickers_moex as _fetch_moex
+        async with moex_client() as client:
+            try:
+                tickers_ru = await _fetch_moex(client, min_turn=min_vol, top_n=n_inst)
+            except TypeError:
+                # старая сигнатура без kwargs
+                tickers_ru = await fetch_tickers_moex(client)
+                tickers_ru = [t for t in tickers_ru if t.get("turnover24h", 0) >= min_vol][:n_inst]
+            except Exception as e:
+                logger.warning("MOEX tickers failed (manual): %s", e)
+                tickers_ru = []
+            logger.info(
+                "Manual scan MOEX chat=%s: %d lookback=%dh min_turn≥%.0f",
+                chat_id, len(tickers_ru), lookback, min_vol,
+            )
+            await _progress(5, f"MOEX: {len(tickers_ru)} бумаг…")
+            batch_size = 6
+            total = max(1, len(tickers_ru))
+            for i in range(0, len(tickers_ru), batch_size):
+                batch = tickers_ru[i: i + batch_size]
+                results = await asyncio.gather(
+                    *[
+                        scan_one_moex(
+                            client, t,
+                            lookback_hours=lookback,
+                            no_night=use_no_night,
+                        )
+                        for t in batch
+                    ],
+                    return_exceptions=True,
+                )
+                await _ingest(results)
+                done = min(i + batch_size, total)
+                await _progress(
+                    5 + 85 * done / total,
+                    f"{done}/{total} — сигналов: {len(pending)}",
+                    n_pending=len(pending),
+                )
+                await asyncio.sleep(0.5)
+
+    before = len(pending)
+    pending = _apply_coin_limit(pending)
+    pending = _cap_cluster(pending)
+    if len(pending) != before:
+        logger.info("Manual post-filters: %d → %d", before, len(pending))
+
+    logger.info(
+        "Manual scan filters: age=%d dup=%d → pending=%d",
+        skipped_age, skipped_dup, len(pending),
+    )
+
+    pending.sort(key=lambda it: int(it["card"].get("signal_ts") or 0))
+    await _progress(92, f"отправка {len(pending)} карточек…", n_pending=len(pending))
+
+    sent_count = 0
+    for item in pending:
+        card = item["card"]
+        by_template = item["by_template"]
+        ticker = card["ticker"]
+        side = card["side"]
+        level = card["level"]
+        strat = card.get("strategy", "brk")
+        signal_ts = int(card.get("signal_ts") or 0)
+        if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+            continue
+        if storage.is_duplicate(ticker, side, level, strat):
+            continue
+        sent_any = False
+        for name, chat_ids in by_template.items():
+            card_out = {**card, "matched_template": name}
+            await on_signal(card_out, chat_ids)
+            sent_any = True
+            sent_count += 1
+        if sent_any:
+            storage.mark_sent(ticker, side, level, strat)
+
+    await _progress(100, f"готово, отправлено {sent_count}", n_sent=sent_count)
     return sent_count

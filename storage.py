@@ -288,19 +288,39 @@ def add_to_watchlist(chat_id: int, item: dict) -> int:
 
 
 def get_watchlist(chat_id: int, market: str = "crypto") -> list[dict]:
-    """Получить watchlist пользователя в формате совместимом с HTML."""
+    """Получить watchlist пользователя в формате совместимом с HTML.
+
+    market: 'crypto' | 'ru' | 'all' (оба рынка). Каждая запись содержит mkt/market.
+    """
     with _conn() as c:
         _ensure_watchlist(c)
-        rows = c.execute(
-            "SELECT * FROM watchlist WHERE chat_id=? AND market=? ORDER BY added_ts DESC LIMIT 200",
-            (chat_id, market),
-        ).fetchall()
+        if market in ("all", "*", ""):
+            rows = c.execute(
+                "SELECT * FROM watchlist WHERE chat_id=? ORDER BY added_ts DESC LIMIT 400",
+                (chat_id,),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM watchlist WHERE chat_id=? AND market=? ORDER BY added_ts DESC LIMIT 200",
+                (chat_id, market),
+            ).fetchall()
     result = []
     for r in rows:
+        mkt = r["market"] or "crypto"
+        ticker = r["ticker"]
+        # crypto: BTCUSDT; ru: тикер бумаги как есть
+        if mkt == "ru":
+            base = ticker
+            sym = ticker
+        else:
+            base = ticker[:-4] if ticker.endswith("USDT") else ticker
+            sym = ticker if ticker.endswith("USDT") else (ticker + "USDT")
         result.append({
             "type": r["strategy"],   # 'brk' | 'fbo' — реальная стратегия сигнала, как в HTML
-            "base": r["ticker"],
-            "sym": r["ticker"] + "USDT",
+            "mkt": mkt,
+            "market": mkt,
+            "base": base,
+            "sym": sym,
             "t": r["signal_ts"],
             "d": r["side"],
             "side": "LONG" if r["side"] else "SHORT",

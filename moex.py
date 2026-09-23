@@ -149,8 +149,14 @@ def _h1_to_h4(h1: list[Bar]) -> list[Bar]:
     return out
 
 
-async def fetch_tickers_moex(client: httpx.AsyncClient) -> list[dict]:
+async def fetch_tickers_moex(
+    client: httpx.AsyncClient,
+    min_turn: float | None = None,
+    top_n: int | None = None,
+) -> list[dict]:
     """TQBR EQIN: turn=max(VALTODAY, prev VALUE), last. Shape как crypto tickers."""
+    floor = MOEX_MIN_TURN if min_turn is None else float(min_turn)
+    limit_n = MOEX_TOP_N if top_n is None else max(1, int(top_n))
     u = (
         f"{ISS}/engines/stock/markets/shares/boards/TQBR/securities.json"
         f"?iss.meta=off&iss.only=securities,marketdata"
@@ -191,7 +197,7 @@ async def fetch_tickers_moex(client: httpx.AsyncClient) -> list[dict]:
             continue
         turn = max(float(r[1] or 0), prev.get(sym, 0.0))
         last = float(r[2] or 0) or px.get(sym, 0.0)
-        if turn < MOEX_MIN_TURN or last <= 0:
+        if turn < floor or last <= 0:
             continue
         out.append({
             "symbol": sym,
@@ -204,7 +210,7 @@ async def fetch_tickers_moex(client: httpx.AsyncClient) -> list[dict]:
             "market": "ru",
         })
     out.sort(key=lambda t: t["turnover24h"], reverse=True)
-    return out[:MOEX_TOP_N]
+    return out[:limit_n]
 
 
 async def fetch_klines_moex_d1(
@@ -256,6 +262,7 @@ async def scan_one_moex(
     client: httpx.AsyncClient,
     ticker: dict,
     lookback_hours: int = 12,
+    no_night: bool = True,
 ) -> list[dict]:
     """Скан одной бумаги MOEX → карточки с market=ru."""
     from hwv1 import evaluate
@@ -278,7 +285,7 @@ async def scan_one_moex(
         # vol в ₽; PARAMS.vol_usd_min=1e6 — при MOEX_MIN_TURN≥1e6 уже отфильтровано.
         result = evaluate(
             symbol, last, bid, ask, d1, h4, h1, m5, vol24,
-            fbo_threshold=0.20, no_night=True, lookback_hours=lookback_hours,
+            fbo_threshold=0.20, no_night=bool(no_night), lookback_hours=lookback_hours,
         )
         cards = result.get("cards", [])
         for c in cards:
