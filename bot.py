@@ -13,6 +13,7 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.dispatcher.event.bases import SkipHandler
+from aiogram.enums import ChatAction
 from aiogram.types import (
     Message, CallbackQuery,
     BotCommand, KeyboardButton,
@@ -22,6 +23,7 @@ from aiogram.types import (
 from urllib.parse import quote
 
 import storage
+import ai_chat
 from screener import run_scan, run_manual_scan
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -89,9 +91,12 @@ def _app_url_with_sync(chat_id: int) -> str | None:
 
 def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
     """Клавиатура; «Обновить шаблоны» — WebApp с sync URL, если PUBLIC_URL задан."""
+    ai_on = bool(chat_id) and storage.get_ai_enabled(chat_id)
+    ai_btn = "🤖 ИИ ✓" if ai_on else "🤖 ИИ"
     rows = [
         [KeyboardButton(text="📡 Скан"), KeyboardButton(text="⚙️ Фильтр")],
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔗 Sync")],
+        [KeyboardButton(text=ai_btn)],
     ]
     app_url = _app_url_with_sync(chat_id) if chat_id else None
     if app_url:
@@ -198,6 +203,7 @@ async def cmd_start(msg: Message):
         "🔄 Обновить шаблоны — Mini App без повторного URL\n"
         "/scan — запустить скан сейчас\n"
         "/status — текущие настройки\n"
+        "/ai — ИИ-помощник (настройки и сигналы)\n"
         "/stop — остановить сигналы",
         parse_mode="HTML",
         reply_markup=main_keyboard(msg.chat.id),
@@ -615,38 +621,310 @@ async def cb_rename(call: CallbackQuery):
 @dp.message(Command("cancel"))
 async def cmd_cancel(msg: Message):
     chat_id = msg.chat.id
+    cleared = False
     if chat_id in _pending_rename:
         _pending_rename.pop(chat_id, None)
+        cleared = True
         await msg.answer("Отменено.")
         await _send_filter_menu(chat_id, market=_filter_tab.get(chat_id))
-    else:
+    if storage.get_ai_pending(chat_id):
+        storage.clear_ai_pending(chat_id)
+        cleared = True
+        await msg.answer("Предложение ИИ отменено.")
+    if not cleared:
         await msg.answer("Нечего отменять.")
 
 
-@dp.message(F.text & ~F.text.startswith("/"))
-async def on_rename_text(msg: Message):
-    """Перехват следующего сообщения после ✏️ — только если ждём rename."""
+
+# ── ИИ (Gemini) ───────────────────────────────────────────────────────────────
+
+_AI_YES = {"да", "да.", "yes", "y", "ок", "ok", "✅", "применить"}
+_AI_NO = {"нет", "нет.", "no", "n", "отмена", "cancel", "❌"}
+
+
+def _ai_user_context(chat_id: int) -> dict:
+    cfg = storage.get_active_config(chat_id)
+    return {
+        "subscribed": chat_id in _subscribers,
+        "ai_enabled": storage.get_ai_enabled(chat_id),
+        "scan_interval_min": SCAN_INTERVAL // 60,
+        "markets": list(cfg.get("markets") or []),
+        "names_by_market": cfg.get("names_by_market") or {"crypto": [], "ru": []},
+        "templates": storage.get_html_templates(chat_id),
+        "strategy_overrides": storage.get_template_strategy_overrides(chat_id),
+    }
+
+
+def _format_proposal(proposal: dict) -> str:
+    action = proposal.get("action")
+    p = proposal.get("params") or {}
+    summary = proposal.get("summary") or action
+    if action == "set_market":
+        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        st = "включить" if p.get("enabled") else "выключить"
+        return f"{st} рынок <b>{m}</b>"
+    if action == "set_strategy":
+        return f"стратегия шаблона <b>{p.get('template')}</b> → <code>{p.get('strategy')}</code>"
+    if action == "set_templates":
+        names = ", ".join(p.get("names") or []) or "—"
+        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        return f"активные шаблоны ({m}): <b>{names}</b>"
+    if action == "add_templates":
+        names = ", ".join(p.get("names") or []) or "—"
+        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        return f"добавить шаблоны ({m}): <b>{names}</b>"
+    if action == "remove_templates":
+        names = ", ".join(p.get("names") or []) or "—"
+        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        return f"убрать шаблоны ({m}): <b>{names}</b>"
+    if action == "subscribe":
+        return "включить подписку на сигналы (/start)"
+    if action == "unsubscribe":
+        return "остановить сигналы (/stop)"
+    return summary
+
+
+def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
+    """Применить подтверждённое предложение. Возвращает текст результата."""
+    action = proposal.get("action")
+    p = proposal.get("params") or {}
+    if action == "set_market":
+        storage.set_market_enabled(chat_id, p["market"], bool(p.get("enabled")))
+        return "Рынок обновлён."
+    if action == "set_strategy":
+        name = p.get("template") or ""
+        tpls = storage.get_html_templates(chat_id)
+        if name not in tpls:
+            # prefix match like filter callbacks
+            full = next((k for k in tpls if k == name or k.startswith(name) or name.startswith(k[:40])), None)
+            if not full:
+                return f"Шаблон «{name}» не найден — ничего не менял."
+            name = full
+        storage.set_template_strategy(chat_id, name, p["strategy"])
+        return f"Стратегия «{name}» → {p['strategy']}."
+    if action in ("set_templates", "add_templates", "remove_templates"):
+        market = p.get("market")
+        names = list(p.get("names") or [])
+        tpls = storage.get_html_templates(chat_id)
+        resolved = []
+        for n in names:
+            if n in tpls:
+                resolved.append(n)
+            else:
+                full = next((k for k in tpls if k.startswith(n) or n.startswith(k[:40])), None)
+                if full:
+                    resolved.append(full)
+        cfg = storage.get_active_config(chat_id)
+        current = list((cfg.get("names_by_market") or {}).get(market) or [])
+        if action == "set_templates":
+            new_names = resolved
+        elif action == "add_templates":
+            new_names = list(current)
+            for n in resolved:
+                if n not in new_names:
+                    new_names.append(n)
+        else:
+            drop = set(resolved)
+            new_names = [n for n in current if n not in drop]
+        storage.set_active_templates_for_market(chat_id, market, new_names)
+        return f"Шаблоны ({market}) обновлены: {len(new_names)} шт."
+    if action == "subscribe":
+        _subscribers.add(chat_id)
+        return "Подписка на сигналы включена."
+    if action == "unsubscribe":
+        _subscribers.discard(chat_id)
+        return "Сигналы остановлены."
+    return "Неизвестное действие — ничего не менял."
+
+
+async def _send_ai_proposal_confirm(chat_id: int, proposal: dict, base_text: str):
+    storage.set_ai_pending(chat_id, proposal, proposal.get("summary") or "")
+    detail = _format_proposal(proposal)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Да, применить", callback_data="ai_confirm:yes"),
+        InlineKeyboardButton(text="❌ Нет", callback_data="ai_confirm:no"),
+    ]])
+    body = (
+        f"{base_text}\n\n"
+        f"⚠️ <b>Предложение изменить настройки</b>\n"
+        f"{detail}\n\n"
+        f"Чтобы применить — ответь <b>да</b> или нажми кнопку. "
+        f"Иначе «нет» / /cancel."
+    )
+    try:
+        await bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await bot.send_message(chat_id, body, reply_markup=kb)
+
+
+@dp.message(Command("ai_on"))
+async def cmd_ai_on(msg: Message):
+    storage.set_ai_enabled(msg.chat.id, True)
+    hint = (
+        "🤖 ИИ-режим <b>включён</b>. Пиши обычным текстом — помогу с настройками и сигналами.\n"
+        "Команды с / по-прежнему работают.\n"
+        "Выключить: /ai_off или кнопка «🤖 ИИ ✓»."
+    )
+    if not ai_chat.is_configured():
+        hint += (
+            "\n\n🔑 Сейчас <code>GEMINI_API_KEY</code> не задан — "
+            "добавь в Railway Variables."
+        )
+    await msg.answer(hint, parse_mode="HTML", reply_markup=main_keyboard(msg.chat.id))
+
+
+@dp.message(Command("ai_off"))
+async def cmd_ai_off(msg: Message):
+    storage.set_ai_enabled(msg.chat.id, False)
+    storage.clear_ai_pending(msg.chat.id)
+    await msg.answer(
+        "🤖 ИИ-режим выключен. Включить: /ai_on или кнопка «🤖 ИИ».",
+        reply_markup=main_keyboard(msg.chat.id),
+    )
+
+
+@dp.message(Command("ai"))
+@dp.message(F.text.in_({"🤖 ИИ", "🤖 ИИ ✓"}))
+async def cmd_ai(msg: Message):
     chat_id = msg.chat.id
-    old = _pending_rename.get(chat_id)
-    if not old:
-        raise SkipHandler
+    # Кнопка без аргументов — toggle; /ai с текстом — один вопрос
+    raw = (msg.text or "").strip()
+    if raw in ("🤖 ИИ", "🤖 ИИ ✓") or raw == "/ai":
+        enabled = storage.get_ai_enabled(chat_id)
+        if raw in ("🤖 ИИ", "🤖 ИИ ✓"):
+            storage.set_ai_enabled(chat_id, not enabled)
+            enabled = not enabled
+            if enabled:
+                await cmd_ai_on(msg)
+            else:
+                await cmd_ai_off(msg)
+            return
+        # bare /ai — help + enable
+        storage.set_ai_enabled(chat_id, True)
+        await msg.answer(
+            "🤖 <b>ИИ-помощник HW Screener</b>\n\n"
+            "Режим включён. Спроси, например:\n"
+            "• что значит сила и ATR на карточке\n"
+            "• чем fbo отличается от brk\n"
+            "• включи только мосбиржу\n"
+            "• поставь шаблону X стратегию both\n\n"
+            "Любое изменение настроек сначала покажу и применю только после «да».\n"
+            "/ai_off — выключить режим.",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(chat_id),
+        )
+        return
+
+    # /ai <вопрос>
+    question = raw.split(maxsplit=1)[1] if raw.startswith("/ai") and " " in raw else raw
+    storage.set_ai_enabled(chat_id, True)
+    await _handle_ai_question(msg, question)
+
+
+async def _handle_ai_question(msg: Message, question: str):
+    chat_id = msg.chat.id
+    question = (question or "").strip()
+    if not question:
+        await msg.answer("Напиши вопрос после /ai или просто текстом в ИИ-режиме.")
+        return
+    await bot.send_chat_action(chat_id, ChatAction.TYPING)
+    history = storage.get_ai_history(chat_id)
+    # history for model should not include the current turn
+    reply = await ai_chat.chat(question, history=history, context=_ai_user_context(chat_id))
+    storage.append_ai_message(chat_id, "user", question)
+    storage.append_ai_message(chat_id, "model", reply.text)
+    if reply.proposal:
+        await _send_ai_proposal_confirm(chat_id, reply.proposal, reply.text)
+    else:
+        try:
+            await msg.answer(reply.text, parse_mode="HTML", reply_markup=main_keyboard(chat_id))
+        except Exception:
+            await msg.answer(reply.text, reply_markup=main_keyboard(chat_id))
+
+
+@dp.callback_query(F.data.startswith("ai_confirm:"))
+async def cb_ai_confirm(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    decision = call.data.split(":", 1)[1]
+    pending = storage.get_ai_pending(chat_id)
+    if not pending:
+        await call.answer("Нечего подтверждать", show_alert=True)
+        return
+    storage.clear_ai_pending(chat_id)
+    if decision == "yes":
+        result = _apply_ai_proposal(chat_id, pending["proposal"])
+        await call.message.edit_text(
+            f"✅ Применено.\n{result}",
+            parse_mode="HTML",
+        )
+        await call.answer("Готово")
+    else:
+        await call.message.edit_text("❌ Изменение отклонено.")
+        await call.answer("Отменено")
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def on_free_text(msg: Message):
+    """Rename после ✏️, подтверждение ИИ («да»), либо чат в ИИ-режиме."""
+    chat_id = msg.chat.id
+    text_raw = (msg.text or "").strip()
     menu_labels = {
         "📡 Скан", "⚙️ Фильтр", "📊 Статус", "🔗 Sync",
         "🔄 Обновить шаблоны", "▶️ Старт", "⛔ Стоп",
+        "🤖 ИИ", "🤖 ИИ ✓",
     }
-    if (msg.text or "") in menu_labels:
-        _pending_rename.pop(chat_id, None)
-        raise SkipHandler
 
-    _pending_rename.pop(chat_id, None)
-    new_name = (msg.text or "").strip()
-    ok, err = storage.rename_html_template(chat_id, old, new_name)
-    if not ok:
-        await msg.answer(f"❌ {err}\nПопробуй ещё раз или /cancel")
-        _pending_rename[chat_id] = old
+    # 1) Rename template
+    old = _pending_rename.get(chat_id)
+    if old:
+        if text_raw in menu_labels:
+            _pending_rename.pop(chat_id, None)
+            raise SkipHandler
+        _pending_rename.pop(chat_id, None)
+        ok, err = storage.rename_html_template(chat_id, old, text_raw)
+        if not ok:
+            await msg.answer(f"❌ {err}\nПопробуй ещё раз или /cancel")
+            _pending_rename[chat_id] = old
+            return
+        await msg.answer(f"✅ «{old}» → «{text_raw}»")
+        await _send_filter_menu(chat_id, market=_filter_tab.get(chat_id))
         return
-    await msg.answer(f"✅ «{old}» → «{new_name}»")
-    await _send_filter_menu(chat_id, market=_filter_tab.get(chat_id))
+
+    # 2) Pending AI setting confirmation
+    pending = storage.get_ai_pending(chat_id)
+    if pending:
+        low = text_raw.lower()
+        if low in _AI_YES:
+            storage.clear_ai_pending(chat_id)
+            result = _apply_ai_proposal(chat_id, pending["proposal"])
+            await msg.answer(
+                f"✅ Применено.\n{result}",
+                parse_mode="HTML",
+                reply_markup=main_keyboard(chat_id),
+            )
+            return
+        if low in _AI_NO:
+            storage.clear_ai_pending(chat_id)
+            await msg.answer(
+                "❌ Изменение отклонено.",
+                reply_markup=main_keyboard(chat_id),
+            )
+            return
+        # Не да/нет — напомнить, но если ИИ-режим — можно ответить на вопрос после напоминания
+        await msg.answer(
+            "Сейчас ждёт подтверждение изменения настроек от ИИ.\n"
+            "Ответь <b>да</b> / <b>нет</b> или /cancel.\n"
+            f"Предложение: {_format_proposal(pending['proposal'])}",
+            parse_mode="HTML",
+        )
+        return
+
+    # 3) AI mode free-text chat
+    if text_raw in menu_labels:
+        raise SkipHandler
+    if not storage.get_ai_enabled(chat_id):
+        raise SkipHandler
+    await _handle_ai_question(msg, text_raw)
 
 
 @dp.callback_query(F.data.startswith("tpl_all:"))
@@ -1137,6 +1415,9 @@ async def main():
         BotCommand(command="scan", description="Запустить скан сейчас"),
         BotCommand(command="filter", description="Шаблоны и рынки"),
         BotCommand(command="status", description="Текущие настройки"),
+        BotCommand(command="ai", description="ИИ-помощник (Gemini)"),
+        BotCommand(command="ai_on", description="Включить ИИ-режим"),
+        BotCommand(command="ai_off", description="Выключить ИИ-режим"),
         BotCommand(command="syncurl", description="Ссылка синхронизации HTML"),
         BotCommand(command="refresh_tpl", description="Обновить шаблоны из Mini App"),
         BotCommand(command="start", description="Подписаться на сигналы"),

@@ -841,3 +841,136 @@ def load_all_sync_tokens() -> dict[str, int]:
         _ensure_sync_tokens(c)
         rows = c.execute("SELECT token, chat_id FROM sync_tokens").fetchall()
     return {r["token"]: int(r["chat_id"]) for r in rows}
+
+
+# ── AI chat: режим, история, pending-подтверждения ───────────────────────────
+
+_AI_HISTORY_TTL_SEC = 6 * 3600
+_AI_PENDING_TTL_SEC = 15 * 60
+
+
+def _ensure_ai_tables(c: sqlite3.Connection):
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS ai_state (
+            chat_id    INTEGER PRIMARY KEY,
+            enabled    INTEGER NOT NULL DEFAULT 0,
+            updated_ts INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS ai_messages (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            role    TEXT NOT NULL,
+            content TEXT NOT NULL,
+            ts      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_ai_messages_chat_ts
+            ON ai_messages(chat_id, ts);
+        CREATE TABLE IF NOT EXISTS ai_pending (
+            chat_id       INTEGER PRIMARY KEY,
+            proposal_json TEXT NOT NULL,
+            summary       TEXT NOT NULL,
+            expires       INTEGER NOT NULL
+        );
+    """)
+
+
+def get_ai_enabled(chat_id: int) -> bool:
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        row = c.execute(
+            "SELECT enabled FROM ai_state WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+    return bool(row["enabled"]) if row else False
+
+
+def set_ai_enabled(chat_id: int, enabled: bool) -> None:
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        c.execute(
+            "INSERT OR REPLACE INTO ai_state(chat_id, enabled, updated_ts) VALUES(?,?,?)",
+            (chat_id, 1 if enabled else 0, int(time.time())),
+        )
+
+
+def append_ai_message(chat_id: int, role: str, content: str, keep: int = 16) -> None:
+    """role: 'user' | 'model'. Хранит последние keep сообщений, чистит старше TTL."""
+    now = int(time.time())
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        c.execute(
+            "INSERT INTO ai_messages(chat_id, role, content, ts) VALUES(?,?,?,?)",
+            (chat_id, role, content, now),
+        )
+        cutoff = now - _AI_HISTORY_TTL_SEC
+        c.execute("DELETE FROM ai_messages WHERE chat_id=? AND ts<?", (chat_id, cutoff))
+        rows = c.execute(
+            "SELECT id FROM ai_messages WHERE chat_id=? ORDER BY id DESC",
+            (chat_id,),
+        ).fetchall()
+        if len(rows) > keep:
+            drop_ids = [r["id"] for r in rows[keep:]]
+            c.executemany("DELETE FROM ai_messages WHERE id=?", [(i,) for i in drop_ids])
+
+
+def get_ai_history(chat_id: int, limit: int = 16) -> list[dict]:
+    now = int(time.time())
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        c.execute(
+            "DELETE FROM ai_messages WHERE chat_id=? AND ts<?",
+            (chat_id, now - _AI_HISTORY_TTL_SEC),
+        )
+        rows = c.execute(
+            "SELECT role, content FROM ai_messages WHERE chat_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id, limit),
+        ).fetchall()
+    out = [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+    return out
+
+
+def clear_ai_history(chat_id: int) -> None:
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        c.execute("DELETE FROM ai_messages WHERE chat_id=?", (chat_id,))
+
+
+def set_ai_pending(chat_id: int, proposal: dict, summary: str) -> None:
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        c.execute(
+            "INSERT OR REPLACE INTO ai_pending(chat_id, proposal_json, summary, expires) "
+            "VALUES(?,?,?,?)",
+            (
+                chat_id,
+                json.dumps(proposal, ensure_ascii=False),
+                summary,
+                int(time.time()) + _AI_PENDING_TTL_SEC,
+            ),
+        )
+
+
+def get_ai_pending(chat_id: int) -> dict | None:
+    now = int(time.time())
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        row = c.execute(
+            "SELECT proposal_json, summary, expires FROM ai_pending WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+        if not row:
+            return None
+        if int(row["expires"]) < now:
+            c.execute("DELETE FROM ai_pending WHERE chat_id=?", (chat_id,))
+            return None
+        try:
+            proposal = json.loads(row["proposal_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            c.execute("DELETE FROM ai_pending WHERE chat_id=?", (chat_id,))
+            return None
+    return {"proposal": proposal, "summary": row["summary"]}
+
+
+def clear_ai_pending(chat_id: int) -> None:
+    with _conn() as c:
+        _ensure_ai_tables(c)
+        c.execute("DELETE FROM ai_pending WHERE chat_id=?", (chat_id,))
