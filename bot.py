@@ -419,16 +419,17 @@ def _build_filter_for_chat(chat_id: int) -> dict:
     tpls   = storage.get_html_templates(chat_id)
     active = cfg["names"]
     if not active or not tpls:
-        # Как Mini App без синхронизированного шаблона: стратегия «Ложный пробой»,
-        # остальные фильтры auto (DEF.thr=0.20 внутри _matches_single), рынок crypto.
+        # Без синхронизированных шаблонов: FBO + DEF.thr=0.20, по каждому
+        # рынку из /filter (crypto и/или ru) — чтобы MOEX сканировался без tpl.
+        markets = cfg.get("markets") or ["crypto"]
         return {
-            "markets": cfg.get("markets") or ["crypto"],
+            "markets": markets,
             "_multi": [{
                 "_name": "HTML UI",
-                "_market": "crypto",
+                "_market": m,
                 "_strategy": "fbo",
                 "filters": {},
-            }],
+            } for m in markets],
         }
 
     overrides = storage.get_template_strategy_overrides(chat_id)
@@ -437,18 +438,30 @@ def _build_filter_for_chat(chat_id: int) -> dict:
     # Каждый элемент несёт своё имя (_name) и свой рынок (_market), чтобы screener.py
     # мог сообщить точно какой шаблон совпал и не путать рынки между шаблонами.
     multi = []
+    covered = set()
     for n in active:
         if n not in tpls:
             continue
         entry = tpls[n]
         tpl_filters = entry["filters"]
         strat = _effective_strategy(chat_id, n, tpl_filters, overrides)
+        mkt = entry.get("market", "crypto")
+        covered.add(mkt)
         multi.append({
             "_name": n,
-            "_market": entry.get("market", "crypto"),
+            "_market": mkt,
             "_strategy": strat,
             "filters": tpl_filters,
         })
+    # Рынок включён в /filter, но нет активного шаблона под него → HTML UI FBO fallback
+    for m in cfg.get("markets") or []:
+        if m not in covered:
+            multi.append({
+                "_name": "HTML UI",
+                "_market": m,
+                "_strategy": "fbo",
+                "filters": {},
+            })
     merged = {"_multi": multi, "markets": cfg["markets"]}
     return merged
 

@@ -1,4 +1,4 @@
-"""screener.py — тянет данные с Bybit/OKX (auto), прогоняет hwv1.evaluate, возвращает карточки."""
+"""screener.py — тянет данные с Bybit/OKX (auto) и MOEX ISS (ru), прогоняет hwv1.evaluate."""
 import asyncio
 import logging
 import os
@@ -9,6 +9,12 @@ import httpx
 
 from hwv1 import Bar, evaluate
 import storage
+from moex import (
+    fetch_tickers_moex,
+    moex_client,
+    scan_one_moex,
+    MOEX_MIN_TURN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +453,29 @@ def _cap_cluster(pending: list[dict], cap: int = CAP_CLUSTER) -> list[dict]:
     return [p for p in pending if id(p) in keep_ids]
 
 
+
+def _needed_markets(subscribers: list[int], chat_filters: Callable[[int], dict]) -> set[str]:
+    """Какие рынки реально нужны по активным фильтрам подписчиков."""
+    needed: set[str] = set()
+    for chat_id in subscribers:
+        f = chat_filters(chat_id)
+        markets = f.get("markets") or ["crypto"]
+        multi = f.get("_multi")
+        if multi:
+            # рынки шаблонов ∩ выбранные markets
+            tpl_mkts = {t.get("_market", "crypto") for t in multi}
+            for m in markets:
+                if m in tpl_mkts:
+                    needed.add(m)
+            # если шаблонов нет по рынку, но рынок включён — всё равно сканируем
+            # (fallback HTML UI уже кладёт crypto; для ru без tpl — bot добавляет ru)
+            for m in markets:
+                needed.add(m)
+        else:
+            needed.update(markets)
+    return needed or {"crypto"}
+
+
 async def run_scan(
     on_signal: Callable[[dict, list[int]], Awaitable[None]],
     subscribers: list[int],
@@ -481,107 +510,130 @@ async def run_scan(
         if min_ts < floor:
             min_ts = floor
 
-    async with httpx.AsyncClient() as client:
-        tickers = await fetch_tickers(client)
-        ex_label = "OKX" if _active_exchange == "okx" else "Bybit"
-        logger.info(
-            "Скан: %d инструментов через %s (age≤%dh, incremental=%s, min_ts=%s)",
-            len(tickers), ex_label, MAX_SIGNAL_AGE_H, incremental, min_ts or "-",
-        )
+    needed = _needed_markets(subscribers, chat_filters)
+    want_crypto = "crypto" in needed
+    want_ru = "ru" in needed
 
-        pending: list[dict] = []
-        skipped_age = 0
-        skipped_wm = 0
-        skipped_dup = 0
+    pending: list[dict] = []
+    skipped_age = 0
+    skipped_wm = 0
+    skipped_dup = 0
 
-        # Пакетами по 20, чтобы не перегружать API
-        batch_size = 20
-        for i in range(0, len(tickers), batch_size):
-            batch = tickers[i: i + batch_size]
-            results = await asyncio.gather(
-                *[scan_one(client, t) for t in batch], return_exceptions=True
-            )
-            for cards in results:
-                if isinstance(cards, Exception):
-                    continue
-                for card in cards:
-                    card.setdefault("market", "crypto")
-                    ticker = card["ticker"]
-                    side = card["side"]
-                    level = card["level"]
-                    strategy = card.get("strategy", "brk")
-                    signal_ts = int(card.get("signal_ts") or 0)
-
-                    # Жёсткое правило: никогда не слать старше 12ч
-                    if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
-                        skipped_age += 1
-                        continue
-
-                    # Incremental: только новее предыдущей отправки
-                    if incremental and signal_ts <= min_ts:
-                        skipped_wm += 1
-                        continue
-
-                    if storage.is_duplicate(ticker, side, level, strategy):
-                        skipped_dup += 1
-                        continue
-
-                    by_template: dict[str, list[int]] = {}
-                    for chat_id in subscribers:
-                        f = chat_filters(chat_id)
-                        tpl_name = match_filter(card, f)
-                        if tpl_name is not None:
-                            by_template.setdefault(tpl_name, []).append(chat_id)
-
-                    if by_template:
-                        pending.append({"card": card, "by_template": by_template})
-
-            await asyncio.sleep(0.3)  # пауза между пакетами
-
-        # HTML-like post-filters перед отправкой (в рамках этого скана)
-        before = len(pending)
-        pending = _apply_coin_limit(pending)
-        pending = _cap_cluster(pending)
-        if len(pending) != before:
-            logger.info(
-                "Post-filters: %d → %d (coin≤1/%dh, cap≤%d/(hour,side))",
-                before, len(pending), COIN_WINDOW_H, CAP_CLUSTER,
-            )
-
-        logger.info(
-            "Скан фильтры: age=%d wm=%d dup=%d → pending=%d",
-            skipped_age, skipped_wm, skipped_dup, len(pending),
-        )
-
-        sent_count = 0
-        max_sent_ts = 0
-        for item in pending:
-            card = item["card"]
-            by_template = item["by_template"]
-            ticker = card["ticker"]
-            side = card["side"]
-            level = card["level"]
-            strategy = card.get("strategy", "brk")
-            signal_ts = int(card.get("signal_ts") or 0)
-            # Повторная проверка age непосредственно перед отправкой
-            if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+    async def _ingest(cards_list):
+        nonlocal skipped_age, skipped_wm, skipped_dup
+        for cards in cards_list:
+            if isinstance(cards, Exception):
                 continue
-            sent_any = False
-            for tpl_name, chat_ids in by_template.items():
-                card_out = {**card, "matched_template": tpl_name}
-                await on_signal(card_out, chat_ids)
-                sent_any = True
-                sent_count += 1
-            if sent_any:
-                storage.mark_sent(ticker, side, level, strategy)
-                if signal_ts > max_sent_ts:
-                    max_sent_ts = signal_ts
+            for card in cards:
+                card.setdefault("market", "crypto")
+                ticker = card["ticker"]
+                side = card["side"]
+                level = card["level"]
+                strategy = card.get("strategy", "brk")
+                signal_ts = int(card.get("signal_ts") or 0)
 
-        if incremental:
-            # Поднимаем watermark по факту отправки и/или сдвигаем пол (now−1ч),
-            # чтобы пустые сканы не копили растущий бэклог «ещё не отправленных».
-            advance_to = max(max_sent_ts, now_ms - COLD_WATERMARK_LOOKBACK_MS)
-            new_wm = storage.bump_send_watermark_ms(advance_to)
-            logger.info("Watermark → %d (sent=%d)", new_wm, sent_count)
+                if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+                    skipped_age += 1
+                    continue
+                if incremental and signal_ts <= min_ts:
+                    skipped_wm += 1
+                    continue
+                if storage.is_duplicate(ticker, side, level, strategy):
+                    skipped_dup += 1
+                    continue
 
-        return sent_count
+                by_template: dict[str, list[int]] = {}
+                for chat_id in subscribers:
+                    f = chat_filters(chat_id)
+                    tpl_name = match_filter(card, f)
+                    if tpl_name is not None:
+                        by_template.setdefault(tpl_name, []).append(chat_id)
+                if by_template:
+                    pending.append({"card": card, "by_template": by_template})
+
+    if want_crypto:
+        async with httpx.AsyncClient() as client:
+            tickers = await fetch_tickers(client)
+            ex_label = "OKX" if _active_exchange == "okx" else "Bybit"
+            logger.info(
+                "Скан crypto: %d через %s (age≤%dh, incremental=%s, min_ts=%s)",
+                len(tickers), ex_label, MAX_SIGNAL_AGE_H, incremental, min_ts or "-",
+            )
+            batch_size = 20
+            for i in range(0, len(tickers), batch_size):
+                batch = tickers[i: i + batch_size]
+                results = await asyncio.gather(
+                    *[scan_one(client, t) for t in batch], return_exceptions=True
+                )
+                await _ingest(results)
+                await asyncio.sleep(0.3)
+
+    if want_ru:
+        async with moex_client() as client:
+            try:
+                tickers_ru = await fetch_tickers_moex(client)
+            except Exception as e:
+                logger.warning("MOEX tickers failed: %s", e)
+                tickers_ru = []
+            logger.info(
+                "Скан MOEX: %d бумаг (min_turn≥%.0f₽, age≤%dh, incremental=%s)",
+                len(tickers_ru), MOEX_MIN_TURN, MAX_SIGNAL_AGE_H, incremental,
+            )
+            # ISS rate-limit: меньше параллелизма, чем крипта
+            batch_size = 6
+            for i in range(0, len(tickers_ru), batch_size):
+                batch = tickers_ru[i: i + batch_size]
+                results = await asyncio.gather(
+                    *[scan_one_moex(client, t, lookback_hours=SCAN_LOOKBACK_H) for t in batch],
+                    return_exceptions=True,
+                )
+                await _ingest(results)
+                await asyncio.sleep(0.5)
+
+    # HTML-like post-filters перед отправкой (в рамках этого скана)
+    before = len(pending)
+    pending = _apply_coin_limit(pending)
+    pending = _cap_cluster(pending)
+    if len(pending) != before:
+        logger.info(
+            "Post-filters: %d → %d (coin≤1/%dh, cap≤%d/(hour,side))",
+            before, len(pending), COIN_WINDOW_H, CAP_CLUSTER,
+        )
+
+    logger.info(
+        "Скан фильтры: age=%d wm=%d dup=%d → pending=%d",
+        skipped_age, skipped_wm, skipped_dup, len(pending),
+    )
+
+    sent_count = 0
+    max_sent_ts = 0
+    for item in pending:
+        card = item["card"]
+        by_template = item["by_template"]
+        ticker = card["ticker"]
+        side = card["side"]
+        level = card["level"]
+        strategy = card.get("strategy", "brk")
+        signal_ts = int(card.get("signal_ts") or 0)
+        # Повторная проверка age непосредственно перед отправкой
+        if not signal_ts or (now_ms - signal_ts) > MAX_SIGNAL_AGE_MS:
+            continue
+        sent_any = False
+        for tpl_name, chat_ids in by_template.items():
+            card_out = {**card, "matched_template": tpl_name}
+            await on_signal(card_out, chat_ids)
+            sent_any = True
+            sent_count += 1
+        if sent_any:
+            storage.mark_sent(ticker, side, level, strategy)
+            if signal_ts > max_sent_ts:
+                max_sent_ts = signal_ts
+
+    if incremental:
+        # Поднимаем watermark по факту отправки и/или сдвигаем пол (now−1ч),
+        # чтобы пустые сканы не копили растущий бэклог «ещё не отправленных».
+        advance_to = max(max_sent_ts, now_ms - COLD_WATERMARK_LOOKBACK_MS)
+        new_wm = storage.bump_send_watermark_ms(advance_to)
+        logger.info("Watermark → %d (sent=%d)", new_wm, sent_count)
+
+    return sent_count
