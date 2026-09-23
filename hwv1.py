@@ -1,45 +1,75 @@
 #!/usr/bin/env python3
-"""HWv1.0 — отбор пробоя high/low дневки после сжатия.
+"""HWv1.0 — портировано 1:1 из HW_FBO_scanner_6.html (функция scanSymbol).
 
-Заморожено 10.09.2026. Эталон: ZRO, APE, BIO, GIGGLE.
-Импорт: from hwv1 import Bar, evaluate
+ЧЁТКОЕ РАЗДЕЛЕНИЕ СТРАТЕГИЙ — не путать между собой:
+
+  evaluate_brk()  — «Пробой» (Герчик): сигнал на первом закрытии часа ЗА
+                     уровнем, при накоплении на H1 перед пробоем. Модель
+                     НЕ участвует (в HTML для этой ветки p:0 — комментарий
+                     "модель обучена на ложных пробоях, для пробоя не применяется").
+                     card["strategy"] = "brk"
+
+  evaluate_fbo()  — «Ложный пробой» (FBO): сигнал на первом часе ВОЗВРАТА
+                     цены за уровень после пробоя. Использует Random Forest
+                     (300 деревьев, файл model.json) для скоринга p (0..1);
+                     сигнал проходит только если p >= порога (по умолчанию 0.30).
+                     card["strategy"] = "fbo"
+
+  evaluate()      — точка входа: гоняет ОБЕ функции и возвращает карточки
+                     из обеих, каждая с полем "strategy" — дальше их можно
+                     фильтровать по стратегии (bot.py / screener.py это делают).
+
+Модель (model.json) — обученные веса, перенесены как есть, без переобучения.
+Импорт: from hwv1 import Bar, evaluate, evaluate_brk, evaluate_fbo
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+import math
+import os
+from dataclasses import dataclass
 from typing import Optional
 
 VERSION = "HWv1.0"
 
 PARAMS = {
     "atr_n": 14,
-    "d1_min": 30,
-    "h4_min": 40,
-    "h1_min": 40,
+    "d1_min": 45,
+    "h1_min": 120,
     "work_days": 26,
     "swing_lr": 2,
     "universe_n": 200,
     "vol_usd_min": 1_000_000.0,
-    "spread_max": 0.0015,
     "merge_atr": 0.06,
     "merge_pct": 0.001,
     "zone_atr": 0.03,
     "zone_pct": 0.0005,
-    "dist_atr": 0.50,
+    "impulse_d1_atr": 2.2,
+    "max_crosses": 2,           # «запилов уровня» после формирования (правило для «Пробоя»)
     "acc_hours": (8, 10, 12, 16),
     "acc_range_atr": 0.50,
     "acc_close_atr": 0.35,
     "acc_drift_atr": 0.32,
     "acc_mid_atr": 0.60,
-    "max_crosses": 2,
-    "impulse_d1_atr": 2.2,
-    "strength_min": 3,
+    "lookback_fbo": 6,          # LOOKBACK в HTML — окно проверки пробоя для «Ложного пробоя»
+    "max_risk_pct": 0.20,       # MAXRISK — риск не более 20% цены, иначе сделка отбрасывается
 }
+
+_MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.json")
+_MODEL = None  # ленивая загрузка
+
+
+def _load_model() -> dict:
+    global _MODEL
+    if _MODEL is None:
+        with open(_MODEL_PATH, "r", encoding="utf-8") as f:
+            _MODEL = json.load(f)
+    return _MODEL
 
 
 @dataclass
 class Bar:
-    ts: int
+    ts: int            # ms since epoch
     o: float
     h: float
     l: float
@@ -60,24 +90,31 @@ class Level:
     chopped: bool = False
     impulse_mid: bool = False
     from_prev_day: bool = False
-    notes: list[str] = field(default_factory=list)
 
 
-def atr(bars: list[Bar], n: int = PARAMS["atr_n"]) -> float:
-    if len(bars) < 2:
-        return 0.0
-    trs = []
-    for i in range(1, len(bars)):
-        prev, b = bars[i - 1].c, bars[i]
-        trs.append(max(b.h - b.l, abs(b.h - prev), abs(b.l - prev)))
-    window = trs[-min(n, len(trs)) :]
-    return sum(window) / len(window) if window else 0.0
-
+# ═════════════════════════════ базовые утилиты (общие) ═══════════════════════
 
 def last_closed(bars: list[Bar]) -> list[Bar]:
     if bars and not bars[-1].confirmed:
         return bars[:-1]
     return bars
+
+
+def atr(bars: list[Bar], n: int = PARAMS["atr_n"]) -> float:
+    """Уайлдер (RMA), как ta.atr() в TradingView — 1:1 с atr() в HTML."""
+    w = last_closed(bars)
+    if len(w) < 2:
+        return 0.0
+    tr = []
+    for i in range(1, len(w)):
+        p, b = w[i - 1], w[i]
+        tr.append(max(b.h - b.l, abs(b.h - p.c), abs(b.l - p.c)))
+    if len(tr) < n:
+        return sum(tr) / len(tr) if tr else 0.0
+    rma = sum(tr[:n]) / n
+    for i in range(n, len(tr)):
+        rma = rma + (tr[i] - rma) / n
+    return rma
 
 
 def d1_bias(d1: list[Bar]) -> str:
@@ -102,13 +139,13 @@ def swings(bars: list[Bar], left: int, right: int):
     n = len(bars)
     for i in range(left, n - right):
         h, l = bars[i].h, bars[i].l
-        if all(h >= bars[i - k].h for k in range(1, left + 1)) and all(
-            h >= bars[i + k].h for k in range(1, right + 1)
-        ):
+        ok_h = all(h >= bars[i - k].h for k in range(1, left + 1)) and \
+               all(h >= bars[i + k].h for k in range(1, right + 1))
+        ok_l = all(l <= bars[i - k].l for k in range(1, left + 1)) and \
+               all(l <= bars[i + k].l for k in range(1, right + 1))
+        if ok_h:
             highs.append((i, h))
-        if all(l <= bars[i - k].l for k in range(1, left + 1)) and all(
-            l <= bars[i + k].l for k in range(1, right + 1)
-        ):
+        if ok_l:
             lows.append((i, l))
     return highs, lows
 
@@ -169,15 +206,8 @@ def count_close_crosses(bars: list[Bar], price: float, after_ts: int) -> int:
     return n
 
 
-def sawed(d1, h4, h1, m5, price: float, formed_ts: int) -> bool:
-    cap = PARAMS["max_crosses"]
-    return any(
-        count_close_crosses(seq, price, formed_ts) > cap
-        for seq in (d1, h4, h1, m5 or [])
-    )
-
-
-def accumulation(h1: list[Bar], level: float, lo: float, hi: float, atr_d: float) -> tuple[bool, str]:
+def accumulation(h1: list[Bar], level: float, atr_d: float) -> tuple[bool, str]:
+    """Накопление на H1 у уровня — те же условия что и V0.accumulation в HTML."""
     if atr_d <= 0 or len(h1) < 8:
         return False, "мало H1"
     best = None
@@ -185,7 +215,8 @@ def accumulation(h1: list[Bar], level: float, lo: float, hi: float, atr_d: float
         if len(h1) < n:
             break
         win = h1[-n:]
-        width = max(b.h for b in win) - min(b.l for b in win)
+        hi, lo = max(b.h for b in win), min(b.l for b in win)
+        width = hi - lo
         if width > PARAMS["acc_range_atr"] * atr_d:
             if n == 8:
                 return False, f"8ч диапазон {width/atr_d:.2f} ATR"
@@ -196,8 +227,8 @@ def accumulation(h1: list[Bar], level: float, lo: float, hi: float, atr_d: float
             if n == 8:
                 return False, f"ход close {drift/atr_d:.2f} ATR, не полка"
             break
-        mid = (max(b.h for b in win) + min(b.l for b in win)) / 2
-        touched = min(b.l for b in win) <= level <= max(b.h for b in win)
+        mid = (hi + lo) / 2
+        touched = lo <= level <= hi
         if abs(mid - level) > PARAMS["acc_mid_atr"] * atr_d and not touched:
             if n == 8:
                 return False, "сжатие не у уровня"
@@ -208,31 +239,26 @@ def accumulation(h1: list[Bar], level: float, lo: float, hi: float, atr_d: float
     return True, f"{best}ч сжатие у уровня"
 
 
-def build_levels(d1: list[Bar], h4: list[Bar]) -> list[Level]:
+def build_levels(d1: list[Bar], h4: Optional[list[Bar]] = None) -> list[Level]:
+    """1:1 с V0.buildLevels в HTML — без отсечения по strength_min (это UI-фильтр)."""
     if len(d1) < 12:
         return []
     atr_d = atr(d1)
     last = d1[-1].c
-    work = d1[-PARAMS["work_days"] :] if len(d1) >= PARAMS["work_days"] else d1
+    work = d1[-PARAMS["work_days"]:] if len(d1) >= PARAMS["work_days"] else d1
     raw: list[Level] = []
 
     def add(price: float, kind: str, bar: Bar, touches: int = 1):
         if price <= 0:
             return
         pad = max(PARAMS["zone_atr"] * atr_d, price * PARAMS["zone_pct"])
-        raw.append(
-            Level(
-                price=price,
-                kind=kind,
-                formed_ts=bar.ts,
-                lo=price - pad,
-                hi=price + pad,
-                touches=touches,
-                chopped=d1_chopped(d1, price - pad, price + pad),
-                impulse_mid=inside_fresh_impulse(d1, h4, price, atr_d) if h4 else False,
-                from_prev_day=kind.startswith("prev"),
-            )
-        )
+        raw.append(Level(
+            price=price, kind=kind, formed_ts=bar.ts,
+            lo=price - pad, hi=price + pad, touches=touches,
+            chopped=d1_chopped(d1, price - pad, price + pad),
+            impulse_mid=inside_fresh_impulse(d1, h4, price, atr_d) if h4 else False,
+            from_prev_day=kind.startswith("prev"),
+        ))
 
     prev = d1[-2]
     add(prev.h, "prev high", prev, 2)
@@ -250,7 +276,7 @@ def build_levels(d1: list[Bar], h4: list[Bar]) -> list[Level]:
     for i, price in sl:
         add(price, "swing D1 low", work[i], 1)
 
-    raw.sort(key=lambda x: x.price)
+    raw.sort(key=lambda x: -x.price)
     merge_tol = max(PARAMS["merge_atr"] * atr_d, last * PARAMS["merge_pct"])
     priority = ["5d high", "5d low", "prev high", "prev low", "swing D1 high", "swing D1 low"]
     merged: list[Level] = []
@@ -283,7 +309,7 @@ def build_levels(d1: list[Bar], h4: list[Bar]) -> list[Level]:
         if lv.impulse_mid:
             s -= 3
         lv.strength = max(0, min(5, s))
-        if lv.impulse_mid or lv.strength < PARAMS["strength_min"]:
+        if lv.impulse_mid:
             continue
         if abs(lv.price - last) > 3.0 * atr_d:
             continue
@@ -291,27 +317,304 @@ def build_levels(d1: list[Bar], h4: list[Bar]) -> list[Level]:
     return kept
 
 
-def _side(kind: str) -> str:
+def _side_of(kind: str) -> str:
     return "long" if "high" in kind else "short"
 
 
-def _m5_wick_saw(m5: list[Bar], price: float, formed_ts: int) -> bool:
-    """Пила фитилями на 5М после бара уровня."""
-    through = 0
-    sides = 0
-    prev = None
-    for b in m5:
-        if b.ts <= formed_ts:
-            continue
-        if b.h >= price and b.l <= price:
-            through += 1
-        side = 1 if b.c > price else -1 if b.c < price else prev
-        if prev is not None and side is not None and side != prev:
-            sides += 1
-        if side is not None:
-            prev = side
-    return through >= 5 or sides > 2
+def _risk_stop_take(entry: float, atr_d: float, side: str, stop_atr_frac: float, target_r: float):
+    """1:1 с recompute() в HTML: риск = max(stop_atr_frac * ATR_D, 2% цены), тейк = target_r * risk."""
+    risk = max(stop_atr_frac * atr_d, 0.02 * entry)
+    if risk <= 0 or risk / entry > PARAMS["max_risk_pct"]:
+        return None
+    if side == "long":
+        stop = entry - risk
+        take = entry + target_r * risk
+    else:
+        stop = entry + risk
+        take = entry - target_r * risk
+    return stop, take, risk
 
+
+# ═══════════════════════════ стратегия «Пробой» (strategy="brk") ═════════════
+
+def evaluate_brk(
+    ticker: str,
+    d1c: list[Bar],
+    h4c: list[Bar],
+    h1c: list[Bar],
+    atr_d: float,
+    levels: list[Level],
+    bias: str,
+) -> list[dict]:
+    """
+    Сигнал только в момент первого закрытия часа за уровнем (последний час — за
+    уровнем, предыдущий — ещё нет). 1:1 с веткой type:'brk' в scanSymbol().
+    Модель НЕ используется — p всегда 0 (как и в HTML для этой ветки).
+    """
+    cards: list[dict] = []
+    if len(h1c) < 2 or not levels:
+        return cards
+
+    bar = h1c[-1]
+    prev_b = h1c[-2]
+    a_h1 = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
+    if a_h1 <= 0:
+        return cards
+
+    vw = sorted(b.vol_quote for b in h1c[-25:-1] if b.vol_quote > 0)
+    v_med = vw[len(vw) // 2] if vw else 0.0
+
+    for lv in levels:
+        side = _side_of(lv.kind)
+
+        def beyond(b: Bar, _price=lv.price, _side=side) -> bool:
+            return b.c > _price if _side == "long" else b.c < _price
+
+        if not (beyond(bar) and not beyond(prev_b) and bar.ts > lv.formed_ts):
+            continue
+
+        acc, acc_why = accumulation(h1c[:-1], lv.price, atr_d)
+        if not acc:
+            continue
+
+        cross_b = count_close_crosses(
+            [b for b in h1c if lv.formed_ts < b.ts < bar.ts], lv.price, lv.formed_ts
+        )
+        if cross_b > PARAMS["max_crosses"]:
+            continue
+
+        bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
+        if not bias_ok:
+            continue
+
+        rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
+        if rst is None:
+            continue
+        stop, take, risk = rst
+
+        cards.append({
+            "ticker": ticker,
+            "version": VERSION,
+            "strategy": "brk",
+            "side": "LONG" if side == "long" else "SHORT",
+            "status": "SIGNAL",
+            "level": lv.price,
+            "kind": lv.kind,
+            "strength": lv.strength,
+            "last": bar.c,
+            "dist_atr": abs(bar.c - lv.price) / a_h1,
+            "atr_d": atr_d,
+            "atr_h1": a_h1,
+            "stop": stop,
+            "take": take,
+            "risk": risk,
+            "d1_bias": bias,
+            "crosses": cross_b,
+            "prob": None,  # модель не применяется к «Пробою»
+            "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+            "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
+            "why": [acc_why, f"пробой {lv.kind} на закрытии часа", f"запилов после формирования: {cross_b}"],
+        })
+
+    cards.sort(key=lambda c: (-c["strength"], c["dist_atr"]))
+    return cards
+
+
+# ═══════════════════════════ стратегия «Ложный пробой» (strategy="fbo") ══════
+
+def _model_predict(feat: dict) -> float:
+    """1:1 с modelPredict() в HTML — прогон через 300 деревьев Random Forest."""
+    model = _load_model()
+    x = [
+        feat["strength"], feat["crosses"], feat["touched8"], feat["acc"],
+        min(feat["level_age_h"], 500) / 24, min(feat["vol_contraction"], 3),
+        min(feat["vol_mult"], 10), min(feat["overshoot_atr"], 10),
+        min(feat["dist_atr"], 10), feat["bias_ok"],
+        min(feat["atrD_pct"], 0.3), min(feat["aH1_pct"], 0.1), feat["side_long"],
+    ]
+    for k in model["kinds"]:
+        x.append(1 if feat["kind"] == k else 0)
+
+    raw = model["init_raw"]
+    for t in model["trees"]:
+        n = 0
+        left, right, feats, ths, vals = t["l"], t["r"], t["f"], t["th"], t["v"]
+        while left[n] != -1:
+            n = left[n] if x[feats[n]] <= ths[n] else right[n]
+        raw += model["lr"] * vals[n]
+    return 1.0 / (1.0 + math.exp(-raw))
+
+
+def _vol_contraction(h1c: list[Bar]) -> float:
+    short = atr(h1c[-9:-1], 8)
+    long_ = atr(h1c[-49:-1], 48)
+    return 1.0 if not long_ or long_ <= 0 else short / long_
+
+
+def evaluate_fbo(
+    ticker: str,
+    d1c: list[Bar],
+    h4c: list[Bar],
+    h1c: list[Bar],
+    atr_d: float,
+    levels: list[Level],
+    bias: str,
+    threshold: Optional[float] = None,
+) -> list[dict]:
+    """
+    Сигнал на первом часе возврата цены за уровень после пробоя (ложный пробой).
+    1:1 с веткой type:'fbo' в scanSymbol(). Использует Random Forest (model.json)
+    для скоринга p; сигнал проходит только при p >= threshold (по умолчанию
+    MODEL.threshold из model.json, обычно 0.30).
+    """
+    cards: list[dict] = []
+    model = _load_model()
+    if threshold is None:
+        threshold = model.get("threshold", 0.30)
+
+    lookback = PARAMS["lookback_fbo"]
+    if len(h1c) < lookback + 1 or not levels:
+        return cards
+
+    bar = h1c[-1]
+    a_h1 = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
+    if a_h1 <= 0:
+        return cards
+
+    vw = sorted(b.vol_quote for b in h1c[-25:-1] if b.vol_quote > 0)
+    v_med = vw[len(vw) // 2] if vw else 0.0
+    vc = _vol_contraction(h1c)
+
+    w = h1c[-1 - lookback: -1]   # LOOKBACK часов перед текущим (без него самого)
+    if len(w) != lookback:
+        return cards
+
+    for lv in levels:
+        br_side = _side_of(lv.kind)
+
+        def beyond_br(b: Bar, _price=lv.price, _side=br_side) -> bool:
+            return b.c > _price if _side == "long" else b.c < _price
+
+        broke = any(beyond_br(b) for b in w)
+        back = (bar.c < lv.price) if br_side == "long" else (bar.c > lv.price)
+        if not (broke and back):
+            continue
+        if bar.ts <= lv.formed_ts:
+            continue
+
+        side = "short" if br_side == "long" else "long"   # сторона входа обратна стороне пробоя
+        ext = max([b.h for b in w] + [bar.h]) if br_side == "long" else min([b.l for b in w] + [bar.l])
+
+        # сигнал только на первом часе возврата (предыдущий час ещё был за уровнем)
+        if not beyond_br(w[-1]):
+            continue
+
+        first_brk_idx = next((i for i, b in enumerate(w) if beyond_br(b)), None)
+        if first_brk_idx is None:
+            continue
+        brk_bars = [b for b in w if beyond_br(b)]
+        poke = max((b.h - b.l) for b in brk_bars) / a_h1 if brk_bars else 0.0
+
+        min_risk = max(0.10 * atr_d, 0.02 * bar.c)
+        covers = (bar.c + min_risk > ext) if side == "short" else (bar.c - min_risk < ext)
+
+        # индекс первого бара пробоя внутри h1c
+        gi = len(h1c) - 1 - lookback + first_brk_idx
+        pre = h1c[max(0, gi - 8): gi]
+        pre_acc = 0
+        if len(pre) == 8:
+            hi_p, lo_p = max(b.h for b in pre), min(b.l for b in pre)
+            near = all(abs(b.c - lv.price) <= 1.0 * a_h1 for b in pre)
+            if hi_p - lo_p <= 2.0 * a_h1 and near:
+                pre_acc = 1
+
+        ap = h1c[max(0, gi - 6): gi]
+        smooth = 0
+        if len(ap) == 6:
+            avg_r = sum((b.h - b.l) for b in ap) / 6
+            move = (1 if br_side == "long" else -1) * (ap[-1].c - ap[0].o)
+            if avg_r < 0.8 * a_h1 and move > 0:
+                smooth = 1
+
+        dd = [b for b in d1c if b.ts + 86_400_000 <= bar.ts][-3:]
+        d1_against = 0
+        if len(dd) == 3:
+            hi_d, lo_d = max(b.h for b in dd), min(b.l for b in dd)
+            side_ok = all(
+                (b.c >= lv.price - 0.3 * atr_d) if br_side == "long" else (b.c <= lv.price + 0.3 * atr_d)
+                for b in dd
+            )
+            if hi_d - lo_d <= 0.9 * atr_d and side_ok:
+                d1_against = 1
+
+        win8 = h1c[-9:-1]
+        touched8 = 1 if (len(win8) >= 8 and min(b.l for b in win8) <= lv.price <= max(b.h for b in win8)) else 0
+        acc_res, _ = accumulation(h1c[:-1], lv.price, atr_d)
+
+        cross = count_close_crosses(
+            [b for b in h1c if lv.formed_ts < b.ts <= bar.ts], lv.price, lv.formed_ts
+        )
+        bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
+
+        feat = {
+            "strength": lv.strength,
+            "crosses": cross,
+            "touched8": touched8,
+            "acc": 1 if acc_res else 0,
+            "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+            "vol_contraction": vc,
+            "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
+            "overshoot_atr": abs(ext - lv.price) / a_h1,
+            "dist_atr": abs(bar.c - lv.price) / a_h1,
+            "bias_ok": 1 if bias_ok else 0,
+            "atrD_pct": atr_d / bar.c,
+            "aH1_pct": a_h1 / bar.c,
+            "side_long": 1 if side == "long" else 0,
+            "kind": lv.kind,
+        }
+        p = _model_predict(feat)
+        if p < threshold:
+            continue
+
+        rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
+        if rst is None:
+            continue
+        stop, take, risk = rst
+
+        cards.append({
+            "ticker": ticker,
+            "version": VERSION,
+            "strategy": "fbo",
+            "side": "LONG" if side == "long" else "SHORT",
+            "status": "SIGNAL",
+            "level": lv.price,
+            "kind": lv.kind,
+            "strength": lv.strength,
+            "last": bar.c,
+            "dist_atr": feat["dist_atr"],
+            "atr_d": atr_d,
+            "atr_h1": a_h1,
+            "stop": stop,
+            "take": take,
+            "risk": risk,
+            "d1_bias": bias,
+            "crosses": cross,
+            "prob": round(p, 4),
+            "level_age_h": feat["level_age_h"],
+            "vol_mult": feat["vol_mult"],
+            "poke_atr": poke,
+            "covers_wick": covers,
+            "pre_accumulation": pre_acc,
+            "smooth_approach": smooth,
+            "d1_against": d1_against,
+            "why": [f"ложный пробой {lv.kind}, модель p={p:.2f}", f"запилов: {cross}"],
+        })
+
+    cards.sort(key=lambda c: (-(c["prob"] or 0), c["dist_atr"]))
+    return cards
+
+
+# ═══════════════════════════ единая точка входа ═══════════════════════════
 
 def evaluate(
     ticker: str,
@@ -323,101 +626,51 @@ def evaluate(
     h1: list[Bar],
     m5: Optional[list[Bar]] = None,
     vol_usd_24h: float = 0.0,
+    strategies: tuple[str, ...] = ("brk", "fbo"),
+    fbo_threshold: Optional[float] = None,
 ) -> dict:
-    """Вернуть 0..N идей HWv1.0 по одному инструменту."""
-    d1, h4, h1 = last_closed(d1), last_closed(h4), last_closed(h1)
-    m5 = last_closed(m5 or [])
-    out = {
-        "version": VERSION,
-        "ticker": ticker,
-        "ok": False,
-        "cards": [],
-        "levels": [],
-        "reason": "",
-    }
+    """
+    Точка входа для скринера. Считает уровни/тренд ОДИН раз, затем прогоняет
+    запрошенные стратегии (по умолчанию обе) и возвращает карточки из каждой,
+    строго помеченные полем "strategy" — "brk" или "fbo", никогда не смешаны.
+
+    strategies: подмножество ("brk",), ("fbo",) или ("brk", "fbo") — что сканировать.
+    """
+    d1c, h4c, h1c = last_closed(d1), last_closed(h4), last_closed(h1)
+    out = {"version": VERSION, "ticker": ticker, "ok": False, "cards": [], "reason": ""}
+
     if vol_usd_24h and vol_usd_24h < PARAMS["vol_usd_min"]:
         out["reason"] = "оборот < $1M"
         return out
-    if len(d1) < PARAMS["d1_min"] or len(h4) < PARAMS["h4_min"] or len(h1) < PARAMS["h1_min"] or last <= 0:
+    if len(h1c) < PARAMS["h1_min"] or len(d1c) < PARAMS["d1_min"] or last <= 0:
         out["reason"] = "мало баров"
         return out
-    atr_d, atr_h4 = atr(d1), atr(h4)
+
+    atr_d = atr(d1c)
     if atr_d <= 0:
         out["reason"] = "ATR=0"
         return out
-    spread = (ask - bid) / last if ask and bid else 0.0
-    if ask and bid and spread > PARAMS["spread_max"]:
-        out["reason"] = "широкий спред"
-        return out
 
-    levels = build_levels(d1, h4)
-    bias = d1_bias(d1)
+    levels = build_levels(d1c, h4c)
+    bias = d1_bias(d1c)
     out["ok"] = True
-    out["last"] = last
     out["atr_d"] = atr_d
     out["d1_bias"] = bias
-    out["levels"] = [
-        {"price": lv.price, "kind": lv.kind, "strength": lv.strength, "formed_ts": lv.formed_ts}
-        for lv in levels
-    ]
 
-    cards = []
-    for lv in levels:
-        if abs(last - lv.price) > PARAMS["dist_atr"] * atr_d:
-            continue
-        side = _side(lv.kind)
-        # WATCH только до пробоя: цена ещё не за уровнем
-        if side == "long" and last > lv.price:
-            continue
-        if side == "short" and last < lv.price:
-            continue
-        if side == "long" and (d1[-1].c > lv.price or (h1 and h1[-1].c > lv.price)):
-            continue
-        if side == "short" and (d1[-1].c < lv.price or (h1 and h1[-1].c < lv.price)):
-            continue
-        if bias == "up" and side == "short":
-            continue
-        if bias == "down" and side == "long":
-            continue
-        if sawed(d1, h4, h1, m5, lv.price, lv.formed_ts):
-            continue
-        # доп. запил на 5М: много фитилей сквозь линию после бара уровня
-        if m5 and _m5_wick_saw(m5, lv.price, lv.formed_ts):
-            continue
-        acc, acc_why = accumulation(h1, lv.price, lv.lo, lv.hi, atr_d)
-        if not acc:
-            continue
-        pad = max((lv.hi - lv.lo) * 0.20, 0.10 * atr_h4, last * 0.001)
-        if side == "long":
-            stop = lv.lo - pad
-            risk = max(last - stop, 1e-12)
-            take = last + 3 * risk
-        else:
-            stop = lv.hi + pad
-            risk = max(stop - last, 1e-12)
-            take = last - 3 * risk
-        cards.append(
-            {
-                "ticker": ticker,
-                "version": VERSION,
-                "side": "LONG" if side == "long" else "SHORT",
-                "status": "WATCH",
-                "level": lv.price,
-                "kind": lv.kind,
-                "strength": lv.strength,
-                "last": last,
-                "dist_atr": abs(last - lv.price) / atr_d,
-                "atr_d": atr_d,
-                "stop": stop,
-                "take": take,
-                "d1_bias": bias,
-                "why": [acc_why, "high/low дневки", "≤0.5 ATR от уровня"],
-            }
-        )
-    cards.sort(key=lambda c: (c["dist_atr"], -c["strength"]))
-    out["cards"] = cards[:1]
+    if not levels:
+        return out
+
+    cards: list[dict] = []
+    if "brk" in strategies:
+        cards.extend(evaluate_brk(ticker, d1c, h4c, h1c, atr_d, levels, bias))
+    if "fbo" in strategies:
+        cards.extend(evaluate_fbo(ticker, d1c, h4c, h1c, atr_d, levels, bias, threshold=fbo_threshold))
+
+    out["cards"] = cards
     return out
 
 
 if __name__ == "__main__":
+    m = _load_model()
     print(VERSION, "params", PARAMS)
+    print("model loaded:", len(m["trees"]), "trees, threshold", m.get("threshold"))

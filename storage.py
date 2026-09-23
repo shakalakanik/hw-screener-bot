@@ -32,45 +32,40 @@ def init():
         );
 
         CREATE TABLE IF NOT EXISTS dedup (
-            ticker  TEXT NOT NULL,
-            side    TEXT NOT NULL,
-            level   REAL NOT NULL,
-            expires INTEGER NOT NULL,
-            PRIMARY KEY (ticker, side, level)
-        );
-
-        CREATE TABLE IF NOT EXISTS html_templates (
-            user_id        INTEGER PRIMARY KEY,
-            templates_json TEXT NOT NULL DEFAULT '{}',
-            active_name    TEXT
+            ticker   TEXT NOT NULL,
+            side     TEXT NOT NULL,
+            level    REAL NOT NULL,
+            strategy TEXT NOT NULL DEFAULT 'brk',
+            expires  INTEGER NOT NULL,
+            PRIMARY KEY (ticker, side, level, strategy)
         );
         """)
 
 
-# ── Дедупликация (правило: один сигнал на монету раз в 12 ч) ─────────────────
+# ── Дедупликация (правило: один сигнал на монету+уровень+стратегию раз в 12 ч) ─
 
-def is_duplicate(ticker: str, side: str, level: float) -> bool:
+def is_duplicate(ticker: str, side: str, level: float, strategy: str = "brk") -> bool:
     with _conn() as c:
         now = int(time.time())
         row = c.execute(
-            "SELECT expires FROM dedup WHERE ticker=? AND side=? AND ABS(level-?)<?",
-            (ticker, side, level, level * 0.005),
+            "SELECT expires FROM dedup WHERE ticker=? AND side=? AND strategy=? AND ABS(level-?)<?",
+            (ticker, side, strategy, level, level * 0.005),
         ).fetchone()
         if row and row["expires"] > now:
             return True
         return False
 
 
-def mark_sent(ticker: str, side: str, level: float, ttl_hours: int = 12):
+def mark_sent(ticker: str, side: str, level: float, strategy: str = "brk", ttl_hours: int = 12):
     expires = int(time.time()) + ttl_hours * 3600
     with _conn() as c:
         c.execute(
-            "INSERT OR REPLACE INTO dedup(ticker,side,level,expires) VALUES(?,?,?,?)",
-            (ticker, side, level, expires),
+            "INSERT OR REPLACE INTO dedup(ticker,side,level,strategy,expires) VALUES(?,?,?,?,?)",
+            (ticker, side, level, strategy, expires),
         )
         c.execute(
             "INSERT INTO signals(ticker,side,level,kind,ts) VALUES(?,?,?,?,?)",
-            (ticker, side, level, "", int(time.time())),
+            (ticker, side, level, strategy, int(time.time())),
         )
 
 
@@ -151,150 +146,192 @@ def get_template_name(chat_id: int) -> str:
     return row["template"] if row else "default"
 
 
-def set_custom_filter(chat_id: int, filt: dict):
-    """Сохранить произвольный фильтр бота (custom_json). template помечаем miniapp."""
+
+# ── Watchlist — отслеживаемые сигналы ─────────────────────────────────────────
+
+def _ensure_watchlist(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id  INTEGER NOT NULL,
+            market   TEXT NOT NULL DEFAULT 'crypto',
+            strategy TEXT NOT NULL DEFAULT 'brk',
+            ticker   TEXT NOT NULL,
+            side     INTEGER NOT NULL,
+            level    REAL NOT NULL,
+            entry    REAL NOT NULL,
+            stop     REAL NOT NULL,
+            take     REAL NOT NULL,
+            kind     TEXT,
+            prob     REAL,
+            risk_pct REAL,
+            signal_ts INTEGER NOT NULL,
+            added_ts  INTEGER NOT NULL,
+            raw_json  TEXT
+        )
+    """)
+
+
+def add_to_watchlist(chat_id: int, item: dict) -> int:
+    """Добавить сигнал в watchlist. Возвращает id записи."""
     with _conn() as c:
+        _ensure_watchlist(c)
+        cur = c.execute(
+            """INSERT INTO watchlist
+               (chat_id, market, strategy, ticker, side, level, entry, stop, take,
+                kind, prob, risk_pct, signal_ts, added_ts, raw_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                chat_id,
+                item.get("market", "crypto"),
+                item.get("strategy", "brk"),
+                item["ticker"],
+                1 if item.get("side") == "LONG" else 0,
+                item.get("level", 0),
+                item.get("entry", 0),
+                item.get("stop", 0),
+                item.get("take", 0),
+                item.get("kind", ""),
+                item.get("prob", 0),
+                item.get("risk_pct", 0),
+                item.get("signal_ts", int(time.time() * 1000)),
+                int(time.time() * 1000),
+                json.dumps(item, ensure_ascii=False),
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_watchlist(chat_id: int, market: str = "crypto") -> list[dict]:
+    """Получить watchlist пользователя в формате совместимом с HTML."""
+    with _conn() as c:
+        _ensure_watchlist(c)
+        rows = c.execute(
+            "SELECT * FROM watchlist WHERE chat_id=? AND market=? ORDER BY added_ts DESC LIMIT 200",
+            (chat_id, market),
+        ).fetchall()
+    result = []
+    for r in rows:
+        result.append({
+            "type": r["strategy"],   # 'brk' | 'fbo' — реальная стратегия сигнала, как в HTML
+            "base": r["ticker"],
+            "sym": r["ticker"] + "USDT",
+            "t": r["signal_ts"],
+            "d": r["side"],
+            "side": "LONG" if r["side"] else "SHORT",
+            "lv": r["level"],
+            "k": r["kind"],
+            "p": r["prob"],
+            "e": r["entry"],
+            "st": r["stop"],
+            "tk": r["take"],
+            "rp": r["risk_pct"],
+            "strength": 3,
+            "crosses": 0,
+            "vol_mult": 1.0,
+            "added": r["added_ts"],
+        })
+    return result
+
+
+def remove_from_watchlist(chat_id: int, watch_id: int):
+    with _conn() as c:
+        _ensure_watchlist(c)
+        c.execute("DELETE FROM watchlist WHERE id=? AND chat_id=?", (watch_id, chat_id))
+
+
+def save_html_templates(chat_id: int, templates: dict, market: str = "crypto"):
+    """Сохранить шаблоны из HTML-скринера."""
+    with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS html_templates (
+                chat_id  INTEGER NOT NULL,
+                name     TEXT NOT NULL,
+                filters  TEXT NOT NULL,
+                market   TEXT NOT NULL DEFAULT 'crypto',
+                PRIMARY KEY (chat_id, name)
+            )
+        """)
+        # Удаляем старые шаблоны этого пользователя и вставляем новые
+        c.execute("DELETE FROM html_templates WHERE chat_id=?", (chat_id,))
+        for name, filters in templates.items():
+            c.execute(
+                "INSERT INTO html_templates(chat_id, name, filters, market) VALUES(?,?,?,?)",
+                (chat_id, name, json.dumps(filters, ensure_ascii=False), market),
+            )
+
+
+def get_html_templates(chat_id: int) -> dict:
+    """Получить все шаблоны пользователя из HTML."""
+    with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS html_templates (
+                chat_id  INTEGER NOT NULL,
+                name     TEXT NOT NULL,
+                filters  TEXT NOT NULL,
+                market   TEXT NOT NULL DEFAULT 'crypto',
+                PRIMARY KEY (chat_id, name)
+            )
+        """)
+        rows = c.execute(
+            "SELECT name, filters, market FROM html_templates WHERE chat_id=?",
+            (chat_id,),
+        ).fetchall()
+    return {r["name"]: {"filters": json.loads(r["filters"]), "market": r["market"]} for r in rows}
+
+
+# ── Активные подписки на шаблоны ─────────────────────────────────────────────
+
+def set_active_templates(chat_id: int, names: list[str]):
+    """Установить список активных шаблонов для пользователя."""
+    with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS active_templates (
+                chat_id INTEGER PRIMARY KEY,
+                names   TEXT NOT NULL DEFAULT '[]',
+                markets TEXT NOT NULL DEFAULT '["crypto"]'
+            )
+        """)
         c.execute(
-            "INSERT INTO user_filters(chat_id, template, custom_json) VALUES(?,?,?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET template=excluded.template, "
-            "custom_json=excluded.custom_json",
-            (chat_id, "miniapp", json.dumps(filt, ensure_ascii=False)),
+            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) "
+            "SELECT ?, ?, COALESCE((SELECT markets FROM active_templates WHERE chat_id=?), '[\"crypto\"]')",
+            (chat_id, json.dumps(names, ensure_ascii=False), chat_id),
         )
 
 
-# ── HTML-шаблоны Mini App ─────────────────────────────────────────────────────
-
-def get_html_templates(user_id: int) -> tuple[dict, str | None]:
-    """Вернуть (templates_dict, active_name)."""
+def set_active_markets(chat_id: int, markets: list[str]):
+    """Установить список активных рынков."""
     with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS active_templates (
+                chat_id INTEGER PRIMARY KEY,
+                names   TEXT NOT NULL DEFAULT '[]',
+                markets TEXT NOT NULL DEFAULT '["crypto"]'
+            )
+        """)
+        c.execute(
+            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) "
+            "SELECT ?, COALESCE((SELECT names FROM active_templates WHERE chat_id=?), '[]'), ?",
+            (chat_id, chat_id, json.dumps(markets, ensure_ascii=False)),
+        )
+
+
+def get_active_config(chat_id: int) -> dict:
+    """Получить активные шаблоны и рынки пользователя."""
+    with _conn() as c:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS active_templates (
+                chat_id INTEGER PRIMARY KEY,
+                names   TEXT NOT NULL DEFAULT '[]',
+                markets TEXT NOT NULL DEFAULT '["crypto"]'
+            )
+        """)
         row = c.execute(
-            "SELECT templates_json, active_name FROM html_templates WHERE user_id=?",
-            (user_id,),
+            "SELECT names, markets FROM active_templates WHERE chat_id=?", (chat_id,)
         ).fetchone()
     if not row:
-        return {}, None
-    try:
-        tpl = json.loads(row["templates_json"] or "{}")
-    except json.JSONDecodeError:
-        tpl = {}
-    if not isinstance(tpl, dict):
-        tpl = {}
-    return tpl, row["active_name"]
-
-
-def set_html_templates(user_id: int, templates: dict):
-    if not isinstance(templates, dict):
-        raise ValueError("templates must be a dict")
-    with _conn() as c:
-        row = c.execute(
-            "SELECT active_name FROM html_templates WHERE user_id=?", (user_id,)
-        ).fetchone()
-        active = row["active_name"] if row else None
-        if active and active not in templates:
-            active = None
-        c.execute(
-            "INSERT INTO html_templates(user_id, templates_json, active_name) VALUES(?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET templates_json=excluded.templates_json, "
-            "active_name=excluded.active_name",
-            (user_id, json.dumps(templates, ensure_ascii=False), active),
-        )
-
-
-def set_one_html_template(user_id: int, name: str, filt: dict):
-    tpl, active = get_html_templates(user_id)
-    tpl[name] = filt
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO html_templates(user_id, templates_json, active_name) VALUES(?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET templates_json=excluded.templates_json",
-            (user_id, json.dumps(tpl, ensure_ascii=False), active),
-        )
-
-
-def delete_html_template(user_id: int, name: str) -> bool:
-    tpl, active = get_html_templates(user_id)
-    if name not in tpl:
-        return False
-    del tpl[name]
-    if active == name:
-        active = None
-    with _conn() as c:
-        c.execute(
-            "INSERT INTO html_templates(user_id, templates_json, active_name) VALUES(?,?,?) "
-            "ON CONFLICT(user_id) DO UPDATE SET templates_json=excluded.templates_json, "
-            "active_name=excluded.active_name",
-            (user_id, json.dumps(tpl, ensure_ascii=False), active),
-        )
-    return True
-
-
-def set_active_html_template(user_id: int, name: str | None):
-    tpl, _ = get_html_templates(user_id)
-    if name is not None and name not in tpl:
-        raise KeyError(f"template not found: {name}")
-    with _conn() as c:
-        row = c.execute(
-            "SELECT templates_json FROM html_templates WHERE user_id=?", (user_id,)
-        ).fetchone()
-        if not row:
-            c.execute(
-                "INSERT INTO html_templates(user_id, templates_json, active_name) VALUES(?,?,?)",
-                (user_id, "{}", name),
-            )
-        else:
-            c.execute(
-                "UPDATE html_templates SET active_name=? WHERE user_id=?",
-                (name, user_id),
-            )
-
-
-def map_html_filter_to_bot(html: dict, name: str = "custom") -> dict:
-    """Best-effort HTML filter keys → bot filter for run_scan."""
-    html = html or {}
-
-    strength_min = 3
-    raw_str = html.get("str")
-    if raw_str is not None and str(raw_str).lower() not in ("auto", "", "null", "none"):
-        try:
-            strength_min = int(float(str(raw_str).replace(",", ".")))
-        except (TypeError, ValueError):
-            strength_min = 3
-
-    dist_atr_max = 0.5
-    raw_dist = html.get("dist")
-    if raw_dist is not None and str(raw_dist).lower() not in ("auto", "", "null", "none"):
-        try:
-            dist_atr_max = float(str(raw_dist).replace(",", "."))
-        except (TypeError, ValueError):
-            dist_atr_max = 0.5
-
-    sides = ["LONG", "SHORT"]
-    raw_side = str(html.get("side", "auto") or "auto").lower()
-    if raw_side == "long":
-        sides = ["LONG"]
-    elif raw_side == "short":
-        sides = ["SHORT"]
-
-    raw_bias = str(html.get("bias", "auto") or "auto").lower()
-    bias_filter = raw_bias not in ("auto", "", "null", "none", "off", "flat")
-
+        return {"names": [], "markets": ["crypto"]}
     return {
-        "desc": f"miniapp:{name}",
-        "strength_min": strength_min,
-        "dist_atr_max": dist_atr_max,
-        "sides": sides,
-        "bias_filter": bias_filter,
-        "html": html,
+        "names": json.loads(row["names"]),
+        "markets": json.loads(row["markets"]),
     }
-
-
-def apply_active_template_to_bot_filter(user_id: int, name: str | None = None):
-    """Установить active HTML-шаблон и пробросить mapped фильтр в user_filters."""
-    tpl, active = get_html_templates(user_id)
-    use = name if name is not None else active
-    if not use or use not in tpl:
-        raise KeyError("no active/named template")
-    set_active_html_template(user_id, use)
-    bot_filt = map_html_filter_to_bot(tpl[use], use)
-    set_custom_filter(user_id, bot_filt)
-    return bot_filt

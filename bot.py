@@ -1,199 +1,488 @@
-"""bot.py — Telegram-бот HW Screener + Mini App HTTP."""
+"""bot.py — HW Screener Bot с синхронизацией шаблонов из HTML."""
 import asyncio
+import hashlib
+import json
 import logging
 import os
+import time
 from datetime import datetime
+from pathlib import Path
+from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-    WebAppInfo,
-    MenuButtonWebApp,
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
 
 import storage
 from screener import run_scan
-from storage import TEMPLATES
-from webapp_server import start_web_server
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-TOKEN = os.environ.get("TG_BOT_TOKEN", "")
-SCAN_INTERVAL = int(os.environ.get("SCAN_INTERVAL_MIN", "15")) * 60  # секунды
-WEBAPP_URL = (os.environ.get("WEBAPP_URL") or "").rstrip("/")
+TOKEN           = os.environ["TG_BOT_TOKEN"]
+SCAN_INTERVAL   = int(os.environ.get("SCAN_INTERVAL_MIN", "15")) * 60
+PORT            = int(os.environ.get("PORT", "8080"))
+PUBLIC_URL      = (
+    os.environ.get("PUBLIC_URL")
+    or os.environ.get("WEBAPP_URL")
+    or ""
+).rstrip("/")   # https://yourapp.railway.app (WEBAPP_URL — запасной алиас)
 
-bot = Bot(token=TOKEN) if TOKEN else None
-dp = Dispatcher()
+bot = Bot(token=TOKEN)
+dp  = Dispatcher()
 
-# ── Подписчики ────────────────────────────────────────────────────────────────
 _subscribers: set[int] = set()
+_pending_cards: dict[str, dict] = {}   # card_key → card data
+
+# ── Sync-токены: chat_id → token ──────────────────────────────────────────────
+_sync_tokens: dict[str, int] = {}   # token → chat_id
+
+def _make_token(chat_id: int) -> str:
+    raw = f"{chat_id}:{TOKEN}:{int(time.time() // 3600)}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
-def _webapp_keyboard() -> InlineKeyboardMarkup | None:
-    if not WEBAPP_URL:
-        return None
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="📱 Открыть скринер",
-            web_app=WebAppInfo(url=WEBAPP_URL),
-        )
-    ]])
+# ── Форматирование сигнала ────────────────────────────────────────────────────
+_MARKET_LABEL = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа"}
 
 
 def _format_card(card: dict) -> str:
     side_emoji = "🟢" if card["side"] == "LONG" else "🔴"
-    bias_map = {"up": "↑ up", "down": "↓ down", "flat": "→ flat"}
+    bias_map   = {"up": "↑ up", "down": "↓ down", "flat": "→ flat"}
     bias = bias_map.get(card.get("d1_bias", "flat"), "flat")
 
-    entry = card["last"]
-    stop = card["stop"]
-    take = card["take"]
+    entry    = card["last"]
+    stop     = card["stop"]
+    take     = card["take"]
+    level    = card["level"]
     risk_pct = abs(entry - stop) / entry * 100
-    tp_pct = abs(take - entry) / entry * 100
+    tp_pct   = abs(take - entry)  / entry * 100
 
-    lines = [
+    market   = card.get("market", "crypto")
+    market_label = _MARKET_LABEL.get(market, market)
+    tpl_name = card.get("matched_template") or ""
+    tpl_line = f"📋 Шаблон: <b>{tpl_name}</b>\n" if tpl_name else ""
+
+    strategy = card.get("strategy", "brk")
+    strategy_label = "📈 Пробой" if strategy == "brk" else "🔻 Ложный пробой"
+    prob = card.get("prob")
+    prob_line = f"  (модель p={prob:.2f})" if strategy == "fbo" and prob is not None else ""
+
+    return "\n".join([
         f"{side_emoji} <b>{card['ticker']}</b> — {card['side']}",
-        f"🎯 Уровень: <code>{card['level']:.4f}</code>  [{card['kind']}]",
-        f"📍 Цена: <code>{entry:.4f}</code>  (расст. {card['dist_atr']:.2f} ATR)",
-        f"⛔ Стоп: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
-        f"💰 Тейк: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
-        f"💪 Сила уровня: {'★' * card['strength']}{'☆' * (5 - card['strength'])}  ({card['strength']}/5)",
+        f"{market_label}  ·  {strategy_label}{prob_line}",
+        tpl_line.rstrip("\n"),
+        f"🎯 Уровень: <code>{level:.4f}</code>  [{card['kind']}]",
+        f"📥 Вход: <code>{entry:.4f}</code>  (расст. {card['dist_atr']:.2f} ATR)",
+        f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
+        f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
+        f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
         f"📊 Тренд D1: {bias}",
-        f"📝 {' | '.join(card.get('why', []))}",
         f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}",
-    ]
-    return "\n".join(lines)
+    ])
 
 
 async def send_signal(card: dict, chat_ids: list[int]):
     text = _format_card(card)
     for chat_id in chat_ids:
         try:
-            await bot.send_message(chat_id, text, parse_mode="HTML")
+            card_key = f"{card['ticker']}:{card['side']}:{card.get('strategy','brk')}:{int(card['level']*1e6)}"
+            _pending_cards[card_key] = {**card, "chat_id": chat_id}
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_key[:60]}"),
+            ]])
+            await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
             logger.warning("Не удалось отправить %s: %s", chat_id, e)
 
 
-# ── Команды бота ──────────────────────────────────────────────────────────────
-
+# ── /start ────────────────────────────────────────────────────────────────────
 @dp.message(Command("start"))
 async def cmd_start(msg: Message):
     _subscribers.add(msg.chat.id)
-    storage.get_filter(msg.chat.id)  # инициализировать запись
-    kb = _webapp_keyboard()
-    text = (
-        "👋 <b>HW Screener Bot</b> запущен!\n\n"
-        "Я буду присылать сигналы пробоев по методике Герчика каждые "
-        f"{SCAN_INTERVAL // 60} минут.\n\n"
-        "Команды:\n"
-        "/status — текущие настройки\n"
-        "/filter — выбрать шаблон фильтра\n"
-        "/scan — запустить скан прямо сейчас\n"
-        "/app — открыть Mini App скринер\n"
-        "/stop — остановить сигналы"
-    )
-    await msg.answer(text, parse_mode="HTML", reply_markup=kb)
-
-
-@dp.message(Command("app"))
-async def cmd_app(msg: Message):
-    kb = _webapp_keyboard()
-    if not kb:
-        await msg.answer(
-            "Mini App не настроен. Задайте переменную окружения WEBAPP_URL "
-            "(публичный HTTPS URL Railway)."
-        )
-        return
+    storage.init()
     await msg.answer(
-        "📱 Нажми кнопку, чтобы открыть скринер внутри Telegram:",
-        reply_markup=kb,
+        "👋 <b>HW Screener Bot</b>\n\n"
+        "Команды:\n"
+        "/filter — выбрать шаблоны и рынки\n"
+        "/syncurl — получить ссылку для синхронизации из HTML\n"
+        "/scan — запустить скан сейчас\n"
+        "/status — текущие настройки\n"
+        "/stop — остановить сигналы",
+        parse_mode="HTML",
     )
 
 
+# ── /stop ─────────────────────────────────────────────────────────────────────
 @dp.message(Command("stop"))
 async def cmd_stop(msg: Message):
     _subscribers.discard(msg.chat.id)
     await msg.answer("⛔ Сигналы остановлены. /start чтобы возобновить.")
 
 
-@dp.message(Command("status"))
-async def cmd_status(msg: Message):
-    chat_id = msg.chat.id
-    subscribed = chat_id in _subscribers
-    tpl_name = storage.get_template_name(chat_id)
-    f = storage.get_filter(chat_id)
-    _, active_html = storage.get_html_templates(chat_id)
+# ── /syncurl — выдать ссылку для HTML ────────────────────────────────────────
+@dp.message(Command("syncurl"))
+async def cmd_syncurl(msg: Message):
+    if not PUBLIC_URL:
+        await msg.answer(
+            "⚠️ Переменная <code>PUBLIC_URL</code> не задана в Railway.\n\n"
+            "Зайди в Railway → Variables → добавь:\n"
+            "<code>PUBLIC_URL = https://&lt;твой домен&gt;.railway.app</code>",
+            parse_mode="HTML",
+        )
+        return
+    token = _make_token(msg.chat.id)
+    _sync_tokens[token] = msg.chat.id
+    url = f"{PUBLIC_URL}/sync/{token}"
     await msg.answer(
-        f"📋 <b>Статус</b>\n\n"
-        f"Подписка: {'✅ активна' if subscribed else '❌ остановлена'}\n"
-        f"Шаблон: <b>{tpl_name}</b>\n"
-        f"HTML active: <b>{active_html or '—'}</b>\n"
-        f"Описание: {f.get('desc', '—')}\n\n"
-        f"Сила уровня ≥ {f['strength_min']}\n"
-        f"Дистанция ≤ {f['dist_atr_max']} ATR\n"
-        f"Направления: {', '.join(f['sides'])}\n"
-        f"Только по тренду: {'да' if f.get('bias_filter') else 'нет'}\n\n"
-        f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин\n"
-        f"Mini App: {'✅ ' + WEBAPP_URL if WEBAPP_URL else '❌ WEBAPP_URL не задан'}",
+        f"🔗 <b>URL для синхронизации шаблонов</b>\n\n"
+        f"<code>{url}</code>\n\n"
+        f"Скопируй этот URL и вставь в HTML-скринер когда он попросит "
+        f"(кнопка 📬 <b>Синхронизировать с ботом</b>).\n\n"
+        f"Ссылка действует 1 час.",
         parse_mode="HTML",
     )
 
 
+# ── /status ───────────────────────────────────────────────────────────────────
+@dp.message(Command("status"))
+async def cmd_status(msg: Message):
+    chat_id   = msg.chat.id
+    cfg       = storage.get_active_config(chat_id)
+    tpls      = storage.get_html_templates(chat_id)
+    subscribed = chat_id in _subscribers
+
+    active_names   = cfg["names"]
+    active_markets = cfg["markets"]
+
+    mkt_str = " + ".join(
+        {"crypto": "Крипта (Bybit)", "ru": "MOEX"}.get(m, m)
+        for m in active_markets
+    ) or "не выбраны"
+
+    if not tpls:
+        tpl_str = "Шаблоны не синхронизированы.\nИспользуй /syncurl → кнопку 📬 в HTML."
+    elif not active_names:
+        tpl_str = f"Шаблонов загружено: {len(tpls)}\nАктивных: нет — выбери через /filter"
+    else:
+        tpl_str = f"Активных шаблонов: {len(active_names)}\n" + "\n".join(f"  ✅ {n}" for n in active_names)
+
+    await msg.answer(
+        f"📋 <b>Статус</b>\n\n"
+        f"Подписка: {'✅ активна' if subscribed else '❌ остановлена'}\n"
+        f"Рынки: {mkt_str}\n\n"
+        f"{tpl_str}\n\n"
+        f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин",
+        parse_mode="HTML",
+    )
+
+
+# ── /filter — выбор шаблонов и рынков ────────────────────────────────────────
 @dp.message(Command("filter"))
 async def cmd_filter(msg: Message):
+    chat_id = msg.chat.id
+    tpls    = storage.get_html_templates(chat_id)
+    if not tpls:
+        await msg.answer(
+            "📭 Шаблоны ещё не синхронизированы.\n\n"
+            "1. Открой HTML-скринер\n"
+            "2. Сохрани шаблоны кнопкой «Сохранить как шаблон»\n"
+            "3. Получи ссылку через /syncurl\n"
+            "4. Нажми 📬 Синхронизировать с ботом в HTML"
+        )
+        return
+    await _send_filter_menu(msg.chat.id)
+
+
+async def _send_filter_menu(chat_id: int, edit_msg=None):
+    tpls   = storage.get_html_templates(chat_id)
+    cfg    = storage.get_active_config(chat_id)
+    active = set(cfg["names"])
+    active_markets = set(cfg["markets"])
+
     buttons = []
-    for name, tpl in TEMPLATES.items():
+
+    # Рынки
+    buttons.append([InlineKeyboardButton(text="── Рынки ──", callback_data="noop")])
+    mkt_row = []
+    for mkt, label in [("crypto", "🌐 Крипта"), ("ru", "🇷🇺 MOEX")]:
+        check = "✅" if mkt in active_markets else "⬜"
+        mkt_row.append(InlineKeyboardButton(
+            text=f"{check} {label}", callback_data=f"mkt:{mkt}"
+        ))
+    buttons.append(mkt_row)
+
+    # Шаблоны
+    buttons.append([InlineKeyboardButton(text="── Шаблоны ──", callback_data="noop")])
+    strat_icon = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
+    for name in tpls:
+        check = "✅" if name in active else "⬜"
+        market_tag = tpls[name]["market"]
+        mkt_icon = "🌐" if market_tag == "crypto" else "🇷🇺"
+        tpl_strat = tpls[name]["filters"].get("_strat", "both")
+        strat_tag = strat_icon.get(tpl_strat, "")
         buttons.append([InlineKeyboardButton(
-            text=f"{'✅ ' if storage.get_template_name(msg.chat.id) == name else ''}{name} — {tpl['desc']}",
-            callback_data=f"tpl:{name}",
+            text=f"{check} {mkt_icon} {strat_tag} {name}",
+            callback_data=f"tpl:{name[:40]}",
         )])
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await msg.answer("Выбери шаблон фильтра:", reply_markup=kb)
+
+    # Кнопки управления
+    buttons.append([
+        InlineKeyboardButton(text="✅ Включить все", callback_data="tpl_all:1"),
+        InlineKeyboardButton(text="⬜ Выключить все", callback_data="tpl_all:0"),
+    ])
+    buttons.append([InlineKeyboardButton(text="💾 Сохранить и закрыть", callback_data="filter_done")])
+
+    kb  = InlineKeyboardMarkup(inline_keyboard=buttons)
+    txt = "🎛 <b>Настройка фильтров</b>\n\nВыбери рынки и шаблоны по которым приходят сигналы:\n📈 = Пробой  🔻 = Ложный пробой"
+
+    if edit_msg:
+        await edit_msg.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+    else:
+        await bot.send_message(chat_id, txt, reply_markup=kb, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(call: CallbackQuery):
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("mkt:"))
+async def cb_market(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    mkt     = call.data.split(":", 1)[1]
+    cfg     = storage.get_active_config(chat_id)
+    markets = set(cfg["markets"])
+    if mkt in markets:
+        markets.discard(mkt)
+    else:
+        markets.add(mkt)
+    storage.set_active_markets(chat_id, list(markets))
+    await _send_filter_menu(chat_id, edit_msg=call.message)
+    await call.answer()
 
 
 @dp.callback_query(F.data.startswith("tpl:"))
-async def cb_template(call: CallbackQuery):
-    name = call.data.split(":", 1)[1]
-    if name not in TEMPLATES:
-        await call.answer("Неизвестный шаблон")
-        return
-    storage.set_template(call.message.chat.id, name)
-    _subscribers.add(call.message.chat.id)
-    f = TEMPLATES[name]
+async def cb_tpl(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    name    = call.data.split(":", 1)[1]
+    tpls    = storage.get_html_templates(chat_id)
+    # Найти полное имя (callback обрезает до 40 символов)
+    full_name = next((k for k in tpls if k[:40] == name), name)
+    cfg     = storage.get_active_config(chat_id)
+    active  = set(cfg["names"])
+    if full_name in active:
+        active.discard(full_name)
+    else:
+        active.add(full_name)
+    storage.set_active_templates(chat_id, list(active))
+    await _send_filter_menu(chat_id, edit_msg=call.message)
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("tpl_all:"))
+async def cb_tpl_all(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    enable  = call.data.endswith(":1")
+    tpls    = storage.get_html_templates(chat_id)
+    storage.set_active_templates(chat_id, list(tpls.keys()) if enable else [])
+    await _send_filter_menu(chat_id, edit_msg=call.message)
+    await call.answer("Все включены" if enable else "Все выключены")
+
+
+@dp.callback_query(F.data == "filter_done")
+async def cb_filter_done(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    cfg     = storage.get_active_config(chat_id)
+    n       = len(cfg["names"])
+    mkts    = ", ".join(cfg["markets"]) or "нет"
+    _subscribers.add(chat_id)
     await call.message.edit_text(
-        f"✅ Шаблон <b>{name}</b> установлен.\n{f['desc']}",
+        f"✅ Настройки сохранены.\n\n"
+        f"Активных шаблонов: <b>{n}</b>\n"
+        f"Рынки: <b>{mkts}</b>\n\n"
+        f"Сигналы будут приходить каждые {SCAN_INTERVAL // 60} мин.",
         parse_mode="HTML",
     )
     await call.answer()
 
 
+# ── /scan ─────────────────────────────────────────────────────────────────────
 @dp.message(Command("scan"))
 async def cmd_scan(msg: Message):
-    await msg.answer("🔍 Запускаю скан... Это займёт 1–3 минуты.")
+    await msg.answer("🔍 Запускаю скан... 1–3 минуты.")
     try:
         await run_scan(
             on_signal=send_signal,
             subscribers=[msg.chat.id],
-            chat_filters=storage.get_filter,
+            chat_filters=_build_filter_for_chat,
         )
         await msg.answer("✅ Скан завершён.")
     except Exception as e:
         logger.exception("Ошибка скана")
-        await msg.answer(f"❌ Ошибка скана: {e}")
+        await msg.answer(f"❌ Ошибка: {e}")
 
 
-# ── Фоновый цикл ─────────────────────────────────────────────────────────────
+# ── Построить фильтр для чата из активных шаблонов ───────────────────────────
+def _build_filter_for_chat(chat_id: int) -> dict:
+    cfg    = storage.get_active_config(chat_id)
+    tpls   = storage.get_html_templates(chat_id)
+    active = cfg["names"]
+    if not active or not tpls:
+        return storage.get_filter(chat_id)   # fallback — старый фильтр
 
+    # Объединяем активные шаблоны: сигнал проходит если подходит хотя бы под один.
+    # Каждый элемент несёт своё имя (_name) и свой рынок (_market), чтобы screener.py
+    # мог сообщить точно какой шаблон совпал и не путать рынки между шаблонами.
+    multi = []
+    for n in active:
+        if n not in tpls:
+            continue
+        entry = tpls[n]
+        tpl_filters = entry["filters"]
+        strat = tpl_filters.get("_strat", "both")   # 'fbo' | 'brk' | 'both', по умолчанию оба
+        multi.append({
+            "_name": n,
+            "_market": entry.get("market", "crypto"),
+            "_strategy": strat,
+            "filters": tpl_filters,
+        })
+    merged = {"_multi": multi, "markets": cfg["markets"]}
+    return merged
+
+
+
+# ── 👁 Callback: отслеживать сигнал ──────────────────────────────────────────
+@dp.callback_query(F.data.startswith("watch:"))
+async def cb_watch(call: CallbackQuery):
+    chat_id  = call.message.chat.id
+    card_key = call.data[6:]
+    card     = _pending_cards.get(card_key)
+    if not card:
+        await call.answer("⏰ Сигнал устарел, данные не сохранились", show_alert=True)
+        return
+
+    entry    = card.get("last", 0)
+    stop     = card.get("stop", 0)
+    risk_pct = abs(entry - stop) / entry if entry else 0
+
+    item = {
+        "market":    card.get("market", "crypto"),
+        "strategy":  card.get("strategy", "brk"),
+        "ticker":    card["ticker"],
+        "side":      card["side"],
+        "level":     card.get("level", 0),
+        "entry":     entry,
+        "stop":      stop,
+        "take":      card.get("take", 0),
+        "kind":      card.get("kind", ""),
+        "prob":      card.get("prob", 0) or 0,
+        "risk_pct":  risk_pct,
+        "signal_ts": int(time.time() * 1000),
+    }
+    watch_id = storage.add_to_watchlist(chat_id, item)
+
+    # Обновляем кнопку → ✅ Отслеживается (с id для удаления)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="✅ Отслеживается — убрать",
+            callback_data=f"unwatch:{watch_id}",
+        )
+    ]])
+    try:
+        await call.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+    await call.answer("👁 Добавлено в отслеживаемые!")
+
+
+@dp.callback_query(F.data.startswith("unwatch:"))
+async def cb_unwatch(call: CallbackQuery):
+    chat_id  = call.message.chat.id
+    watch_id = int(call.data.split(":", 1)[1])
+    storage.remove_from_watchlist(chat_id, watch_id)
+
+    # Восстанавливаем кнопку "Отслеживать"
+    # Находим card_key из текста сообщения — просто убираем кнопку
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="👁 Отслеживать", callback_data="watch:expired")
+    ]])
+    try:
+        await call.message.edit_reply_markup(reply_markup=kb)
+    except Exception:
+        pass
+    await call.answer("Убрано из отслеживаемых")
+
+
+# ── HTTP: отдать watchlist в HTML ─────────────────────────────────────────────
+async def handle_watchlist(request: web.Request) -> web.Response:
+    token   = request.match_info.get("token", "")
+    chat_id = _sync_tokens.get(token)
+    if not chat_id:
+        return web.json_response({"error": "invalid or expired token"}, status=401)
+    market  = request.rel_url.query.get("market", "crypto")
+    items   = storage.get_watchlist(chat_id, market)
+    return web.json_response({"ok": True, "watchlist": items})
+
+
+# ── HTTP webhook — принимает шаблоны из HTML ─────────────────────────────────
+async def handle_sync(request: web.Request) -> web.Response:
+    token = request.match_info.get("token", "")
+    chat_id = _sync_tokens.get(token)
+    if not chat_id:
+        return web.json_response({"error": "invalid or expired token"}, status=401)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    templates = data.get("templates", {})
+    market    = data.get("market", "crypto")
+
+    if not isinstance(templates, dict) or not templates:
+        return web.json_response({"error": "no templates"}, status=400)
+
+    storage.save_html_templates(chat_id, templates, market)
+
+    # Уведомить пользователя в Telegram
+    names = list(templates.keys())
+    try:
+        await bot.send_message(
+            chat_id,
+            f"✅ <b>Шаблоны синхронизированы!</b>\n\n"
+            f"Загружено шаблонов: <b>{len(names)}</b>\n"
+            + "\n".join(f"  • {n}" for n in names[:10])
+            + ("\n  ..." if len(names) > 10 else "")
+            + f"\n\nТеперь выбери активные через /filter",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.warning("Не удалось уведомить %s: %s", chat_id, e)
+
+    return web.json_response({"ok": True, "count": len(names)})
+
+
+
+async def handle_index(request: web.Request) -> web.Response:
+    """Отдать HTML-скринер (Mini App / браузер)."""
+    for name in ("HW_FBO_scanner_6.html", "webapp/screener.html"):
+        path = Path(__file__).resolve().parent / name
+        if path.is_file():
+            return web.FileResponse(path)
+    return web.Response(text="screener html missing", status=404)
+
+
+async def handle_health(request: web.Request) -> web.Response:
+    return web.Response(text="ok")
+
+
+# ── Фоновый скан ─────────────────────────────────────────────────────────────
 async def scan_loop():
-    await asyncio.sleep(10)  # дать боту запуститься
+    await asyncio.sleep(15)
     while True:
         if _subscribers:
             logger.info("Авто-скан для %d подписчиков", len(_subscribers))
@@ -201,44 +490,32 @@ async def scan_loop():
                 await run_scan(
                     on_signal=send_signal,
                     subscribers=list(_subscribers),
-                    chat_filters=storage.get_filter,
+                    chat_filters=_build_filter_for_chat,
                 )
             except Exception:
                 logger.exception("Ошибка авто-скана")
         await asyncio.sleep(SCAN_INTERVAL)
 
 
-async def _setup_menu_button():
-    if not WEBAPP_URL or not bot:
-        return
-    try:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Скринер",
-                web_app=WebAppInfo(url=WEBAPP_URL),
-            )
-        )
-        logger.info("Menu button WebApp set → %s", WEBAPP_URL)
-    except Exception:
-        logger.exception("Не удалось установить MenuButtonWebApp")
-
-
+# ── Запуск ────────────────────────────────────────────────────────────────────
 async def main():
-    if not TOKEN:
-        raise SystemExit("TG_BOT_TOKEN is required")
-    global bot
-    if bot is None:
-        bot = Bot(token=TOKEN)
-
     storage.init()
-    port = int(os.environ.get("PORT", "8080"))
-    runner = await start_web_server(port=port)
-    await _setup_menu_button()
+
+    # HTTP-сервер для webhook
+    app = web.Application()
+    app.router.add_post("/sync/{token}", handle_sync)
+    app.router.add_get("/watchlist/{token}", handle_watchlist)
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/app", handle_index)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info("HTTP сервер запущен на порту %d", PORT)
+
     asyncio.create_task(scan_loop())
-    try:
-        await dp.start_polling(bot)
-    finally:
-        await runner.cleanup()
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
