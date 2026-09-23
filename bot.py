@@ -295,7 +295,7 @@ async def cmd_status(msg: Message):
     active_markets = cfg["markets"]
 
     mkt_str = " + ".join(
-        {"crypto": "Крипта", "ru": "MOEX"}.get(m, m)
+        {"crypto": "Крипта", "ru": "Мосбиржа"}.get(m, m)
         for m in active_markets
     ) or "нет (включи шаблоны в /filter)"
 
@@ -307,7 +307,7 @@ async def cmd_status(msg: Message):
         overrides = storage.get_template_strategy_overrides(chat_id)
         label = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
         blocks = []
-        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 MOEX")):
+        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 Мосбиржа")):
             names = by_mkt.get(m) or []
             if not names:
                 blocks.append(f"{mlabel}: —")
@@ -353,14 +353,15 @@ async def cmd_filter(msg: Message):
 
 _STRAT_CYCLE = {"fbo": "brk", "brk": "both", "both": "fbo"}
 _STRAT_ICON  = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
-_MKT_TAB     = {"crypto": "🌐 Крипта", "ru": "🇷🇺 MOEX"}
+_MKT_TAB     = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа"}
 
 
 def _effective_strategy(chat_id: int, name: str, tpl_filters: dict, overrides: dict) -> str:
     """Явное переопределение из бота важнее _strat, записанного в HTML."""
     if name in overrides:
         return overrides[name]
-    return tpl_filters.get("_strat", "fbo")  # HTML stratOf fallback: e?e.value:'fbo'
+    raw = (tpl_filters or {}).get("_strat", "fbo")
+    return raw if raw in _STRAT_CYCLE else "fbo"
 
 
 def _resolve_tpl_name(tpls: dict, key: str) -> str | None:
@@ -370,70 +371,89 @@ def _resolve_tpl_name(tpls: dict, key: str) -> str | None:
     return next((k for k in tpls if k[:40] == key), None)
 
 
-def _tpls_for_market(tpls: dict, market: str) -> dict:
-    return {n: v for n, v in tpls.items() if v.get("market", "crypto") == market}
+async def _send_filter_root(chat_id: int, edit_msg=None):
+    """Корень /filter: только выбор рынка."""
+    _filter_tab.pop(chat_id, None)
+    cfg = storage.get_active_config(chat_id)
+    by = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    enabled = set(cfg.get("markets") or [])
+
+    buttons = [[
+        InlineKeyboardButton(text="🌐 Крипта", callback_data="filter_mkt:crypto"),
+        InlineKeyboardButton(text="🇷🇺 Мосбиржа", callback_data="filter_mkt:ru"),
+    ]]
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    def _mkt_line(mkt: str, label: str) -> str:
+        on = mkt in enabled
+        n = len(by.get(mkt) or [])
+        state = "🟢 вкл" if on else "⚪ выкл"
+        return f"{label}: {state}, шаблонов: {n}"
+
+    txt = (
+        "🎛 <b>Фильтр</b>\n\n"
+        "Выбери рынок:\n"
+        f"• {_mkt_line('crypto', '🌐 Крипта')}\n"
+        f"• {_mkt_line('ru', '🇷🇺 Мосбиржа')}"
+    )
+
+    if edit_msg:
+        try:
+            await edit_msg.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id, txt, reply_markup=kb, parse_mode="HTML")
+    else:
+        await bot.send_message(chat_id, txt, reply_markup=kb, parse_mode="HTML")
 
 
 async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = None):
-    tpls = storage.get_html_templates(chat_id)
+    """Экран управления одним рынком. market=None → корневой выбор рынка."""
     if market not in ("crypto", "ru"):
-        market = _filter_tab.get(chat_id)
-    if market not in ("crypto", "ru"):
-        # Если есть только MOEX-шаблоны — открыть ru, иначе crypto
-        if tpls and all(v.get("market") == "ru" for v in tpls.values()):
-            market = "ru"
-        else:
-            market = "crypto"
-    _filter_tab[chat_id] = market
+        await _send_filter_root(chat_id, edit_msg=edit_msg)
+        return
 
-    cfg       = storage.get_active_config(chat_id)
-    by_mkt    = cfg.get("names_by_market") or {"crypto": [], "ru": []}
-    active    = set(by_mkt.get(market) or [])
+    _filter_tab[chat_id] = market
+    tpls = storage.get_html_templates(chat_id)
+    cfg = storage.get_active_config(chat_id)
+    by_mkt = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    active = set(by_mkt.get(market) or [])
+    enabled = market in (cfg.get("markets") or [])
     overrides = storage.get_template_strategy_overrides(chat_id)
-    market_tpls = _tpls_for_market(tpls, market)
+
+    # Общий список HTML-шаблонов на обоих рынках (не режем по market тегу)
+    shared_names = list(tpls.keys())
 
     buttons = []
-
-    # Вкладки рынков (переключение экрана, не toggle скана)
-    tab_row = []
-    for mkt, label in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 MOEX")):
-        n_active = len(by_mkt.get(mkt) or [])
-        mark = "• " if mkt == market else ""
-        suffix = f" ({n_active})" if n_active else ""
-        tab_row.append(InlineKeyboardButton(
-            text=f"{mark}{label}{suffix}",
-            callback_data=f"fmkt:{mkt}",
-        ))
-    buttons.append(tab_row)
-
+    on_off = "🟢 Рынок ВКЛ" if enabled else "⚪ Рынок ВЫКЛ"
     buttons.append([InlineKeyboardButton(
-        text=f"── {_MKT_TAB[market]}: шаблоны ──",
-        callback_data="noop",
+        text=on_off,
+        callback_data=f"mkt_on:{market}",
     )])
 
-    if not market_tpls:
+    if not shared_names:
         buttons.append([InlineKeyboardButton(
             text="(нет шаблонов — синхронизируй из HTML)",
             callback_data="noop",
         )])
     else:
-        for name in market_tpls:
+        for name in shared_names:
             check = "✅" if name in active else "⬜"
-            strat = _effective_strategy(chat_id, name, market_tpls[name]["filters"], overrides)
-            strat_tag = _STRAT_ICON.get(strat, "")
+            strat = _effective_strategy(
+                chat_id, name, (tpls[name].get("filters") or {}), overrides
+            )
+            strat_tag = _STRAT_ICON.get(strat, "🔻ЛП")
             key = name[:40]
             buttons.append([
                 InlineKeyboardButton(text=f"{check} {name}", callback_data=f"tpl:{key}"),
                 InlineKeyboardButton(text=strat_tag, callback_data=f"strat:{key}"),
-                InlineKeyboardButton(text="✏️", callback_data=f"ren:{key}"),
             ])
 
     buttons.append([
-        InlineKeyboardButton(text="✅ Все (этот рынок)", callback_data="tpl_all:1"),
-        InlineKeyboardButton(text="⬜ Сброс (этот рынок)", callback_data="tpl_all:0"),
+        InlineKeyboardButton(text="✅ Все", callback_data="tpl_all:1"),
+        InlineKeyboardButton(text="⬜ Сброс", callback_data="tpl_all:0"),
     ])
     buttons.append([InlineKeyboardButton(
-        text="🔄 Обновить шаблоны", callback_data="refresh_tpl"
+        text="◀️ Назад", callback_data="filter_back"
     )])
     buttons.append([InlineKeyboardButton(
         text="💾 Сохранить и закрыть", callback_data="filter_done"
@@ -442,13 +462,13 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     n_on = len(active)
     txt = (
-        f"🎛 <b>Фильтры — {_MKT_TAB[market]}</b>\n\n"
-        f"Активных на этом рынке: <b>{n_on}</b>\n\n"
-        "Переключай вкладку 🌐 / 🇷🇺 сверху.\n"
-        "Слева — вкл/выкл шаблон (только этот рынок).\n"
-        "Стратегия: 📈Проб → 🔻ЛП → 📈🔻Оба.\n"
-        "✏️ — переименовать шаблон.\n\n"
-        "Скан идёт по рынкам, где есть ≥1 активный шаблон."
+        f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
+        f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · "
+        f"активных шаблонов: <b>{n_on}</b>\n\n"
+        "• Вкл/выкл рынок — получать сигналы по нему\n"
+        "• Слева — шаблон для этого рынка (список общий)\n"
+        "• Стратегия: 🔻ЛП → 📈Проб → 📈🔻Оба\n"
+        "• Переименовать шаблон — в HTML (✏️ Переименовать)"
     )
 
     if edit_msg:
@@ -465,6 +485,25 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 
+@dp.callback_query(F.data == "filter_back")
+async def cb_filter_back(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    await _send_filter_root(chat_id, edit_msg=call.message)
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("filter_mkt:"))
+async def cb_filter_mkt(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    await call.answer(_MKT_TAB[mkt])
+
+
+# Совместимость со старыми callback
 @dp.callback_query(F.data.startswith("fmkt:"))
 async def cb_filter_tab(call: CallbackQuery):
     chat_id = call.message.chat.id
@@ -476,7 +515,6 @@ async def cb_filter_tab(call: CallbackQuery):
     await call.answer(_MKT_TAB[mkt])
 
 
-# Старый callback mkt: — переключает вкладку (совместимость)
 @dp.callback_query(F.data.startswith("mkt:"))
 async def cb_market(call: CallbackQuery):
     chat_id = call.message.chat.id
@@ -488,6 +526,21 @@ async def cb_market(call: CallbackQuery):
     await call.answer(_MKT_TAB[mkt])
 
 
+@dp.callback_query(F.data.startswith("mkt_on:"))
+async def cb_mkt_on(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    cfg = storage.get_active_config(chat_id)
+    enabled = set(cfg.get("markets") or [])
+    turn_on = mkt not in enabled
+    storage.set_market_enabled(chat_id, mkt, turn_on)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    await call.answer("вкл" if turn_on else "выкл")
+
+
 @dp.callback_query(F.data.startswith("tpl:"))
 async def cb_tpl(call: CallbackQuery):
     chat_id = call.message.chat.id
@@ -497,8 +550,9 @@ async def cb_tpl(call: CallbackQuery):
     if not full_name:
         await call.answer("Шаблон не найден")
         return
-    market = tpls[full_name].get("market", "crypto")
-    _filter_tab[chat_id] = market
+    market = _filter_tab.get(chat_id)
+    if market not in ("crypto", "ru"):
+        market = "crypto"
     cfg = storage.get_active_config(chat_id)
     active = list((cfg.get("names_by_market") or {}).get(market) or [])
     if full_name in active:
@@ -519,11 +573,12 @@ async def cb_strat(call: CallbackQuery):
     if not full_name:
         await call.answer("Шаблон не найден")
         return
-    market = tpls[full_name].get("market", "crypto")
-    _filter_tab[chat_id] = market
+    market = _filter_tab.get(chat_id)
+    if market not in ("crypto", "ru"):
+        market = "crypto"
     overrides = storage.get_template_strategy_overrides(chat_id)
     current = _effective_strategy(chat_id, full_name, tpls[full_name]["filters"], overrides)
-    new_strat = _STRAT_CYCLE[current]
+    new_strat = _STRAT_CYCLE.get(current, "fbo")
     storage.set_template_strategy(chat_id, full_name, new_strat)
     await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
     label = {"fbo": "Ложный пробой", "brk": "Пробой", "both": "Оба"}[new_strat]
@@ -532,6 +587,7 @@ async def cb_strat(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("ren:"))
 async def cb_rename(call: CallbackQuery):
+    """Оставлен для старых сообщений; основной rename — в HTML."""
     chat_id = call.message.chat.id
     key = call.data.split(":", 1)[1]
     tpls = storage.get_html_templates(chat_id)
@@ -539,14 +595,14 @@ async def cb_rename(call: CallbackQuery):
     if not full_name:
         await call.answer("Шаблон не найден")
         return
-    market = tpls[full_name].get("market", "crypto")
-    _filter_tab[chat_id] = market
+    market = _filter_tab.get(chat_id) or tpls[full_name].get("market", "crypto")
+    _filter_tab[chat_id] = market if market in ("crypto", "ru") else "crypto"
     _pending_rename[chat_id] = full_name
     await call.answer()
     await bot.send_message(
         chat_id,
         f"✏️ Пришли новое имя для «<b>{full_name}</b>»\n"
-        f"(или /cancel)",
+        f"(или /cancel). Предпочтительнее rename в HTML.",
         parse_mode="HTML",
     )
 
@@ -569,7 +625,6 @@ async def on_rename_text(msg: Message):
     old = _pending_rename.get(chat_id)
     if not old:
         raise SkipHandler
-    # Кнопки главного меню — отменить rename и отдать событие их хендлерам
     menu_labels = {
         "📡 Скан", "⚙️ Фильтр", "📊 Статус", "🔗 Sync",
         "🔄 Обновить шаблоны", "▶️ Старт", "⛔ Стоп",
@@ -594,14 +649,17 @@ async def cb_tpl_all(call: CallbackQuery):
     chat_id = call.message.chat.id
     enable = call.data.endswith(":1")
     market = _filter_tab.get(chat_id, "crypto")
+    if market not in ("crypto", "ru"):
+        market = "crypto"
     tpls = storage.get_html_templates(chat_id)
-    market_names = list(_tpls_for_market(tpls, market).keys())
+    # Общий список — все HTML-шаблоны
+    all_names = list(tpls.keys())
     storage.set_active_templates_for_market(
-        chat_id, market, market_names if enable else []
+        chat_id, market, all_names if enable else []
     )
     await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
     await call.answer(
-        f"{_MKT_TAB[market]}: все включены" if enable else f"{_MKT_TAB[market]}: выключены"
+        f"{_MKT_TAB[market]}: все включены" if enable else f"{_MKT_TAB[market]}: сброс"
     )
 
 
@@ -636,18 +694,20 @@ async def cb_filter_done(call: CallbackQuery):
     _pending_rename.pop(chat_id, None)
     cfg = storage.get_active_config(chat_id)
     by = cfg.get("names_by_market") or {}
+    enabled = set(cfg.get("markets") or [])
     parts = []
-    for m, label in (("crypto", "крипта"), ("ru", "MOEX")):
+    for m, label in (("crypto", "крипта"), ("ru", "мосбиржа")):
+        if m not in enabled:
+            continue
         n = len(by.get(m) or [])
-        if n:
-            parts.append(f"{label}: {n}")
+        parts.append(f"{label}: {n}")
     mkts = ", ".join(parts) or "нет активных"
     _subscribers.add(chat_id)
     await call.message.edit_text(
         f"✅ Настройки сохранены.\n\n"
         f"Активно: <b>{mkts}</b>\n\n"
         f"Сигналы каждые {SCAN_INTERVAL // 60} мин "
-        f"по рынкам с включёнными шаблонами.",
+        f"по включённым рынкам.",
         parse_mode="HTML",
     )
     await call.answer()
@@ -676,19 +736,23 @@ async def cmd_scan(msg: Message):
 
 # ── Построить фильтр для чата из активных шаблонов ───────────────────────────
 def _build_filter_for_chat(chat_id: int) -> dict:
-    """Фильтр чата: только активные шаблоны своего рынка (crypto / ru).
+    """Фильтр чата: активные шаблоны per-market + явный вкл рынка.
 
-    Рынок сканируется, только если у него ≥1 активный шаблон.
+    Список шаблонов общий (HTML); активный набор — names_by_market.
+    Рынок сканируется только если он включён и есть ≥1 активный шаблон.
     """
     cfg  = storage.get_active_config(chat_id)
     tpls = storage.get_html_templates(chat_id)
     by   = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    enabled = set(cfg.get("markets") or [])
 
     overrides = storage.get_template_strategy_overrides(chat_id)
     multi = []
     markets = []
 
     for mkt in ("crypto", "ru"):
+        if mkt not in enabled:
+            continue
         names = by.get(mkt) or []
         if not names:
             continue
@@ -697,10 +761,7 @@ def _build_filter_for_chat(chat_id: int) -> dict:
             if n not in tpls:
                 continue
             entry = tpls[n]
-            # Шаблон должен принадлежать этому рынку (защита от рассинхрона)
-            if entry.get("market", "crypto") != mkt:
-                continue
-            tpl_filters = entry["filters"]
+            tpl_filters = entry.get("filters") or {}
             strat = _effective_strategy(chat_id, n, tpl_filters, overrides)
             multi.append({
                 "_name": n,
@@ -713,7 +774,6 @@ def _build_filter_for_chat(chat_id: int) -> dict:
             markets.append(mkt)
 
     if not multi:
-        # Нет активных шаблонов — ничего не сканируем (явный выбор пользователя)
         return {"markets": [], "_multi": []}
 
     return {"_multi": multi, "markets": markets}
