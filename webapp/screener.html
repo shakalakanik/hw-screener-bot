@@ -102,6 +102,7 @@ progress{width:100%;height:6px;margin-top:8px}
           <select id="sc_tpl" style="min-width:230px"><option value="">— выбрать —</option></select></div>
         <button id="sc_tplsave" class="ghost" style="padding:6px 12px">Сохранить как шаблон</button>
         <button id="sc_tpldel" class="ghost" style="padding:6px 12px">Удалить шаблон</button>
+        <button id="sc_tplsync" class="ghost" style="padding:6px 12px;border-color:#4caf50;color:#4caf50">📬 Синхронизировать с ботом</button>
       </div>
       <div id="sc_filters">
       <div class="frow">
@@ -2955,11 +2956,14 @@ function applyTpl(pfx,val){
     const e=el('#'+pfx+'_'+id); if(!e) continue;
     e.value = (src[id]!==undefined) ? src[id] : 'auto';
   }
+  if(src._strat){ const se=el('#'+pfx+'_strat'); if(se) se.value=src._strat; }
   if(pfx==='sc'){ if(LAST.length) renderScan(); } else renderBt();
 }
 function currentTplObj(pfx){
   const o={};
   for(const id of FIDS){ const e=el('#'+pfx+'_'+id); if(e&&e.value!=='auto') o[id]=e.value; }
+  const stratEl=el('#'+pfx+'_strat');
+  if(stratEl) o._strat=stratEl.value;   // 'fbo' | 'brk' | 'both' — какую стратегию торгует шаблон
   return o;
 }
 for(const pfx of ['sc','bt']){
@@ -2987,6 +2991,69 @@ for(const pfx of ['sc','bt']){
   });
 }
 fillTplSelects();
+
+/* ===== синхронизация шаблонов с Telegram-ботом ===== */
+el('#sc_tplsync').addEventListener('click', async () => {
+  const BOT_SYNC_URL = localStorage.getItem('hw_bot_sync_url') || '';
+  let url = BOT_SYNC_URL;
+  if (!url) {
+    url = prompt(
+      'Введи URL синхронизации из бота (команда /syncurl):\n\nПример: https://yourapp.railway.app/sync'
+    );
+    if (!url) return;
+    try { localStorage.setItem('hw_bot_sync_url', url); } catch(e) {}
+  }
+  const userTpl = loadTpl();
+  if (!Object.keys(userTpl).length) {
+    alert('Нет сохранённых шаблонов. Сохрани хотя бы один шаблон кнопкой «Сохранить как шаблон».');
+    return;
+  }
+  const btn = el('#sc_tplsync');
+  btn.textContent = '⏳ Отправка...';
+  btn.disabled = true;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templates: userTpl, market: MKT })
+    });
+    if (res.ok) {
+      btn.textContent = '✅ Готово!';
+      setTimeout(() => { btn.textContent = '📬 Синхронизировать с ботом'; btn.disabled = false; }, 2000);
+    } else {
+      throw new Error('HTTP ' + res.status);
+    }
+  } catch(e) {
+    alert('Ошибка: ' + e.message + '\n\nПроверь URL или получи новый через /syncurl в боте.');
+    localStorage.removeItem('hw_bot_sync_url');
+    btn.textContent = '📬 Синхронизировать с ботом';
+    btn.disabled = false;
+  }
+});
+
+/* ===== загрузка отслеживаемых из Telegram-бота ===== */
+(async function loadBotWatchlist() {
+  const syncUrl = localStorage.getItem('hw_bot_sync_url') || '';
+  if (!syncUrl) return;
+  // /sync/TOKEN → /watchlist/TOKEN
+  const wlUrl = syncUrl.replace('/sync/', '/watchlist/') + '?market=' + (localStorage.getItem('hw_fbo_mkt') || 'crypto');
+  try {
+    const res = await fetch(wlUrl);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.ok || !data.watchlist || !data.watchlist.length) return;
+    const key = (localStorage.getItem('hw_fbo_mkt') || 'crypto') === 'ru' ? 'hw_fbo_watch_ru' : 'hw_fbo_watch';
+    let w; try { w = JSON.parse(localStorage.getItem(key) || '[]'); } catch(e) { w = []; }
+    let added = 0;
+    for (const item of data.watchlist) {
+      if (!w.some(x => x.base === item.base && x.t === item.t)) { w.push(item); added++; }
+    }
+    if (added > 0) {
+      try { localStorage.setItem(key, JSON.stringify(w)); } catch(e) {}
+      console.log('[HW Bot] загружено из бота: ' + added + ' отслеживаемых');
+    }
+  } catch(e) { /* бот недоступен — ок */ }
+})();
 
 /* ===== переключатель рынка ===== */
 // У каждого рынка своё состояние: сигналы, бэктест, источник, отслеживаемые — чтобы статистика не смешивалась.
