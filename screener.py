@@ -1,7 +1,6 @@
 """screener.py — тянет данные с Bybit, прогоняет hwv1.evaluate, возвращает карточки."""
 import asyncio
 import logging
-import time
 from typing import Callable, Awaitable
 
 import httpx
@@ -13,16 +12,13 @@ logger = logging.getLogger(__name__)
 
 BYBIT_BASE = "https://api.bybit.com"
 
-# Ночной фильтр: 23:00–09:00 UTC+3 (Vilnius) → 20:00–06:00 UTC
-NIGHT_START_UTC = 20   # 23:00 Vilnius
-NIGHT_END_UTC = 6      # 09:00 Vilnius
-
 TOP30_MCAP = {
     "BTC", "ETH", "BNB", "SOL", "XRP", "USDC", "ADA", "AVAX", "DOGE",
     "TRX", "DOT", "MATIC", "LINK", "SHIB", "TON", "ICP", "DAI", "LTC",
     "BCH", "UNI", "ATOM", "XLM", "ETC", "APT", "NEAR", "FIL", "VET",
     "HBAR", "ARB", "OP",
 }
+
 
 INTERVAL_MAP = {"D": "D", "H4": "240", "H1": "60", "M5": "5"}
 LIMIT = 200  # баров за запрос
@@ -34,13 +30,20 @@ async def _get(client: httpx.AsyncClient, path: str, params: dict) -> dict:
     return r.json()
 
 
+TOP_N = 300           # инструментов по обороту за сутки
+MIN_VOL_USD_24H = 1_000_000.0   # жёсткий пол — меньше не берём вообще
+
+
 async def fetch_tickers(client: httpx.AsyncClient) -> list[dict]:
-    """Топ-200 USDT-perp по объёму."""
+    """Топ-N USDT-perp по обороту за сутки, не меньше MIN_VOL_USD_24H."""
     data = await _get(client, "/v5/market/tickers", {"category": "linear"})
     items = data.get("result", {}).get("list", [])
-    usdt = [t for t in items if t["symbol"].endswith("USDT")]
+    usdt = [
+        t for t in items
+        if t["symbol"].endswith("USDT") and float(t.get("turnover24h", 0) or 0) >= MIN_VOL_USD_24H
+    ]
     usdt.sort(key=lambda t: float(t.get("turnover24h", 0)), reverse=True)
-    return usdt[:200]
+    return usdt[:TOP_N]
 
 
 async def fetch_klines(
@@ -56,7 +59,7 @@ async def fetch_klines(
     for row in reversed(raw):  # Bybit возвращает новейшие первыми
         ts, o, h, l, c, vol, vol_q = (row + ["0"] * 7)[:7]
         bars.append(Bar(
-            ts=int(ts) // 1000,
+            ts=int(ts),  # ms — 1:1 с HTML (Date(bar.ts), /3600000)
             o=float(o), h=float(h), l=float(l), c=float(c),
             vol_quote=float(vol_q),
             confirmed=True,
@@ -64,13 +67,6 @@ async def fetch_klines(
     if bars:
         bars[-1].confirmed = False  # последняя свеча ещё не закрыта
     return bars
-
-
-def _is_night() -> bool:
-    hour = time.gmtime().tm_hour
-    if NIGHT_START_UTC < NIGHT_END_UTC:
-        return NIGHT_START_UTC <= hour < NIGHT_END_UTC
-    return hour >= NIGHT_START_UTC or hour < NIGHT_END_UTC
 
 
 async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
@@ -96,7 +92,8 @@ async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
         # Порог модели для FBO берём минимальным (0.15) на этапе скана: конкретный порог
         # каждого активного шаблона (sc_thr) досчитывается позже в match_filter/_matches_single —
         # так один скан обслуживает все шаблоны с разными порогами, а не только дефолтный.
-        result = evaluate(symbol, last, bid, ask, d1, h4, h1, m5, vol24, fbo_threshold=0.15)
+        # no_night=True — соответствует чекбоксу «без ночи» в HTML, включённому по умолчанию.
+        result = evaluate(symbol, last, bid, ask, d1, h4, h1, m5, vol24, fbo_threshold=0.15, no_night=True)
         return result.get("cards", [])
     except Exception as e:
         logger.debug("scan_one %s error: %s", symbol, e)
@@ -246,11 +243,10 @@ async def run_scan(
     subscribers: list[int],
     chat_filters: Callable[[int], dict],
 ):
-    """Один полный скан. on_signal вызывается для каждого прошедшего сигнала."""
-    if _is_night():
-        logger.info("Ночное время, скан пропущен")
-        return
-
+    """Один полный скан. on_signal вызывается для каждого прошедшего сигнала.
+    Ночной фильтр (23:00–09:00 МСК) применяется ВНУТРИ hwv1.evaluate() к каждому
+    часу-кандидату отдельно, как в HTML (opt.noNight) — не блокирует скан целиком.
+    """
     async with httpx.AsyncClient() as client:
         tickers = await fetch_tickers(client)
         logger.info("Скан: %d инструментов", len(tickers))

@@ -337,6 +337,13 @@ def _risk_stop_take(entry: float, atr_d: float, side: str, stop_atr_frac: float,
 
 # ═══════════════════════════ стратегия «Пробой» (strategy="brk") ═════════════
 
+def _is_night_msk(ts_ms: int) -> bool:
+    """1:1 с HTML: hl=(UTCHours+3)%24; ночь — НЕ (9<=hl<23), т.е. час НЕ входит в 09:00–23:00 МСК."""
+    from datetime import datetime, timezone
+    hl = (datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).hour + 3) % 24
+    return not (9 <= hl < 23)
+
+
 def evaluate_brk(
     ticker: str,
     d1c: list[Bar],
@@ -345,78 +352,93 @@ def evaluate_brk(
     atr_d: float,
     levels: list[Level],
     bias: str,
+    lookback_hours: int = 24,
+    no_night: bool = False,
 ) -> list[dict]:
     """
-    Сигнал только в момент первого закрытия часа за уровнем (последний час — за
-    уровнем, предыдущий — ещё нет). 1:1 с веткой type:'brk' в scanSymbol().
-    Модель НЕ используется — p всегда 0 (как и в HTML для этой ветки).
+    Сигнал в момент первого закрытия часа за уровнем (текущий час — за уровнем,
+    предыдущий — ещё нет). 1:1 с веткой type:'brk' в scanSymbol(), но проверяет
+    не только последний час, а последние lookback_hours часов — чтобы скан раз
+    в 15 минут не пропускал сигнал, случившийся между запусками.
+
+    no_night: как opt.noNight в HTML — пропускает ТОЛЬКО те часы сигнала, что
+    попадают в 23:00–09:00 МСК, а не весь скан целиком (это не то же самое,
+    что не сканировать вообще ночью).
     """
     cards: list[dict] = []
     if len(h1c) < 2 or not levels:
         return cards
 
-    bar = h1c[-1]
-    prev_b = h1c[-2]
     a_h1 = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
     if a_h1 <= 0:
         return cards
 
-    vw = sorted(b.vol_quote for b in h1c[-25:-1] if b.vol_quote > 0)
-    v_med = vw[len(vw) // 2] if vw else 0.0
+    start_idx = max(1, len(h1c) - lookback_hours)
 
-    for lv in levels:
-        side = _side_of(lv.kind)
-
-        def beyond(b: Bar, _price=lv.price, _side=side) -> bool:
-            return b.c > _price if _side == "long" else b.c < _price
-
-        if not (beyond(bar) and not beyond(prev_b) and bar.ts > lv.formed_ts):
+    for i in range(start_idx, len(h1c)):
+        bar = h1c[i]
+        if no_night and _is_night_msk(bar.ts):
             continue
+        prev_b = h1c[i - 1]
+        h1_upto = h1c[: i + 1]   # только то, что было известно к моменту bar
 
-        acc, acc_why = accumulation(h1c[:-1], lv.price, atr_d)
-        if not acc:
-            continue
+        vw = sorted(b.vol_quote for b in h1_upto[-25:-1] if b.vol_quote > 0)
+        v_med = vw[len(vw) // 2] if vw else 0.0
 
-        cross_b = count_close_crosses(
-            [b for b in h1c if lv.formed_ts < b.ts < bar.ts], lv.price, lv.formed_ts
-        )
-        if cross_b > PARAMS["max_crosses"]:
-            continue
+        for lv in levels:
+            side = _side_of(lv.kind)
 
-        bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
-        if not bias_ok:
-            continue
+            def beyond(b: Bar, _price=lv.price, _side=side) -> bool:
+                return b.c > _price if _side == "long" else b.c < _price
 
-        rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
-        if rst is None:
-            continue
-        stop, take, risk = rst
+            if not (beyond(bar) and not beyond(prev_b) and bar.ts > lv.formed_ts):
+                continue
 
-        cards.append({
-            "ticker": ticker,
-            "version": VERSION,
-            "strategy": "brk",
-            "side": "LONG" if side == "long" else "SHORT",
-            "status": "SIGNAL",
-            "level": lv.price,
-            "kind": lv.kind,
-            "strength": lv.strength,
-            "last": bar.c,
-            "dist_atr": abs(bar.c - lv.price) / a_h1,
-            "atr_d": atr_d,
-            "atr_h1": a_h1,
-            "stop": stop,
-            "take": take,
-            "risk": risk,
-            "d1_bias": bias,
-            "crosses": cross_b,
-            "prob": None,  # модель не применяется к «Пробою»
-            "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
-            "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
-            "why": [acc_why, f"пробой {lv.kind} на закрытии часа", f"запилов после формирования: {cross_b}"],
-        })
+            acc, acc_why = accumulation(h1_upto[:-1], lv.price, atr_d)
+            if not acc:
+                continue
 
-    cards.sort(key=lambda c: (-c["strength"], c["dist_atr"]))
+            cross_b = count_close_crosses(
+                [b for b in h1_upto if lv.formed_ts < b.ts < bar.ts], lv.price, lv.formed_ts
+            )
+            if cross_b > PARAMS["max_crosses"]:
+                continue
+
+            bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
+            if not bias_ok:
+                continue
+
+            rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
+            if rst is None:
+                continue
+            stop, take, risk = rst
+
+            cards.append({
+                "ticker": ticker,
+                "version": VERSION,
+                "strategy": "brk",
+                "side": "LONG" if side == "long" else "SHORT",
+                "status": "SIGNAL",
+                "level": lv.price,
+                "kind": lv.kind,
+                "strength": lv.strength,
+                "last": bar.c,
+                "signal_ts": bar.ts,
+                "dist_atr": abs(bar.c - lv.price) / a_h1,
+                "atr_d": atr_d,
+                "atr_h1": a_h1,
+                "stop": stop,
+                "take": take,
+                "risk": risk,
+                "d1_bias": bias,
+                "crosses": cross_b,
+                "prob": None,  # модель не применяется к «Пробою»
+                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+                "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
+                "why": [acc_why, f"пробой {lv.kind} на закрытии часа", f"запилов после формирования: {cross_b}"],
+            })
+
+    cards.sort(key=lambda c: (-c["signal_ts"], -c["strength"], c["dist_atr"]))
     return cards
 
 
@@ -460,12 +482,17 @@ def evaluate_fbo(
     levels: list[Level],
     bias: str,
     threshold: Optional[float] = None,
+    lookback_hours: int = 24,
+    no_night: bool = False,
 ) -> list[dict]:
     """
     Сигнал на первом часе возврата цены за уровень после пробоя (ложный пробой).
     1:1 с веткой type:'fbo' в scanSymbol(). Использует Random Forest (model.json)
     для скоринга p; сигнал проходит только при p >= threshold (по умолчанию
     MODEL.threshold из model.json, обычно 0.30).
+    Проверяет последние lookback_hours часов, а не только текущий — иначе скан
+    раз в 15 минут пропускал бы сигнал, случившийся между запусками.
+    no_night — см. evaluate_brk: пропускает только часы сигнала в 23:00–09:00 МСК.
     """
     cards: list[dict] = []
     model = _load_model()
@@ -476,143 +503,153 @@ def evaluate_fbo(
     if len(h1c) < lookback + 1 or not levels:
         return cards
 
-    bar = h1c[-1]
-    a_h1 = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
-    if a_h1 <= 0:
+    a_h1_fallback = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
+    if a_h1_fallback <= 0:
         return cards
 
-    vw = sorted(b.vol_quote for b in h1c[-25:-1] if b.vol_quote > 0)
-    v_med = vw[len(vw) // 2] if vw else 0.0
-    vc = _vol_contraction(h1c)
+    start_idx = max(lookback, len(h1c) - lookback_hours)
 
-    w = h1c[-1 - lookback: -1]   # LOOKBACK часов перед текущим (без него самого)
-    if len(w) != lookback:
-        return cards
-
-    for lv in levels:
-        br_side = _side_of(lv.kind)
-
-        def beyond_br(b: Bar, _price=lv.price, _side=br_side) -> bool:
-            return b.c > _price if _side == "long" else b.c < _price
-
-        broke = any(beyond_br(b) for b in w)
-        back = (bar.c < lv.price) if br_side == "long" else (bar.c > lv.price)
-        if not (broke and back):
+    for hi_idx in range(start_idx, len(h1c)):
+        bar = h1c[hi_idx]
+        if no_night and _is_night_msk(bar.ts):
             continue
-        if bar.ts <= lv.formed_ts:
+        h1_upto = h1c[: hi_idx + 1]
+        a_h1 = atr(h1_upto[-60:]) if len(h1_upto) >= 60 else a_h1_fallback
+        if a_h1 <= 0:
             continue
 
-        side = "short" if br_side == "long" else "long"   # сторона входа обратна стороне пробоя
-        ext = max([b.h for b in w] + [bar.h]) if br_side == "long" else min([b.l for b in w] + [bar.l])
+        vw = sorted(b.vol_quote for b in h1_upto[-25:-1] if b.vol_quote > 0)
+        v_med = vw[len(vw) // 2] if vw else 0.0
+        vc = _vol_contraction(h1_upto)
 
-        # сигнал только на первом часе возврата (предыдущий час ещё был за уровнем)
-        if not beyond_br(w[-1]):
+        w = h1_upto[-1 - lookback: -1]
+        if len(w) != lookback:
             continue
 
-        first_brk_idx = next((i for i, b in enumerate(w) if beyond_br(b)), None)
-        if first_brk_idx is None:
-            continue
-        brk_bars = [b for b in w if beyond_br(b)]
-        poke = max((b.h - b.l) for b in brk_bars) / a_h1 if brk_bars else 0.0
+        for lv in levels:
+            br_side = _side_of(lv.kind)
 
-        min_risk = max(0.10 * atr_d, 0.02 * bar.c)
-        covers = (bar.c + min_risk > ext) if side == "short" else (bar.c - min_risk < ext)
+            def beyond_br(b: Bar, _price=lv.price, _side=br_side) -> bool:
+                return b.c > _price if _side == "long" else b.c < _price
 
-        # индекс первого бара пробоя внутри h1c
-        gi = len(h1c) - 1 - lookback + first_brk_idx
-        pre = h1c[max(0, gi - 8): gi]
-        pre_acc = 0
-        if len(pre) == 8:
-            hi_p, lo_p = max(b.h for b in pre), min(b.l for b in pre)
-            near = all(abs(b.c - lv.price) <= 1.0 * a_h1 for b in pre)
-            if hi_p - lo_p <= 2.0 * a_h1 and near:
-                pre_acc = 1
+            broke = any(beyond_br(b) for b in w)
+            back = (bar.c < lv.price) if br_side == "long" else (bar.c > lv.price)
+            if not (broke and back):
+                continue
+            if bar.ts <= lv.formed_ts:
+                continue
 
-        ap = h1c[max(0, gi - 6): gi]
-        smooth = 0
-        if len(ap) == 6:
-            avg_r = sum((b.h - b.l) for b in ap) / 6
-            move = (1 if br_side == "long" else -1) * (ap[-1].c - ap[0].o)
-            if avg_r < 0.8 * a_h1 and move > 0:
-                smooth = 1
+            side = "short" if br_side == "long" else "long"   # сторона входа обратна стороне пробоя
+            ext = max([b.h for b in w] + [bar.h]) if br_side == "long" else min([b.l for b in w] + [bar.l])
 
-        dd = [b for b in d1c if b.ts + 86_400_000 <= bar.ts][-3:]
-        d1_against = 0
-        if len(dd) == 3:
-            hi_d, lo_d = max(b.h for b in dd), min(b.l for b in dd)
-            side_ok = all(
-                (b.c >= lv.price - 0.3 * atr_d) if br_side == "long" else (b.c <= lv.price + 0.3 * atr_d)
-                for b in dd
+            # сигнал только на первом часе возврата (предыдущий час ещё был за уровнем)
+            if not beyond_br(w[-1]):
+                continue
+
+            first_brk_idx = next((k for k, b in enumerate(w) if beyond_br(b)), None)
+            if first_brk_idx is None:
+                continue
+            brk_bars = [b for b in w if beyond_br(b)]
+            poke = max((b.h - b.l) for b in brk_bars) / a_h1 if brk_bars else 0.0
+
+            min_risk = max(0.10 * atr_d, 0.02 * bar.c)
+            covers = (bar.c + min_risk > ext) if side == "short" else (bar.c - min_risk < ext)
+
+            # индекс первого бара пробоя внутри h1_upto
+            gi = len(h1_upto) - 1 - lookback + first_brk_idx
+            pre = h1_upto[max(0, gi - 8): gi]
+            pre_acc = 0
+            if len(pre) == 8:
+                hi_p, lo_p = max(b.h for b in pre), min(b.l for b in pre)
+                near = all(abs(b.c - lv.price) <= 1.0 * a_h1 for b in pre)
+                if hi_p - lo_p <= 2.0 * a_h1 and near:
+                    pre_acc = 1
+
+            ap = h1_upto[max(0, gi - 6): gi]
+            smooth = 0
+            if len(ap) == 6:
+                avg_r = sum((b.h - b.l) for b in ap) / 6
+                move = (1 if br_side == "long" else -1) * (ap[-1].c - ap[0].o)
+                if avg_r < 0.8 * a_h1 and move > 0:
+                    smooth = 1
+
+            dd = [b for b in d1c if b.ts + 86_400_000 <= bar.ts][-3:]
+            d1_against = 0
+            if len(dd) == 3:
+                hi_d, lo_d = max(b.h for b in dd), min(b.l for b in dd)
+                side_ok = all(
+                    (b.c >= lv.price - 0.3 * atr_d) if br_side == "long" else (b.c <= lv.price + 0.3 * atr_d)
+                    for b in dd
+                )
+                if hi_d - lo_d <= 0.9 * atr_d and side_ok:
+                    d1_against = 1
+
+            win8 = h1_upto[-9:-1]
+            touched8 = 1 if (len(win8) >= 8 and min(b.l for b in win8) <= lv.price <= max(b.h for b in win8)) else 0
+            acc_res, _ = accumulation(h1_upto[:-1], lv.price, atr_d)
+
+            cross = count_close_crosses(
+                [b for b in h1_upto if lv.formed_ts < b.ts <= bar.ts], lv.price, lv.formed_ts
             )
-            if hi_d - lo_d <= 0.9 * atr_d and side_ok:
-                d1_against = 1
+            bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
 
-        win8 = h1c[-9:-1]
-        touched8 = 1 if (len(win8) >= 8 and min(b.l for b in win8) <= lv.price <= max(b.h for b in win8)) else 0
-        acc_res, _ = accumulation(h1c[:-1], lv.price, atr_d)
+            feat = {
+                "strength": lv.strength,
+                "crosses": cross,
+                "touched8": touched8,
+                "acc": 1 if acc_res else 0,
+                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+                "vol_contraction": vc,
+                "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
+                "overshoot_atr": abs(ext - lv.price) / a_h1,
+                "dist_atr": abs(bar.c - lv.price) / a_h1,
+                "bias_ok": 1 if bias_ok else 0,
+                "atrD_pct": atr_d / bar.c,
+                "aH1_pct": a_h1 / bar.c,
+                "side_long": 1 if side == "long" else 0,
+                "kind": lv.kind,
+            }
+            p = _model_predict(feat)
+            if p < threshold:
+                continue
 
-        cross = count_close_crosses(
-            [b for b in h1c if lv.formed_ts < b.ts <= bar.ts], lv.price, lv.formed_ts
-        )
-        bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
+            rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
+            if rst is None:
+                continue
+            stop, take, risk = rst
 
-        feat = {
-            "strength": lv.strength,
-            "crosses": cross,
-            "touched8": touched8,
-            "acc": 1 if acc_res else 0,
-            "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
-            "vol_contraction": vc,
-            "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
-            "overshoot_atr": abs(ext - lv.price) / a_h1,
-            "dist_atr": abs(bar.c - lv.price) / a_h1,
-            "bias_ok": 1 if bias_ok else 0,
-            "atrD_pct": atr_d / bar.c,
-            "aH1_pct": a_h1 / bar.c,
-            "side_long": 1 if side == "long" else 0,
-            "kind": lv.kind,
-        }
-        p = _model_predict(feat)
-        if p < threshold:
-            continue
+            cards.append({
+                "ticker": ticker,
+                "version": VERSION,
+                "strategy": "fbo",
+                "side": "LONG" if side == "long" else "SHORT",
+                "status": "SIGNAL",
+                "level": lv.price,
+                "kind": lv.kind,
+                "strength": lv.strength,
+                "last": bar.c,
+                "signal_ts": bar.ts,
+                "dist_atr": feat["dist_atr"],
+                "atr_d": atr_d,
+                "atr_h1": a_h1,
+                "stop": stop,
+                "take": take,
+                "risk": risk,
+                "d1_bias": bias,
+                "crosses": cross,
+                "prob": round(p, 4),
+                "level_age_h": feat["level_age_h"],
+                "vol_mult": feat["vol_mult"],
+                "poke_atr": poke,
+                "covers_wick": covers,
+                "pre_accumulation": pre_acc,
+                "smooth_approach": smooth,
+                "d1_against": d1_against,
+                "why": [f"ложный пробой {lv.kind}, модель p={p:.2f}", f"запилов: {cross}"],
+            })
 
-        rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
-        if rst is None:
-            continue
-        stop, take, risk = rst
-
-        cards.append({
-            "ticker": ticker,
-            "version": VERSION,
-            "strategy": "fbo",
-            "side": "LONG" if side == "long" else "SHORT",
-            "status": "SIGNAL",
-            "level": lv.price,
-            "kind": lv.kind,
-            "strength": lv.strength,
-            "last": bar.c,
-            "dist_atr": feat["dist_atr"],
-            "atr_d": atr_d,
-            "atr_h1": a_h1,
-            "stop": stop,
-            "take": take,
-            "risk": risk,
-            "d1_bias": bias,
-            "crosses": cross,
-            "prob": round(p, 4),
-            "level_age_h": feat["level_age_h"],
-            "vol_mult": feat["vol_mult"],
-            "poke_atr": poke,
-            "covers_wick": covers,
-            "pre_accumulation": pre_acc,
-            "smooth_approach": smooth,
-            "d1_against": d1_against,
-            "why": [f"ложный пробой {lv.kind}, модель p={p:.2f}", f"запилов: {cross}"],
-        })
-
-    cards.sort(key=lambda c: (-(c["prob"] or 0), c["dist_atr"]))
+    cards.sort(key=lambda c: (-c["signal_ts"], -(c["prob"] or 0), c["dist_atr"]))
     return cards
-
 
 # ═══════════════════════════ единая точка входа ═══════════════════════════
 
@@ -628,6 +665,8 @@ def evaluate(
     vol_usd_24h: float = 0.0,
     strategies: tuple[str, ...] = ("brk", "fbo"),
     fbo_threshold: Optional[float] = None,
+    lookback_hours: int = 24,
+    no_night: bool = False,
 ) -> dict:
     """
     Точка входа для скринера. Считает уровни/тренд ОДИН раз, затем прогоняет
@@ -635,6 +674,10 @@ def evaluate(
     строго помеченные полем "strategy" — "brk" или "fbo", никогда не смешаны.
 
     strategies: подмножество ("brk",), ("fbo",) или ("brk", "fbo") — что сканировать.
+    lookback_hours: сколько последних часов проверять на сигнал (по умолчанию 24 —
+        чтобы скан раз в 15 минут не пропускал сигнал, случившийся между запусками).
+    no_night: как чекбокс «без ночи» в HTML — пропускает часы 23:00–09:00 МСК
+        поштучно, а не весь скан целиком.
     """
     d1c, h4c, h1c = last_closed(d1), last_closed(h4), last_closed(h1)
     out = {"version": VERSION, "ticker": ticker, "ok": False, "cards": [], "reason": ""}
@@ -662,9 +705,15 @@ def evaluate(
 
     cards: list[dict] = []
     if "brk" in strategies:
-        cards.extend(evaluate_brk(ticker, d1c, h4c, h1c, atr_d, levels, bias))
+        cards.extend(evaluate_brk(
+            ticker, d1c, h4c, h1c, atr_d, levels, bias,
+            lookback_hours=lookback_hours, no_night=no_night,
+        ))
     if "fbo" in strategies:
-        cards.extend(evaluate_fbo(ticker, d1c, h4c, h1c, atr_d, levels, bias, threshold=fbo_threshold))
+        cards.extend(evaluate_fbo(
+            ticker, d1c, h4c, h1c, atr_d, levels, bias,
+            threshold=fbo_threshold, lookback_hours=lookback_hours, no_night=no_night,
+        ))
 
     out["cards"] = cards
     return out
