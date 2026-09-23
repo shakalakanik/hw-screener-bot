@@ -3012,24 +3012,64 @@ for(const pfx of ['sc','bt']){
 fillTplSelects();
 
 /* ===== синхронизация шаблонов с Telegram-ботом ===== */
-el('#sc_tplsync').addEventListener('click', async () => {
-  const BOT_SYNC_URL = localStorage.getItem('hw_bot_sync_url') || '';
-  let url = BOT_SYNC_URL;
+function getBotSyncUrl(){
+  try{
+    return localStorage.getItem('hw_fbo_sync_url')
+        || localStorage.getItem('hw_bot_sync_url')
+        || '';
+  }catch(e){ return ''; }
+}
+function setBotSyncUrl(u){
+  if(!u) return;
+  try{
+    localStorage.setItem('hw_fbo_sync_url', u);
+    localStorage.setItem('hw_bot_sync_url', u);
+  }catch(e){}
+}
+function clearBotSyncUrl(){
+  try{
+    localStorage.removeItem('hw_fbo_sync_url');
+    localStorage.removeItem('hw_bot_sync_url');
+  }catch(e){}
+}
+
+/* Подтянуть sync URL из ?sync= / ?token= (Mini App кнопка «Обновить шаблоны») */
+(function restoreSyncFromQuery(){
+  try{
+    const q = new URLSearchParams(location.search || '');
+    let u = q.get('sync') || q.get('sync_url') || q.get('syncUrl') || '';
+    const tok = q.get('token') || q.get('sync_token') || q.get('syncToken');
+    if (!u && tok) {
+      u = (location.origin || '') + '/sync/' + tok;
+    }
+    if (u) {
+      setBotSyncUrl(u);
+      if (q.get('autosync') !== '0') window.__HW_AUTOSYNC = true;
+    }
+  }catch(e){}
+})();
+
+async function pushTemplatesToBot(opts){
+  opts = opts || {};
+  let url = getBotSyncUrl();
   if (!url) {
+    if (opts.silent) return false;
     url = prompt(
-      'Введи URL синхронизации из бота (команда /syncurl):\n\nПример: https://yourapp.railway.app/sync'
+      'Введи URL синхронизации из бота (команда /syncurl) — сохранится и больше не спросит:\n\nПример: https://yourapp.railway.app/sync/…'
     );
-    if (!url) return;
-    try { localStorage.setItem('hw_bot_sync_url', url); } catch(e) {}
+    if (!url) return false;
+    setBotSyncUrl(url.trim());
+    url = getBotSyncUrl();
   }
   const userTpl = loadTpl();
   if (!Object.keys(userTpl).length) {
-    alert('Нет сохранённых шаблонов. Сохрани хотя бы один шаблон кнопкой «Сохранить как шаблон».');
-    return;
+    if (!opts.silent) {
+      alert('Нет сохранённых шаблонов. Сохрани хотя бы один шаблон кнопкой «Сохранить как шаблон».');
+    }
+    return false;
   }
   const btn = el('#sc_tplsync');
-  btn.textContent = '⏳ Отправка...';
-  btn.disabled = true;
+  if (btn) { btn.textContent = '⏳ Отправка...'; btn.disabled = true; }
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -3037,22 +3077,45 @@ el('#sc_tplsync').addEventListener('click', async () => {
       body: JSON.stringify({ templates: userTpl, market: MKT })
     });
     if (res.ok) {
-      btn.textContent = '✅ Готово!';
-      setTimeout(() => { btn.textContent = '📬 Синхронизировать с ботом'; btn.disabled = false; }, 2000);
-    } else {
-      throw new Error('HTTP ' + res.status);
+      if (btn) {
+        btn.textContent = '✅ Готово!';
+        setTimeout(() => { btn.textContent = '📬 Синхронизировать с ботом'; btn.disabled = false; }, 2000);
+      }
+      return true;
     }
+    const err = new Error('HTTP ' + res.status);
+    err.status = res.status;
+    throw err;
   } catch(e) {
-    alert('Ошибка: ' + e.message + '\n\nПроверь URL или получи новый через /syncurl в боте.');
-    localStorage.removeItem('hw_bot_sync_url');
-    btn.textContent = '📬 Синхронизировать с ботом';
-    btn.disabled = false;
+    // Сбрасываем URL только при 401 (протухший/чужой токен), не при сети/5xx
+    if (e && (e.status === 401 || /HTTP 401/.test(String(e.message||'')))) {
+      clearBotSyncUrl();
+      if (!opts.silent) {
+        alert('Токен недействителен. Нажми «🔄 Обновить шаблоны» или /syncurl в боте — один раз.');
+      }
+    } else if (!opts.silent) {
+      alert('Ошибка: ' + (e && e.message || e) + '\n\nURL сохранён. Повтори 📬 позже или проверь сеть.');
+    }
+    if (btn) {
+      btn.textContent = '📬 Синхронизировать с ботом';
+      btn.disabled = false;
+    }
+    return false;
   }
-});
+}
+
+el('#sc_tplsync').addEventListener('click', () => { pushTemplatesToBot(); });
+
+/* Авто-sync при открытии из бота (?autosync / ?sync=) */
+setTimeout(() => {
+  if (window.__HW_AUTOSYNC && getBotSyncUrl()) {
+    pushTemplatesToBot({ silent: false });
+  }
+}, 600);
 
 /* ===== загрузка отслеживаемых из Telegram-бота ===== */
 (async function loadBotWatchlist() {
-  const syncUrl = localStorage.getItem('hw_bot_sync_url') || '';
+  const syncUrl = getBotSyncUrl();
   if (!syncUrl) return;
   // /sync/TOKEN → /watchlist/TOKEN
   const wlUrl = syncUrl.replace('/sync/', '/watchlist/') + '?market=' + (localStorage.getItem('hw_fbo_mkt') || 'crypto');

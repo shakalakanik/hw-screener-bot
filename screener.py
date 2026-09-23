@@ -455,25 +455,25 @@ def _cap_cluster(pending: list[dict], cap: int = CAP_CLUSTER) -> list[dict]:
 
 
 def _needed_markets(subscribers: list[int], chat_filters: Callable[[int], dict]) -> set[str]:
-    """Какие рынки реально нужны по активным фильтрам подписчиков."""
+    """Какие рынки реально нужны по активным фильтрам подписчиков.
+
+    Пустой набор = нечего сканировать (нет активных шаблонов ни у кого).
+    """
     needed: set[str] = set()
     for chat_id in subscribers:
         f = chat_filters(chat_id)
-        markets = f.get("markets") or ["crypto"]
+        markets = f.get("markets")
+        if markets is None:
+            markets = ["crypto"]
         multi = f.get("_multi")
         if multi:
-            # рынки шаблонов ∩ выбранные markets
             tpl_mkts = {t.get("_market", "crypto") for t in multi}
             for m in markets:
                 if m in tpl_mkts:
                     needed.add(m)
-            # если шаблонов нет по рынку, но рынок включён — всё равно сканируем
-            # (fallback HTML UI уже кладёт crypto; для ru без tpl — bot добавляет ru)
-            for m in markets:
-                needed.add(m)
         else:
             needed.update(markets)
-    return needed or {"crypto"}
+    return needed
 
 
 async def run_scan(
@@ -513,6 +513,9 @@ async def run_scan(
     needed = _needed_markets(subscribers, chat_filters)
     want_crypto = "crypto" in needed
     want_ru = "ru" in needed
+    if not want_crypto and not want_ru:
+        logger.info("Скан пропущен: нет рынков с активными шаблонами")
+        return 0
 
     pending: list[dict] = []
     skipped_age = 0

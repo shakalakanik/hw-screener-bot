@@ -325,100 +325,316 @@ def remove_from_watchlist(chat_id: int, watch_id: int):
         c.execute("DELETE FROM watchlist WHERE id=? AND chat_id=?", (watch_id, chat_id))
 
 
+def _ensure_html_templates(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS html_templates (
+            chat_id  INTEGER NOT NULL,
+            name     TEXT NOT NULL,
+            filters  TEXT NOT NULL,
+            market   TEXT NOT NULL DEFAULT 'crypto',
+            PRIMARY KEY (chat_id, name)
+        )
+    """)
+
+
 def save_html_templates(chat_id: int, templates: dict, market: str = "crypto"):
-    """Сохранить шаблоны из HTML-скринера."""
+    """Сохранить шаблоны из HTML-скринера (merge по имени, per-market replace).
+
+    Рынок шаблона: filters[_market] если есть, иначе аргумент market.
+    Шаблоны других рынков не трогаем. Strategy overrides по имени сохраняются.
+    """
     with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS html_templates (
-                chat_id  INTEGER NOT NULL,
-                name     TEXT NOT NULL,
-                filters  TEXT NOT NULL,
-                market   TEXT NOT NULL DEFAULT 'crypto',
-                PRIMARY KEY (chat_id, name)
-            )
-        """)
-        # Удаляем старые шаблоны этого пользователя и вставляем новые
-        c.execute("DELETE FROM html_templates WHERE chat_id=?", (chat_id,))
+        _ensure_html_templates(c)
+        items: list[tuple[str, dict, str]] = []
         for name, filters in templates.items():
+            flt = filters if isinstance(filters, dict) else {}
+            m = flt.get("_market") if isinstance(flt, dict) else None
+            if m not in ("crypto", "ru"):
+                m = market if market in ("crypto", "ru") else "crypto"
+            items.append((name, flt if isinstance(filters, dict) else filters, m))
+
+        markets_touched = {m for _, _, m in items} or {
+            market if market in ("crypto", "ru") else "crypto"
+        }
+        incoming_names = {name for name, _, _ in items}
+
+        for name, flt, m in items:
             c.execute(
-                "INSERT INTO html_templates(chat_id, name, filters, market) VALUES(?,?,?,?)",
-                (chat_id, name, json.dumps(filters, ensure_ascii=False), market),
+                "INSERT OR REPLACE INTO html_templates(chat_id, name, filters, market) "
+                "VALUES(?,?,?,?)",
+                (chat_id, name, json.dumps(flt, ensure_ascii=False), m),
             )
+
+        # Удаляем устаревшие шаблоны только по затронутым рынкам
+        for m in markets_touched:
+            rows = c.execute(
+                "SELECT name FROM html_templates WHERE chat_id=? AND market=?",
+                (chat_id, m),
+            ).fetchall()
+            for r in rows:
+                if r["name"] not in incoming_names:
+                    c.execute(
+                        "DELETE FROM html_templates WHERE chat_id=? AND name=?",
+                        (chat_id, r["name"]),
+                    )
 
 
 def get_html_templates(chat_id: int) -> dict:
     """Получить все шаблоны пользователя из HTML."""
     with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS html_templates (
-                chat_id  INTEGER NOT NULL,
-                name     TEXT NOT NULL,
-                filters  TEXT NOT NULL,
-                market   TEXT NOT NULL DEFAULT 'crypto',
-                PRIMARY KEY (chat_id, name)
-            )
-        """)
+        _ensure_html_templates(c)
         rows = c.execute(
             "SELECT name, filters, market FROM html_templates WHERE chat_id=?",
             (chat_id,),
         ).fetchall()
-    return {r["name"]: {"filters": json.loads(r["filters"]), "market": r["market"]} for r in rows}
+    return {
+        r["name"]: {"filters": json.loads(r["filters"]), "market": r["market"]}
+        for r in rows
+    }
 
 
-# ── Активные подписки на шаблоны ─────────────────────────────────────────────
+def rename_html_template(chat_id: int, old: str, new: str) -> tuple[bool, str]:
+    """Переименовать шаблон: html_templates, template_strategy, active lists.
 
-def set_active_templates(chat_id: int, names: list[str]):
-    """Установить список активных шаблонов для пользователя."""
+    Возвращает (ok, error_message). error_message пустой при успехе.
+    """
+    new = (new or "").strip()
+    if not new:
+        return False, "Имя не может быть пустым"
+    if len(new) > 64:
+        return False, "Слишком длинное имя (макс. 64)"
+    if new == old:
+        return False, "Имя не изменилось"
+
     with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS active_templates (
-                chat_id INTEGER PRIMARY KEY,
-                names   TEXT NOT NULL DEFAULT '[]',
-                markets TEXT NOT NULL DEFAULT '["crypto"]'
-            )
-        """)
+        _ensure_html_templates(c)
+        _ensure_template_strategy(c)
+        _ensure_active_templates(c)
+
+        row = c.execute(
+            "SELECT filters, market FROM html_templates WHERE chat_id=? AND name=?",
+            (chat_id, old),
+        ).fetchone()
+        if not row:
+            return False, "Шаблон не найден"
+        clash = c.execute(
+            "SELECT 1 FROM html_templates WHERE chat_id=? AND name=?",
+            (chat_id, new),
+        ).fetchone()
+        if clash:
+            return False, f"Шаблон «{new}» уже существует"
+
         c.execute(
-            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) "
-            "SELECT ?, ?, COALESCE((SELECT markets FROM active_templates WHERE chat_id=?), '[\"crypto\"]')",
-            (chat_id, json.dumps(names, ensure_ascii=False), chat_id),
+            "INSERT INTO html_templates(chat_id, name, filters, market) VALUES(?,?,?,?)",
+            (chat_id, new, row["filters"], row["market"]),
+        )
+        c.execute(
+            "DELETE FROM html_templates WHERE chat_id=? AND name=?",
+            (chat_id, old),
+        )
+
+        strat = c.execute(
+            "SELECT strategy FROM template_strategy WHERE chat_id=? AND name=?",
+            (chat_id, old),
+        ).fetchone()
+        if strat:
+            c.execute(
+                "DELETE FROM template_strategy WHERE chat_id=? AND name=?",
+                (chat_id, old),
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO template_strategy(chat_id, name, strategy) "
+                "VALUES(?,?,?)",
+                (chat_id, new, strat["strategy"]),
+            )
+
+        active_row = c.execute(
+            "SELECT names, markets FROM active_templates WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+        if active_row:
+            by = _parse_names_by_market(active_row["names"], None)
+            changed = False
+            for mkt, names in by.items():
+                if old in names:
+                    by[mkt] = [new if n == old else n for n in names]
+                    changed = True
+            if changed:
+                c.execute(
+                    "UPDATE active_templates SET names=? WHERE chat_id=?",
+                    (json.dumps(by, ensure_ascii=False), chat_id),
+                )
+
+    return True, ""
+
+
+# ── Активные подписки на шаблоны (per-market) ────────────────────────────────
+
+def _ensure_active_templates(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS active_templates (
+            chat_id INTEGER PRIMARY KEY,
+            names   TEXT NOT NULL DEFAULT '[]',
+            markets TEXT NOT NULL DEFAULT '["crypto"]'
+        )
+    """)
+
+
+def _parse_names_by_market(names_raw, tpls: dict | None) -> dict:
+    """Нормализовать names → {"crypto": [...], "ru": [...]}.
+
+    Старый формат — плоский список: раскладываем по market шаблона,
+    либо кладём в оба рынка, если шаблонов нет.
+    """
+    try:
+        parsed = json.loads(names_raw) if isinstance(names_raw, str) else names_raw
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = []
+
+    if isinstance(parsed, dict):
+        return {
+            "crypto": [n for n in (parsed.get("crypto") or []) if n],
+            "ru": [n for n in (parsed.get("ru") or []) if n],
+        }
+
+    flat = [n for n in (parsed or []) if n]
+    if tpls:
+        by = {"crypto": [], "ru": []}
+        for n in flat:
+            m = (tpls.get(n) or {}).get("market", "crypto")
+            if m not in by:
+                by[m] = []
+            if n not in by[m]:
+                by[m].append(n)
+        return by
+    # Без метаданных шаблонов — дублируем в оба рынка (безопасная миграция)
+    return {"crypto": list(flat), "ru": list(flat)}
+
+
+def _markets_from_names(by: dict) -> list[str]:
+    return [m for m in ("crypto", "ru") if by.get(m)]
+
+
+def set_active_templates(chat_id: int, names):
+    """Установить активные шаблоны.
+
+    names: list[str] (legacy flat → оба рынка) или dict per-market.
+    """
+    if isinstance(names, dict):
+        by = {
+            "crypto": list(names.get("crypto") or []),
+            "ru": list(names.get("ru") or []),
+        }
+    else:
+        flat = list(names or [])
+        by = {"crypto": list(flat), "ru": list(flat)}
+    markets = _markets_from_names(by)
+    with _conn() as c:
+        _ensure_active_templates(c)
+        c.execute(
+            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) VALUES(?,?,?)",
+            (
+                chat_id,
+                json.dumps(by, ensure_ascii=False),
+                json.dumps(markets or ["crypto"], ensure_ascii=False),
+            ),
         )
 
 
+def set_active_templates_for_market(chat_id: int, market: str, names: list[str]):
+    """Установить активные шаблоны только для одного рынка."""
+    if market not in ("crypto", "ru"):
+        market = "crypto"
+    cfg = get_active_config(chat_id)
+    by = {
+        "crypto": list(cfg["names_by_market"].get("crypto") or []),
+        "ru": list(cfg["names_by_market"].get("ru") or []),
+    }
+    by[market] = list(names or [])
+    set_active_templates(chat_id, by)
+
+
 def set_active_markets(chat_id: int, markets: list[str]):
-    """Установить список активных рынков."""
+    """Совместимость: рынки теперь выводятся из активных шаблонов.
+
+    Если рынок выключают — чистим его active names. Если включают без
+    шаблонов — просто сохраняем markets (скан всё равно смотрит на names).
+    """
+    cfg = get_active_config(chat_id)
+    by = {
+        "crypto": list(cfg["names_by_market"].get("crypto") or []),
+        "ru": list(cfg["names_by_market"].get("ru") or []),
+    }
+    wanted = set(markets or [])
+    for m in ("crypto", "ru"):
+        if m not in wanted:
+            by[m] = []
     with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS active_templates (
-                chat_id INTEGER PRIMARY KEY,
-                names   TEXT NOT NULL DEFAULT '[]',
-                markets TEXT NOT NULL DEFAULT '["crypto"]'
-            )
-        """)
+        _ensure_active_templates(c)
         c.execute(
-            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) "
-            "SELECT ?, COALESCE((SELECT names FROM active_templates WHERE chat_id=?), '[]'), ?",
-            (chat_id, chat_id, json.dumps(markets, ensure_ascii=False)),
+            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) VALUES(?,?,?)",
+            (
+                chat_id,
+                json.dumps(by, ensure_ascii=False),
+                json.dumps(_markets_from_names(by) or list(wanted) or ["crypto"], ensure_ascii=False),
+            ),
         )
 
 
 def get_active_config(chat_id: int) -> dict:
-    """Получить активные шаблоны и рынки пользователя."""
+    """Активные шаблоны per-market + рынки с ≥1 активным шаблоном.
+
+    Возвращает:
+      names_by_market: {"crypto": [...], "ru": [...]}
+      names: плоский union (для статуса / совместимости)
+      markets: рынки, у которых есть активные шаблоны
+    """
     with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS active_templates (
-                chat_id INTEGER PRIMARY KEY,
-                names   TEXT NOT NULL DEFAULT '[]',
-                markets TEXT NOT NULL DEFAULT '["crypto"]'
-            )
-        """)
+        _ensure_active_templates(c)
         row = c.execute(
             "SELECT names, markets FROM active_templates WHERE chat_id=?", (chat_id,)
         ).fetchone()
     if not row:
-        return {"names": [], "markets": ["crypto"]}
+        return {
+            "names_by_market": {"crypto": [], "ru": []},
+            "names": [],
+            "markets": [],
+        }
+
+    # Подтянуть market шаблонов для миграции плоского списка
+    tpls = get_html_templates(chat_id)
+    by = _parse_names_by_market(row["names"], tpls)
+
+    # Если прочитали старый плоский формат — перезаписать в новом
+    try:
+        raw = json.loads(row["names"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raw = None
+    if not isinstance(raw, dict):
+        with _conn() as c:
+            _ensure_active_templates(c)
+            c.execute(
+                "UPDATE active_templates SET names=?, markets=? WHERE chat_id=?",
+                (
+                    json.dumps(by, ensure_ascii=False),
+                    json.dumps(_markets_from_names(by), ensure_ascii=False),
+                    chat_id,
+                ),
+            )
+
+    markets = _markets_from_names(by)
+    flat = list(by.get("crypto") or []) + list(by.get("ru") or [])
+    # unique preserve order
+    seen = set()
+    names = []
+    for n in flat:
+        if n not in seen:
+            seen.add(n)
+            names.append(n)
     return {
-        "names": json.loads(row["names"]),
-        "markets": json.loads(row["markets"]),
+        "names_by_market": by,
+        "names": names,
+        "markets": markets,
     }
 
 
@@ -456,3 +672,51 @@ def get_template_strategy_overrides(chat_id: int) -> dict:
             "SELECT name, strategy FROM template_strategy WHERE chat_id=?", (chat_id,)
         ).fetchall()
     return {r["name"]: r["strategy"] for r in rows}
+
+
+# ── Sync-токены (стабильные, переживают рестарт) ─────────────────────────────
+
+def _ensure_sync_tokens(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sync_tokens (
+            chat_id INTEGER PRIMARY KEY,
+            token   TEXT NOT NULL UNIQUE
+        )
+    """)
+
+
+def save_sync_token(chat_id: int, token: str) -> None:
+    with _conn() as c:
+        _ensure_sync_tokens(c)
+        # один токен на чат; старый token-row с тем же token у другого чата — убрать
+        c.execute("DELETE FROM sync_tokens WHERE token=? AND chat_id!=?", (token, chat_id))
+        c.execute(
+            "INSERT OR REPLACE INTO sync_tokens(chat_id, token) VALUES(?,?)",
+            (chat_id, token),
+        )
+
+
+def get_chat_id_by_sync_token(token: str) -> int | None:
+    with _conn() as c:
+        _ensure_sync_tokens(c)
+        row = c.execute(
+            "SELECT chat_id FROM sync_tokens WHERE token=?", (token,)
+        ).fetchone()
+    return int(row["chat_id"]) if row else None
+
+
+def get_sync_token_for_chat(chat_id: int) -> str | None:
+    with _conn() as c:
+        _ensure_sync_tokens(c)
+        row = c.execute(
+            "SELECT token FROM sync_tokens WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+    return row["token"] if row else None
+
+
+def load_all_sync_tokens() -> dict[str, int]:
+    """token → chat_id для прогрева in-memory кэша при старте."""
+    with _conn() as c:
+        _ensure_sync_tokens(c)
+        rows = c.execute("SELECT token, chat_id FROM sync_tokens").fetchall()
+    return {r["token"]: int(r["chat_id"]) for r in rows}

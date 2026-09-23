@@ -11,11 +11,14 @@ from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.types import (
     Message, CallbackQuery,
     BotCommand, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup,
+    WebAppInfo,
 )
+from urllib.parse import quote
 
 import storage
 from screener import run_scan
@@ -34,24 +37,75 @@ dp  = Dispatcher()
 
 _subscribers: set[int] = set()
 _pending_cards: dict[str, dict] = {}   # card_key → card data
+_pending_rename: dict[int, str] = {}   # chat_id → old template name
+_filter_tab: dict[int, str] = {}       # chat_id → "crypto" | "ru"
 
 # ── Sync-токены: chat_id → token ──────────────────────────────────────────────
 _sync_tokens: dict[str, int] = {}   # token → chat_id
 
-# ── Основная клавиатура ──────────────────────────────────────────────────────
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
+# ── Sync-токен: стабильный per chat (без hourly bucket) ───────────────────────
+def _make_token(chat_id: int) -> str:
+    """Стабильный токен: не меняется при рестарте/деплое (пока TOKEN тот же)."""
+    raw = f"{chat_id}:{TOKEN}:hw-sync-v1"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _register_sync_token(chat_id: int) -> str:
+    token = _make_token(chat_id)
+    _sync_tokens[token] = chat_id
+    storage.save_sync_token(chat_id, token)
+    return token
+
+
+def _resolve_sync_chat(token: str) -> int | None:
+    chat_id = _sync_tokens.get(token)
+    if chat_id is not None:
+        return chat_id
+    chat_id = storage.get_chat_id_by_sync_token(token)
+    if chat_id is not None:
+        _sync_tokens[token] = chat_id
+        return chat_id
+    return None
+
+
+def _sync_endpoint(chat_id: int) -> str | None:
+    if not PUBLIC_URL:
+        return None
+    token = _register_sync_token(chat_id)
+    return f"{PUBLIC_URL}/sync/{token}"
+
+
+def _app_url_with_sync(chat_id: int) -> str | None:
+    sync = _sync_endpoint(chat_id)
+    if not sync:
+        return None
+    return f"{PUBLIC_URL}/app?sync={quote(sync, safe='')}&autosync=1"
+
+
+def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
+    """Клавиатура; «Обновить шаблоны» — WebApp с sync URL, если PUBLIC_URL задан."""
+    rows = [
         [KeyboardButton(text="📡 Скан"), KeyboardButton(text="⚙️ Фильтр")],
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔗 Sync")],
-        [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⛔ Стоп")],
-    ],
-    resize_keyboard=True,
-    is_persistent=True,
-)
+    ]
+    app_url = _app_url_with_sync(chat_id) if chat_id else None
+    if app_url:
+        rows.append([KeyboardButton(
+            text="🔄 Обновить шаблоны",
+            web_app=WebAppInfo(url=app_url),
+        )])
+    else:
+        rows.append([KeyboardButton(text="🔄 Обновить шаблоны")])
+    rows.append([KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⛔ Стоп")])
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=True,
+    )
 
-def _make_token(chat_id: int) -> str:
-    raw = f"{chat_id}:{TOKEN}:{int(time.time() // 3600)}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+# Совместимость: статический alias (без WebApp) — лучше передавать chat_id
+MAIN_KEYBOARD = main_keyboard()
 
 
 # ── Форматирование сигнала ────────────────────────────────────────────────────
@@ -135,12 +189,13 @@ async def cmd_start(msg: Message):
         "👋 <b>HW Screener Bot</b>\n\n"
         "Команды:\n"
         "/filter — выбрать шаблоны и рынки\n"
-        "/syncurl — получить ссылку для синхронизации из HTML\n"
+        "/syncurl — постоянная ссылка синхронизации (один раз)\n"
+        "🔄 Обновить шаблоны — Mini App без повторного URL\n"
         "/scan — запустить скан сейчас\n"
         "/status — текущие настройки\n"
         "/stop — остановить сигналы",
         parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=main_keyboard(msg.chat.id),
     )
 
 
@@ -151,34 +206,79 @@ async def cmd_stop(msg: Message):
     _subscribers.discard(msg.chat.id)
     await msg.answer(
         "⛔ Сигналы остановлены. Нажми «▶️ Старт», чтобы возобновить.",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=main_keyboard(msg.chat.id),
     )
 
 
-# ── /syncurl — выдать ссылку для HTML ────────────────────────────────────────
+# ── /syncurl — выдать стабильную ссылку для HTML ─────────────────────────────
 @dp.message(Command("syncurl"))
 @dp.message(F.text == "🔗 Sync")
 async def cmd_syncurl(msg: Message):
+    chat_id = msg.chat.id
     if not PUBLIC_URL:
         await msg.answer(
             "⚠️ Переменная <code>PUBLIC_URL</code> не задана в Railway.\n\n"
             "Зайди в Railway → Variables → добавь:\n"
             "<code>PUBLIC_URL = https://&lt;твой домен&gt;.railway.app</code>",
             parse_mode="HTML",
-            reply_markup=MAIN_KEYBOARD,
+            reply_markup=main_keyboard(chat_id),
         )
         return
-    token = _make_token(msg.chat.id)
-    _sync_tokens[token] = msg.chat.id
-    url = f"{PUBLIC_URL}/sync/{token}"
+    url = _sync_endpoint(chat_id)
+    app = _app_url_with_sync(chat_id)
+    kb_extra = None
+    if app:
+        kb_extra = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="📱 Открыть Mini App (авто-sync)",
+                web_app=WebAppInfo(url=app),
+            )
+        ]])
     await msg.answer(
-        f"🔗 <b>URL для синхронизации шаблонов</b>\n\n"
+        f"🔗 <b>URL синхронизации</b> (постоянный)\n\n"
         f"<code>{url}</code>\n\n"
-        f"Скопируй этот URL и вставь в HTML-скринер когда он попросит "
-        f"(кнопка 📬 <b>Синхронизировать с ботом</b>).\n\n"
-        f"Ссылка действует 1 час.",
+        f"Вставь <b>один раз</b> в HTML (📬) — сохранится в браузере.\n"
+        f"Дальше жми «🔄 Обновить шаблоны» или 📬 — без новой ссылки.\n\n"
+        f"Ссылка не протухает после деплоя (пока не сменится токен бота).",
         parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=kb_extra or main_keyboard(chat_id),
+    )
+    if kb_extra:
+        await msg.answer(
+            "Клавиатура обновлена.",
+            reply_markup=main_keyboard(chat_id),
+        )
+
+
+# ── 🔄 Обновить шаблоны — Mini App с pre-injected sync URL ───────────────────
+@dp.message(Command("refresh_tpl"))
+@dp.message(F.text == "🔄 Обновить шаблоны")
+async def cmd_refresh_tpl(msg: Message):
+    chat_id = msg.chat.id
+    if not PUBLIC_URL:
+        await msg.answer(
+            "⚠️ Нет <code>PUBLIC_URL</code>. Сначала задай переменную в Railway, "
+            "затем /syncurl.",
+            parse_mode="HTML",
+            reply_markup=main_keyboard(chat_id),
+        )
+        return
+    app = _app_url_with_sync(chat_id)
+    url = _sync_endpoint(chat_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="📱 Открыть скринер → синхронизация",
+            web_app=WebAppInfo(url=app),
+        )
+    ]])
+    await msg.answer(
+        "🔄 <b>Обновить шаблоны</b>\n\n"
+        "1. Открой Mini App кнопкой ниже\n"
+        "2. Скринер сам подставит sync URL и отправит шаблоны (📬)\n"
+        "3. Потом выбери активные в /filter\n\n"
+        f"URL (если открываешь HTML вручную):\n<code>{url}</code>",
+        parse_mode="HTML",
+        reply_markup=kb,
     )
 
 
@@ -191,26 +291,35 @@ async def cmd_status(msg: Message):
     tpls      = storage.get_html_templates(chat_id)
     subscribed = chat_id in _subscribers
 
-    active_names   = cfg["names"]
+    by_mkt         = cfg.get("names_by_market") or {"crypto": [], "ru": []}
     active_markets = cfg["markets"]
 
     mkt_str = " + ".join(
-        {"crypto": "Крипта (Bybit)", "ru": "MOEX"}.get(m, m)
+        {"crypto": "Крипта", "ru": "MOEX"}.get(m, m)
         for m in active_markets
-    ) or "не выбраны"
+    ) or "нет (включи шаблоны в /filter)"
 
     if not tpls:
         tpl_str = "Шаблоны не синхронизированы.\nИспользуй /syncurl → кнопку 📬 в HTML."
-    elif not active_names:
+    elif not any(by_mkt.get(m) for m in ("crypto", "ru")):
         tpl_str = f"Шаблонов загружено: {len(tpls)}\nАктивных: нет — выбери через /filter"
     else:
         overrides = storage.get_template_strategy_overrides(chat_id)
         label = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
-        lines = []
-        for n in active_names:
-            strat = _effective_strategy(chat_id, n, tpls.get(n, {}).get("filters", {}), overrides)
-            lines.append(f"  ✅ {label.get(strat, '')} {n}")
-        tpl_str = f"Активных шаблонов: {len(active_names)}\n" + "\n".join(lines)
+        blocks = []
+        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 MOEX")):
+            names = by_mkt.get(m) or []
+            if not names:
+                blocks.append(f"{mlabel}: —")
+                continue
+            lines = []
+            for n in names:
+                strat = _effective_strategy(
+                    chat_id, n, tpls.get(n, {}).get("filters", {}), overrides
+                )
+                lines.append(f"  ✅ {label.get(strat, '')} {n}")
+            blocks.append(f"{mlabel}:\n" + "\n".join(lines))
+        tpl_str = "\n".join(blocks)
 
     await msg.answer(
         f"📋 <b>Статус</b>\n\n"
@@ -219,30 +328,32 @@ async def cmd_status(msg: Message):
         f"{tpl_str}\n\n"
         f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин",
         parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=main_keyboard(chat_id),
     )
 
 
-# ── /filter — выбор шаблонов и рынков ────────────────────────────────────────
+# ── /filter — per-market шаблоны + стратегия + rename ────────────────────────
 @dp.message(Command("filter"))
 @dp.message(F.text == "⚙️ Фильтр")
 async def cmd_filter(msg: Message):
     chat_id = msg.chat.id
+    _pending_rename.pop(chat_id, None)
     tpls    = storage.get_html_templates(chat_id)
     if not tpls:
         await msg.answer(
             "📭 Шаблоны ещё не синхронизированы.\n\n"
             "1. Открой HTML-скринер\n"
             "2. Сохрани шаблоны кнопкой «Сохранить как шаблон»\n"
-            "3. Получи ссылку через /syncurl\n"
-            "4. Нажми 📬 Синхронизировать с ботом в HTML"
+            "3. Один раз: /syncurl или «🔄 Обновить шаблоны»\n"
+            "4. В Mini App нажми 📬 (URL сохранится сам)"
         )
         return
-    await _send_filter_menu(msg.chat.id)
+    await _send_filter_menu(chat_id)
 
 
 _STRAT_CYCLE = {"fbo": "brk", "brk": "both", "both": "fbo"}
 _STRAT_ICON  = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
+_MKT_TAB     = {"crypto": "🌐 Крипта", "ru": "🇷🇺 MOEX"}
 
 
 def _effective_strategy(chat_id: int, name: str, tpl_filters: dict, overrides: dict) -> str:
@@ -252,59 +363,99 @@ def _effective_strategy(chat_id: int, name: str, tpl_filters: dict, overrides: d
     return tpl_filters.get("_strat", "fbo")  # HTML stratOf fallback: e?e.value:'fbo'
 
 
-async def _send_filter_menu(chat_id: int, edit_msg=None):
-    tpls      = storage.get_html_templates(chat_id)
+def _resolve_tpl_name(tpls: dict, key: str) -> str | None:
+    """Callback data обрезает имя до 40 символов — восстановить полное."""
+    if key in tpls:
+        return key
+    return next((k for k in tpls if k[:40] == key), None)
+
+
+def _tpls_for_market(tpls: dict, market: str) -> dict:
+    return {n: v for n, v in tpls.items() if v.get("market", "crypto") == market}
+
+
+async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = None):
+    tpls = storage.get_html_templates(chat_id)
+    if market not in ("crypto", "ru"):
+        market = _filter_tab.get(chat_id)
+    if market not in ("crypto", "ru"):
+        # Если есть только MOEX-шаблоны — открыть ru, иначе crypto
+        if tpls and all(v.get("market") == "ru" for v in tpls.values()):
+            market = "ru"
+        else:
+            market = "crypto"
+    _filter_tab[chat_id] = market
+
     cfg       = storage.get_active_config(chat_id)
-    active    = set(cfg["names"])
-    active_markets = set(cfg["markets"])
+    by_mkt    = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    active    = set(by_mkt.get(market) or [])
     overrides = storage.get_template_strategy_overrides(chat_id)
+    market_tpls = _tpls_for_market(tpls, market)
 
     buttons = []
 
-    # Рынки
-    buttons.append([InlineKeyboardButton(text="── Рынки ──", callback_data="noop")])
-    mkt_row = []
-    for mkt, label in [("crypto", "🌐 Крипта"), ("ru", "🇷🇺 MOEX")]:
-        check = "✅" if mkt in active_markets else "⬜"
-        mkt_row.append(InlineKeyboardButton(
-            text=f"{check} {label}", callback_data=f"mkt:{mkt}"
+    # Вкладки рынков (переключение экрана, не toggle скана)
+    tab_row = []
+    for mkt, label in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 MOEX")):
+        n_active = len(by_mkt.get(mkt) or [])
+        mark = "• " if mkt == market else ""
+        suffix = f" ({n_active})" if n_active else ""
+        tab_row.append(InlineKeyboardButton(
+            text=f"{mark}{label}{suffix}",
+            callback_data=f"fmkt:{mkt}",
         ))
-    buttons.append(mkt_row)
+    buttons.append(tab_row)
 
-    # Шаблоны — для каждого своя строка: чекбокс включения + переключатель стратегии
     buttons.append([InlineKeyboardButton(
-        text="── Шаблоны (жми на стратегию чтобы сменить) ──", callback_data="noop"
+        text=f"── {_MKT_TAB[market]}: шаблоны ──",
+        callback_data="noop",
     )])
-    for name in tpls:
-        check = "✅" if name in active else "⬜"
-        market_tag = tpls[name]["market"]
-        mkt_icon = "🌐" if market_tag == "crypto" else "🇷🇺"
-        strat = _effective_strategy(chat_id, name, tpls[name]["filters"], overrides)
-        strat_tag = _STRAT_ICON.get(strat, "")
-        key = name[:40]
-        buttons.append([
-            InlineKeyboardButton(text=f"{check} {mkt_icon} {name}", callback_data=f"tpl:{key}"),
-            InlineKeyboardButton(text=strat_tag, callback_data=f"strat:{key}"),
-        ])
 
-    # Кнопки управления
+    if not market_tpls:
+        buttons.append([InlineKeyboardButton(
+            text="(нет шаблонов — синхронизируй из HTML)",
+            callback_data="noop",
+        )])
+    else:
+        for name in market_tpls:
+            check = "✅" if name in active else "⬜"
+            strat = _effective_strategy(chat_id, name, market_tpls[name]["filters"], overrides)
+            strat_tag = _STRAT_ICON.get(strat, "")
+            key = name[:40]
+            buttons.append([
+                InlineKeyboardButton(text=f"{check} {name}", callback_data=f"tpl:{key}"),
+                InlineKeyboardButton(text=strat_tag, callback_data=f"strat:{key}"),
+                InlineKeyboardButton(text="✏️", callback_data=f"ren:{key}"),
+            ])
+
     buttons.append([
-        InlineKeyboardButton(text="✅ Включить все", callback_data="tpl_all:1"),
-        InlineKeyboardButton(text="⬜ Выключить все", callback_data="tpl_all:0"),
+        InlineKeyboardButton(text="✅ Все (этот рынок)", callback_data="tpl_all:1"),
+        InlineKeyboardButton(text="⬜ Сброс (этот рынок)", callback_data="tpl_all:0"),
     ])
-    buttons.append([InlineKeyboardButton(text="💾 Сохранить и закрыть", callback_data="filter_done")])
+    buttons.append([InlineKeyboardButton(
+        text="🔄 Обновить шаблоны", callback_data="refresh_tpl"
+    )])
+    buttons.append([InlineKeyboardButton(
+        text="💾 Сохранить и закрыть", callback_data="filter_done"
+    )])
 
-    kb  = InlineKeyboardMarkup(inline_keyboard=buttons)
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    n_on = len(active)
     txt = (
-        "🎛 <b>Настройка фильтров</b>\n\n"
-        "Слева — включить/выключить шаблон.\n"
-        "Справа — нажми, чтобы переключить стратегию шаблона: "
-        "📈 Пробой → 🔻 Ложный пробой → 📈🔻 Оба → по кругу.\n\n"
-        "Рынки:"
+        f"🎛 <b>Фильтры — {_MKT_TAB[market]}</b>\n\n"
+        f"Активных на этом рынке: <b>{n_on}</b>\n\n"
+        "Переключай вкладку 🌐 / 🇷🇺 сверху.\n"
+        "Слева — вкл/выкл шаблон (только этот рынок).\n"
+        "Стратегия: 📈Проб → 🔻ЛП → 📈🔻Оба.\n"
+        "✏️ — переименовать шаблон.\n\n"
+        "Скан идёт по рынкам, где есть ≥1 активный шаблон."
     )
 
     if edit_msg:
-        await edit_msg.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+        try:
+            await edit_msg.edit_text(txt, reply_markup=kb, parse_mode="HTML")
+        except Exception:
+            await bot.send_message(chat_id, txt, reply_markup=kb, parse_mode="HTML")
     else:
         await bot.send_message(chat_id, txt, reply_markup=kb, parse_mode="HTML")
 
@@ -314,79 +465,189 @@ async def cb_noop(call: CallbackQuery):
     await call.answer()
 
 
+@dp.callback_query(F.data.startswith("fmkt:"))
+async def cb_filter_tab(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    await call.answer(_MKT_TAB[mkt])
+
+
+# Старый callback mkt: — переключает вкладку (совместимость)
 @dp.callback_query(F.data.startswith("mkt:"))
 async def cb_market(call: CallbackQuery):
     chat_id = call.message.chat.id
-    mkt     = call.data.split(":", 1)[1]
-    cfg     = storage.get_active_config(chat_id)
-    markets = set(cfg["markets"])
-    if mkt in markets:
-        markets.discard(mkt)
-    else:
-        markets.add(mkt)
-    storage.set_active_markets(chat_id, list(markets))
-    await _send_filter_menu(chat_id, edit_msg=call.message)
-    await call.answer()
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    await call.answer(_MKT_TAB[mkt])
 
 
 @dp.callback_query(F.data.startswith("tpl:"))
 async def cb_tpl(call: CallbackQuery):
     chat_id = call.message.chat.id
-    name    = call.data.split(":", 1)[1]
-    tpls    = storage.get_html_templates(chat_id)
-    # Найти полное имя (callback обрезает до 40 символов)
-    full_name = next((k for k in tpls if k[:40] == name), name)
-    cfg     = storage.get_active_config(chat_id)
-    active  = set(cfg["names"])
+    key = call.data.split(":", 1)[1]
+    tpls = storage.get_html_templates(chat_id)
+    full_name = _resolve_tpl_name(tpls, key)
+    if not full_name:
+        await call.answer("Шаблон не найден")
+        return
+    market = tpls[full_name].get("market", "crypto")
+    _filter_tab[chat_id] = market
+    cfg = storage.get_active_config(chat_id)
+    active = list((cfg.get("names_by_market") or {}).get(market) or [])
     if full_name in active:
-        active.discard(full_name)
+        active = [n for n in active if n != full_name]
     else:
-        active.add(full_name)
-    storage.set_active_templates(chat_id, list(active))
-    await _send_filter_menu(chat_id, edit_msg=call.message)
+        active.append(full_name)
+    storage.set_active_templates_for_market(chat_id, market, active)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("strat:"))
 async def cb_strat(call: CallbackQuery):
     chat_id = call.message.chat.id
-    name    = call.data.split(":", 1)[1]
-    tpls    = storage.get_html_templates(chat_id)
-    full_name = next((k for k in tpls if k[:40] == name), name)
-    if full_name not in tpls:
+    key = call.data.split(":", 1)[1]
+    tpls = storage.get_html_templates(chat_id)
+    full_name = _resolve_tpl_name(tpls, key)
+    if not full_name:
         await call.answer("Шаблон не найден")
         return
+    market = tpls[full_name].get("market", "crypto")
+    _filter_tab[chat_id] = market
     overrides = storage.get_template_strategy_overrides(chat_id)
     current = _effective_strategy(chat_id, full_name, tpls[full_name]["filters"], overrides)
     new_strat = _STRAT_CYCLE[current]
     storage.set_template_strategy(chat_id, full_name, new_strat)
-    await _send_filter_menu(chat_id, edit_msg=call.message)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
     label = {"fbo": "Ложный пробой", "brk": "Пробой", "both": "Оба"}[new_strat]
     await call.answer(f"{full_name}: {label}")
+
+
+@dp.callback_query(F.data.startswith("ren:"))
+async def cb_rename(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    key = call.data.split(":", 1)[1]
+    tpls = storage.get_html_templates(chat_id)
+    full_name = _resolve_tpl_name(tpls, key)
+    if not full_name:
+        await call.answer("Шаблон не найден")
+        return
+    market = tpls[full_name].get("market", "crypto")
+    _filter_tab[chat_id] = market
+    _pending_rename[chat_id] = full_name
+    await call.answer()
+    await bot.send_message(
+        chat_id,
+        f"✏️ Пришли новое имя для «<b>{full_name}</b>»\n"
+        f"(или /cancel)",
+        parse_mode="HTML",
+    )
+
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(msg: Message):
+    chat_id = msg.chat.id
+    if chat_id in _pending_rename:
+        _pending_rename.pop(chat_id, None)
+        await msg.answer("Отменено.")
+        await _send_filter_menu(chat_id, market=_filter_tab.get(chat_id))
+    else:
+        await msg.answer("Нечего отменять.")
+
+
+@dp.message(F.text & ~F.text.startswith("/"))
+async def on_rename_text(msg: Message):
+    """Перехват следующего сообщения после ✏️ — только если ждём rename."""
+    chat_id = msg.chat.id
+    old = _pending_rename.get(chat_id)
+    if not old:
+        raise SkipHandler
+    # Кнопки главного меню — отменить rename и отдать событие их хендлерам
+    menu_labels = {
+        "📡 Скан", "⚙️ Фильтр", "📊 Статус", "🔗 Sync",
+        "🔄 Обновить шаблоны", "▶️ Старт", "⛔ Стоп",
+    }
+    if (msg.text or "") in menu_labels:
+        _pending_rename.pop(chat_id, None)
+        raise SkipHandler
+
+    _pending_rename.pop(chat_id, None)
+    new_name = (msg.text or "").strip()
+    ok, err = storage.rename_html_template(chat_id, old, new_name)
+    if not ok:
+        await msg.answer(f"❌ {err}\nПопробуй ещё раз или /cancel")
+        _pending_rename[chat_id] = old
+        return
+    await msg.answer(f"✅ «{old}» → «{new_name}»")
+    await _send_filter_menu(chat_id, market=_filter_tab.get(chat_id))
 
 
 @dp.callback_query(F.data.startswith("tpl_all:"))
 async def cb_tpl_all(call: CallbackQuery):
     chat_id = call.message.chat.id
-    enable  = call.data.endswith(":1")
-    tpls    = storage.get_html_templates(chat_id)
-    storage.set_active_templates(chat_id, list(tpls.keys()) if enable else [])
-    await _send_filter_menu(chat_id, edit_msg=call.message)
-    await call.answer("Все включены" if enable else "Все выключены")
+    enable = call.data.endswith(":1")
+    market = _filter_tab.get(chat_id, "crypto")
+    tpls = storage.get_html_templates(chat_id)
+    market_names = list(_tpls_for_market(tpls, market).keys())
+    storage.set_active_templates_for_market(
+        chat_id, market, market_names if enable else []
+    )
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
+    await call.answer(
+        f"{_MKT_TAB[market]}: все включены" if enable else f"{_MKT_TAB[market]}: выключены"
+    )
+
+
+@dp.callback_query(F.data == "refresh_tpl")
+async def cb_refresh_tpl(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    await call.answer()
+    if not PUBLIC_URL:
+        await bot.send_message(
+            chat_id,
+            "⚠️ Нет PUBLIC_URL — сначала настрой Railway, затем /syncurl.",
+            reply_markup=main_keyboard(chat_id),
+        )
+        return
+    app = _app_url_with_sync(chat_id)
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="📱 Открыть скринер → sync",
+            web_app=WebAppInfo(url=app),
+        )
+    ]])
+    await bot.send_message(
+        chat_id,
+        "🔄 Открой Mini App — sync URL подставится сам, шаблоны уйдут в бота.",
+        reply_markup=kb,
+    )
 
 
 @dp.callback_query(F.data == "filter_done")
 async def cb_filter_done(call: CallbackQuery):
     chat_id = call.message.chat.id
-    cfg     = storage.get_active_config(chat_id)
-    n       = len(cfg["names"])
-    mkts    = ", ".join(cfg["markets"]) or "нет"
+    _pending_rename.pop(chat_id, None)
+    cfg = storage.get_active_config(chat_id)
+    by = cfg.get("names_by_market") or {}
+    parts = []
+    for m, label in (("crypto", "крипта"), ("ru", "MOEX")):
+        n = len(by.get(m) or [])
+        if n:
+            parts.append(f"{label}: {n}")
+    mkts = ", ".join(parts) or "нет активных"
     _subscribers.add(chat_id)
     await call.message.edit_text(
         f"✅ Настройки сохранены.\n\n"
-        f"Активных шаблонов: <b>{n}</b>\n"
-        f"Рынки: <b>{mkts}</b>\n\n"
-        f"Сигналы будут приходить каждые {SCAN_INTERVAL // 60} мин.",
+        f"Активно: <b>{mkts}</b>\n\n"
+        f"Сигналы каждые {SCAN_INTERVAL // 60} мин "
+        f"по рынкам с включёнными шаблонами.",
         parse_mode="HTML",
     )
     await call.answer()
@@ -398,7 +659,7 @@ async def cb_filter_done(call: CallbackQuery):
 async def cmd_scan(msg: Message):
     await msg.answer(
         "🔍 Запускаю скан... 1–3 минуты.\nТолько новые сигналы ≤12ч (без дампа истории).",
-        reply_markup=MAIN_KEYBOARD,
+        reply_markup=main_keyboard(msg.chat.id),
     )
     try:
         n = await run_scan(
@@ -415,55 +676,47 @@ async def cmd_scan(msg: Message):
 
 # ── Построить фильтр для чата из активных шаблонов ───────────────────────────
 def _build_filter_for_chat(chat_id: int) -> dict:
-    cfg    = storage.get_active_config(chat_id)
-    tpls   = storage.get_html_templates(chat_id)
-    active = cfg["names"]
-    if not active or not tpls:
-        # Без синхронизированных шаблонов: FBO + DEF.thr=0.20, по каждому
-        # рынку из /filter (crypto и/или ru) — чтобы MOEX сканировался без tpl.
-        markets = cfg.get("markets") or ["crypto"]
-        return {
-            "markets": markets,
-            "_multi": [{
-                "_name": "HTML UI",
-                "_market": m,
-                "_strategy": "fbo",
-                "filters": {},
-            } for m in markets],
-        }
+    """Фильтр чата: только активные шаблоны своего рынка (crypto / ru).
+
+    Рынок сканируется, только если у него ≥1 активный шаблон.
+    """
+    cfg  = storage.get_active_config(chat_id)
+    tpls = storage.get_html_templates(chat_id)
+    by   = cfg.get("names_by_market") or {"crypto": [], "ru": []}
 
     overrides = storage.get_template_strategy_overrides(chat_id)
-
-    # Объединяем активные шаблоны: сигнал проходит если подходит хотя бы под один.
-    # Каждый элемент несёт своё имя (_name) и свой рынок (_market), чтобы screener.py
-    # мог сообщить точно какой шаблон совпал и не путать рынки между шаблонами.
     multi = []
-    covered = set()
-    for n in active:
-        if n not in tpls:
+    markets = []
+
+    for mkt in ("crypto", "ru"):
+        names = by.get(mkt) or []
+        if not names:
             continue
-        entry = tpls[n]
-        tpl_filters = entry["filters"]
-        strat = _effective_strategy(chat_id, n, tpl_filters, overrides)
-        mkt = entry.get("market", "crypto")
-        covered.add(mkt)
-        multi.append({
-            "_name": n,
-            "_market": mkt,
-            "_strategy": strat,
-            "filters": tpl_filters,
-        })
-    # Рынок включён в /filter, но нет активного шаблона под него → HTML UI FBO fallback
-    for m in cfg.get("markets") or []:
-        if m not in covered:
+        any_ok = False
+        for n in names:
+            if n not in tpls:
+                continue
+            entry = tpls[n]
+            # Шаблон должен принадлежать этому рынку (защита от рассинхрона)
+            if entry.get("market", "crypto") != mkt:
+                continue
+            tpl_filters = entry["filters"]
+            strat = _effective_strategy(chat_id, n, tpl_filters, overrides)
             multi.append({
-                "_name": "HTML UI",
-                "_market": m,
-                "_strategy": "fbo",
-                "filters": {},
+                "_name": n,
+                "_market": mkt,
+                "_strategy": strat,
+                "filters": tpl_filters,
             })
-    merged = {"_multi": multi, "markets": cfg["markets"]}
-    return merged
+            any_ok = True
+        if any_ok:
+            markets.append(mkt)
+
+    if not multi:
+        # Нет активных шаблонов — ничего не сканируем (явный выбор пользователя)
+        return {"markets": [], "_multi": []}
+
+    return {"_multi": multi, "markets": markets}
 
 
 
@@ -532,7 +785,7 @@ async def cb_unwatch(call: CallbackQuery):
 # ── HTTP: отдать watchlist в HTML ─────────────────────────────────────────────
 async def handle_watchlist(request: web.Request) -> web.Response:
     token   = request.match_info.get("token", "")
-    chat_id = _sync_tokens.get(token)
+    chat_id = _resolve_sync_chat(token)
     if not chat_id:
         return web.json_response({"error": "invalid or expired token"}, status=401)
     market  = request.rel_url.query.get("market", "crypto")
@@ -543,7 +796,7 @@ async def handle_watchlist(request: web.Request) -> web.Response:
 # ── HTTP webhook — принимает шаблоны из HTML ─────────────────────────────────
 async def handle_sync(request: web.Request) -> web.Response:
     token = request.match_info.get("token", "")
-    chat_id = _sync_tokens.get(token)
+    chat_id = _resolve_sync_chat(token)
     if not chat_id:
         return web.json_response({"error": "invalid or expired token"}, status=401)
 
@@ -615,12 +868,15 @@ async def scan_loop():
 # ── Запуск ────────────────────────────────────────────────────────────────────
 async def main():
     storage.init()
+    _sync_tokens.update(storage.load_all_sync_tokens())
+    logger.info("Загружено sync-токенов: %d", len(_sync_tokens))
 
     await bot.set_my_commands([
         BotCommand(command="scan", description="Запустить скан сейчас"),
         BotCommand(command="filter", description="Шаблоны и рынки"),
         BotCommand(command="status", description="Текущие настройки"),
         BotCommand(command="syncurl", description="Ссылка синхронизации HTML"),
+        BotCommand(command="refresh_tpl", description="Обновить шаблоны из Mini App"),
         BotCommand(command="start", description="Подписаться на сигналы"),
         BotCommand(command="stop", description="Остановить сигналы"),
     ])
