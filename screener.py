@@ -12,14 +12,6 @@ logger = logging.getLogger(__name__)
 
 BYBIT_BASE = "https://api.bybit.com"
 
-TOP30_MCAP = {
-    "BTC", "ETH", "BNB", "SOL", "XRP", "USDC", "ADA", "AVAX", "DOGE",
-    "TRX", "DOT", "MATIC", "LINK", "SHIB", "TON", "ICP", "DAI", "LTC",
-    "BCH", "UNI", "ATOM", "XLM", "ETC", "APT", "NEAR", "FIL", "VET",
-    "HBAR", "ARB", "OP",
-}
-
-
 INTERVAL_MAP = {"D": "D", "H4": "240", "H1": "60", "M5": "5"}
 LIMIT = 200  # баров за запрос
 
@@ -72,9 +64,6 @@ async def fetch_klines(
 async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
     """Проверить один инструмент, вернуть список карточек (может быть пустым)."""
     symbol = ticker["symbol"]
-    base = symbol.replace("USDT", "")
-    if base in TOP30_MCAP:
-        return []
 
     try:
         last = float(ticker.get("lastPrice", 0))
@@ -89,11 +78,10 @@ async def scan_one(client: httpx.AsyncClient, ticker: dict) -> list[dict]:
             fetch_klines(client, symbol, "5"),
         )
 
-        # Порог модели для FBO берём минимальным (0.15) на этапе скана: конкретный порог
-        # каждого активного шаблона (sc_thr) досчитывается позже в match_filter/_matches_single —
-        # так один скан обслуживает все шаблоны с разными порогами, а не только дефолтный.
+        # Порог модели для FBO — пол HTML DEF.thr=0.20 на этапе скана; более строгий thr
+        # шаблона досчитывается в match_filter/_matches_single.
         # no_night=True — соответствует чекбоксу «без ночи» в HTML, включённому по умолчанию.
-        result = evaluate(symbol, last, bid, ask, d1, h4, h1, m5, vol24, fbo_threshold=0.15, no_night=True)
+        result = evaluate(symbol, last, bid, ask, d1, h4, h1, m5, vol24, fbo_threshold=0.20, no_night=True)
         return result.get("cards", [])
     except Exception as e:
         logger.debug("scan_one %s error: %s", symbol, e)
@@ -107,7 +95,8 @@ def _matches_single(card: dict, f: dict) -> bool:
       1) старый упрощённый (sides, strength_min, dist_atr_max, bias_filter)
       2) реальные ключи шаблона из HTML (thr, stop, str, cross, dist, age,
          maxrisk, bias, side, kind — без префикса sc_/bt_, как сохраняет HTML)
-    Значения отсутствующих ключей — «авто» (фильтр выключен), так же как в HTML.
+    Значения отсутствующих ключей — «авто» (как HTML readF→DEF), кроме FBO thr:
+    отсутствующий/auto thr = 0.20 (HTML DEF.thr), не «фильтр выключен».
     """
     side_map = {"1": "LONG", "0": "SHORT"}
 
@@ -127,16 +116,19 @@ def _matches_single(card: dict, f: dict) -> bool:
             return False
 
     # ── реальные ключи шаблона HTML (FIDS) ──
-    # Порог модели (thr) для FBO уже применён внутри evaluate_fbo при генерации карточки
-    # (там используется MODEL.threshold по умолчанию); здесь донасчитываем более строгий
-    # порог, если шаблон просит выше дефолтного.
-    if "thr" in f and f["thr"] not in (None, "auto"):
-        try:
-            thr = float(f["thr"])
-            if card.get("strategy") == "fbo" and (card.get("prob") or 0) < thr:
-                return False
-        except (TypeError, ValueError):
-            pass
+    # FBO thr: как HTML passes()+DEF — если thr отсутствует / auto / None → 0.20 (DEF.thr),
+    # НЕ «фильтр выключен». Для brk порог модели не применяется.
+    if card.get("strategy") == "fbo":
+        thr_raw = f.get("thr", 0.20)
+        if thr_raw in (None, "auto"):
+            thr = 0.20
+        else:
+            try:
+                thr = float(thr_raw)
+            except (TypeError, ValueError):
+                thr = 0.20
+        if (card.get("prob") or 0) < thr:
+            return False
 
     if "str" in f and f["str"] not in (None, "auto"):
         try:
@@ -222,7 +214,7 @@ def match_filter(card: dict, f: dict) -> str | None:
             tpl_market = tpl.get("_market", "crypto")
             if tpl_market != card_market:
                 continue
-            tpl_strategy = tpl.get("_strategy", "both")
+            tpl_strategy = tpl.get("_strategy", "fbo")
             if tpl_strategy != "both" and tpl_strategy != card_strategy:
                 continue
             if _matches_single(card, tpl.get("filters", tpl)):

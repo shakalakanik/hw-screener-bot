@@ -217,7 +217,7 @@ def _effective_strategy(chat_id: int, name: str, tpl_filters: dict, overrides: d
     """Явное переопределение из бота важнее _strat, записанного в HTML."""
     if name in overrides:
         return overrides[name]
-    return tpl_filters.get("_strat", "both")
+    return tpl_filters.get("_strat", "fbo")  # HTML stratOf fallback: e?e.value:'fbo'
 
 
 async def _send_filter_menu(chat_id: int, edit_msg=None):
@@ -382,7 +382,17 @@ def _build_filter_for_chat(chat_id: int) -> dict:
     tpls   = storage.get_html_templates(chat_id)
     active = cfg["names"]
     if not active or not tpls:
-        return storage.get_filter(chat_id)   # fallback — старый фильтр
+        # Как Mini App без синхронизированного шаблона: стратегия «Ложный пробой»,
+        # остальные фильтры auto (DEF.thr=0.20 внутри _matches_single), рынок crypto.
+        return {
+            "markets": cfg.get("markets") or ["crypto"],
+            "_multi": [{
+                "_name": "HTML UI",
+                "_market": "crypto",
+                "_strategy": "fbo",
+                "filters": {},
+            }],
+        }
 
     overrides = storage.get_template_strategy_overrides(chat_id)
 

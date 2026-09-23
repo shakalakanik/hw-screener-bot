@@ -45,6 +45,7 @@ PARAMS = {
     "zone_atr": 0.03,
     "zone_pct": 0.0005,
     "impulse_d1_atr": 2.2,
+    "strength_min": 3,          # как V0.PARAMS.strength_min в HTML — уровни слабее отбрасываются
     "max_crosses": 2,           # «запилов уровня» после формирования (правило для «Пробоя»)
     "acc_hours": (8, 10, 12, 16),
     "acc_range_atr": 0.50,
@@ -240,7 +241,7 @@ def accumulation(h1: list[Bar], level: float, atr_d: float) -> tuple[bool, str]:
 
 
 def build_levels(d1: list[Bar], h4: Optional[list[Bar]] = None) -> list[Level]:
-    """1:1 с V0.buildLevels в HTML — без отсечения по strength_min (это UI-фильтр)."""
+    """1:1 с V0.buildLevels в HTML — отсекает lv.strength < PARAMS['strength_min'] (как HTML)."""
     if len(d1) < 12:
         return []
     atr_d = atr(d1)
@@ -309,7 +310,7 @@ def build_levels(d1: list[Bar], h4: Optional[list[Bar]] = None) -> list[Level]:
         if lv.impulse_mid:
             s -= 3
         lv.strength = max(0, min(5, s))
-        if lv.impulse_mid:
+        if lv.impulse_mid or lv.strength < PARAMS["strength_min"]:
             continue
         if abs(lv.price - last) > 3.0 * atr_d:
             continue
@@ -344,6 +345,35 @@ def _is_night_msk(ts_ms: int) -> bool:
     return not (9 <= hl < 23)
 
 
+def _pit_day_state(d1c: list[Bar], h1c: list[Bar], bar: Bar) -> tuple[float, list[Level], str]:
+    """Point-in-time D1 levels for bar's UTC day — 1:1 with scanSymbol day-cache in HTML.
+
+    cut = closed D1 bars fully before bar.ts; then push a synthetic intraday day bar
+    aggregated from H1 of that UTC day up to bar. Levels via build_levels(cut, []) —
+    empty H4 list matches HTML V0.buildLevels(cut, []).
+    """
+    day_start = (bar.ts // 86_400_000) * 86_400_000
+    cut = [b for b in d1c if b.ts + 86_400_000 <= bar.ts]
+    td = [b for b in h1c if day_start <= b.ts <= bar.ts]
+    if td:
+        cut = list(cut)
+        cut.append(Bar(
+            ts=day_start,
+            o=td[0].o,
+            h=max(x.h for x in td),
+            l=min(x.l for x in td),
+            c=bar.c,
+            vol_quote=0.0,
+            confirmed=True,
+        ))
+    if len(cut) < 40:
+        return 0.0, [], "flat"
+    atr_d = atr(cut)
+    if atr_d <= 0:
+        return 0.0, [], "flat"
+    return atr_d, build_levels(cut, []), d1_bias(cut)
+
+
 def evaluate_brk(
     ticker: str,
     d1c: list[Bar],
@@ -365,27 +395,40 @@ def evaluate_brk(
     попадают в 23:00–09:00 МСК, а не весь скан целиком (это не то же самое,
     что не сканировать вообще ночью).
     """
+    # atr_d/levels/bias args ignored — PIT day-cache like HTML scanSymbol.
+    _ = (atr_d, levels, bias)
     cards: list[dict] = []
-    if len(h1c) < 2 or not levels:
+    if len(h1c) < 2:
         return cards
 
-    a_h1 = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
-    if a_h1 <= 0:
-        return cards
-
-    start_idx = max(1, len(h1c) - lookback_hours)
+    # HTML: fromIdx = max(60, h1c.length - opt.scanBars)
+    start_idx = max(60, len(h1c) - lookback_hours)
+    cache_day = None
+    pit_levels: list[Level] = []
+    pit_atr_d = 0.0
+    pit_bias = "flat"
 
     for i in range(start_idx, len(h1c)):
         bar = h1c[i]
         if no_night and _is_night_msk(bar.ts):
             continue
+        dk = bar.ts // 86_400_000
+        if dk != cache_day:
+            cache_day = dk
+            pit_atr_d, pit_levels, pit_bias = _pit_day_state(d1c, h1c, bar)
+        if not pit_levels:
+            continue
+
         prev_b = h1c[i - 1]
         h1_upto = h1c[: i + 1]   # только то, что было известно к моменту bar
+        a_h1 = atr(h1_upto[-60:]) if len(h1_upto) >= 60 else atr(h1_upto)
+        if a_h1 <= 0:
+            continue
 
         vw = sorted(b.vol_quote for b in h1_upto[-25:-1] if b.vol_quote > 0)
         v_med = vw[len(vw) // 2] if vw else 0.0
 
-        for lv in levels:
+        for lv in pit_levels:
             side = _side_of(lv.kind)
 
             def beyond(b: Bar, _price=lv.price, _side=side) -> bool:
@@ -394,7 +437,7 @@ def evaluate_brk(
             if not (beyond(bar) and not beyond(prev_b) and bar.ts > lv.formed_ts):
                 continue
 
-            acc, acc_why = accumulation(h1_upto[:-1], lv.price, atr_d)
+            acc, acc_why = accumulation(h1_upto[:-1], lv.price, pit_atr_d)
             if not acc:
                 continue
 
@@ -404,11 +447,14 @@ def evaluate_brk(
             if cross_b > PARAMS["max_crosses"]:
                 continue
 
-            bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
+            bias_ok = not (
+                (pit_bias == "up" and side == "short")
+                or (pit_bias == "down" and side == "long")
+            )
             if not bias_ok:
                 continue
 
-            rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
+            rst = _risk_stop_take(bar.c, pit_atr_d, side, stop_atr_frac=0.10, target_r=3.0)
             if rst is None:
                 continue
             stop, take, risk = rst
@@ -423,17 +469,17 @@ def evaluate_brk(
                 "kind": lv.kind,
                 "strength": lv.strength,
                 "last": bar.c,
-                "signal_ts": bar.ts,
+                "signal_ts": bar.ts,  # ms
                 "dist_atr": abs(bar.c - lv.price) / a_h1,
-                "atr_d": atr_d,
+                "atr_d": pit_atr_d,
                 "atr_h1": a_h1,
                 "stop": stop,
                 "take": take,
                 "risk": risk,
-                "d1_bias": bias,
+                "d1_bias": pit_bias,
                 "crosses": cross_b,
                 "prob": None,  # модель не применяется к «Пробою»
-                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,  # ms
                 "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
                 "why": [acc_why, f"пробой {lv.kind} на закрытии часа", f"запилов после формирования: {cross_b}"],
             })
@@ -489,32 +535,42 @@ def evaluate_fbo(
     Сигнал на первом часе возврата цены за уровень после пробоя (ложный пробой).
     1:1 с веткой type:'fbo' в scanSymbol(). Использует Random Forest (model.json)
     для скоринга p; сигнал проходит только при p >= threshold (по умолчанию
-    MODEL.threshold из model.json, обычно 0.30).
+    0.20 — HTML DEF.thr).
     Проверяет последние lookback_hours часов, а не только текущий — иначе скан
     раз в 15 минут пропускал бы сигнал, случившийся между запусками.
     no_night — см. evaluate_brk: пропускает только часы сигнала в 23:00–09:00 МСК.
     """
+    # atr_d/levels/bias args ignored — PIT day-cache like HTML scanSymbol.
+    _ = (atr_d, levels, bias)
     cards: list[dict] = []
-    model = _load_model()
+    _load_model()  # ensure model ready for _model_predict
     if threshold is None:
-        threshold = model.get("threshold", 0.30)
+        threshold = 0.20  # HTML DEF.thr
 
     lookback = PARAMS["lookback_fbo"]
-    if len(h1c) < lookback + 1 or not levels:
+    if len(h1c) < lookback + 1:
         return cards
 
-    a_h1_fallback = atr(h1c[-60:]) if len(h1c) >= 60 else atr(h1c)
-    if a_h1_fallback <= 0:
-        return cards
-
-    start_idx = max(lookback, len(h1c) - lookback_hours)
+    # HTML: fromIdx = max(60, h1c.length - opt.scanBars)
+    start_idx = max(60, len(h1c) - lookback_hours)
+    cache_day = None
+    pit_levels: list[Level] = []
+    pit_atr_d = 0.0
+    pit_bias = "flat"
 
     for hi_idx in range(start_idx, len(h1c)):
         bar = h1c[hi_idx]
         if no_night and _is_night_msk(bar.ts):
             continue
+        dk = bar.ts // 86_400_000
+        if dk != cache_day:
+            cache_day = dk
+            pit_atr_d, pit_levels, pit_bias = _pit_day_state(d1c, h1c, bar)
+        if not pit_levels:
+            continue
+
         h1_upto = h1c[: hi_idx + 1]
-        a_h1 = atr(h1_upto[-60:]) if len(h1_upto) >= 60 else a_h1_fallback
+        a_h1 = atr(h1_upto[-60:]) if len(h1_upto) >= 60 else atr(h1_upto)
         if a_h1 <= 0:
             continue
 
@@ -526,7 +582,7 @@ def evaluate_fbo(
         if len(w) != lookback:
             continue
 
-        for lv in levels:
+        for lv in pit_levels:
             br_side = _side_of(lv.kind)
 
             def beyond_br(b: Bar, _price=lv.price, _side=br_side) -> bool:
@@ -552,7 +608,7 @@ def evaluate_fbo(
             brk_bars = [b for b in w if beyond_br(b)]
             poke = max((b.h - b.l) for b in brk_bars) / a_h1 if brk_bars else 0.0
 
-            min_risk = max(0.10 * atr_d, 0.02 * bar.c)
+            min_risk = max(0.10 * pit_atr_d, 0.02 * bar.c)
             covers = (bar.c + min_risk > ext) if side == "short" else (bar.c - min_risk < ext)
 
             # индекс первого бара пробоя внутри h1_upto
@@ -578,33 +634,37 @@ def evaluate_fbo(
             if len(dd) == 3:
                 hi_d, lo_d = max(b.h for b in dd), min(b.l for b in dd)
                 side_ok = all(
-                    (b.c >= lv.price - 0.3 * atr_d) if br_side == "long" else (b.c <= lv.price + 0.3 * atr_d)
+                    (b.c >= lv.price - 0.3 * pit_atr_d) if br_side == "long"
+                    else (b.c <= lv.price + 0.3 * pit_atr_d)
                     for b in dd
                 )
-                if hi_d - lo_d <= 0.9 * atr_d and side_ok:
+                if hi_d - lo_d <= 0.9 * pit_atr_d and side_ok:
                     d1_against = 1
 
             win8 = h1_upto[-9:-1]
             touched8 = 1 if (len(win8) >= 8 and min(b.l for b in win8) <= lv.price <= max(b.h for b in win8)) else 0
-            acc_res, _ = accumulation(h1_upto[:-1], lv.price, atr_d)
+            acc_res, _ = accumulation(h1_upto[:-1], lv.price, pit_atr_d)
 
             cross = count_close_crosses(
                 [b for b in h1_upto if lv.formed_ts < b.ts <= bar.ts], lv.price, lv.formed_ts
             )
-            bias_ok = not ((bias == "up" and side == "short") or (bias == "down" and side == "long"))
+            bias_ok = not (
+                (pit_bias == "up" and side == "short")
+                or (pit_bias == "down" and side == "long")
+            )
 
             feat = {
                 "strength": lv.strength,
                 "crosses": cross,
                 "touched8": touched8,
                 "acc": 1 if acc_res else 0,
-                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,  # ms
                 "vol_contraction": vc,
                 "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
                 "overshoot_atr": abs(ext - lv.price) / a_h1,
                 "dist_atr": abs(bar.c - lv.price) / a_h1,
                 "bias_ok": 1 if bias_ok else 0,
-                "atrD_pct": atr_d / bar.c,
+                "atrD_pct": pit_atr_d / bar.c,
                 "aH1_pct": a_h1 / bar.c,
                 "side_long": 1 if side == "long" else 0,
                 "kind": lv.kind,
@@ -613,7 +673,7 @@ def evaluate_fbo(
             if p < threshold:
                 continue
 
-            rst = _risk_stop_take(bar.c, atr_d, side, stop_atr_frac=0.10, target_r=3.0)
+            rst = _risk_stop_take(bar.c, pit_atr_d, side, stop_atr_frac=0.10, target_r=3.0)
             if rst is None:
                 continue
             stop, take, risk = rst
@@ -628,14 +688,14 @@ def evaluate_fbo(
                 "kind": lv.kind,
                 "strength": lv.strength,
                 "last": bar.c,
-                "signal_ts": bar.ts,
+                "signal_ts": bar.ts,  # ms
                 "dist_atr": feat["dist_atr"],
-                "atr_d": atr_d,
+                "atr_d": pit_atr_d,
                 "atr_h1": a_h1,
                 "stop": stop,
                 "take": take,
                 "risk": risk,
-                "d1_bias": bias,
+                "d1_bias": pit_bias,
                 "crosses": cross,
                 "prob": round(p, 4),
                 "level_age_h": feat["level_age_h"],
@@ -669,15 +729,18 @@ def evaluate(
     no_night: bool = False,
 ) -> dict:
     """
-    Точка входа для скринера. Считает уровни/тренд ОДИН раз, затем прогоняет
-    запрошенные стратегии (по умолчанию обе) и возвращает карточки из каждой,
-    строго помеченные полем "strategy" — "brk" или "fbo", никогда не смешаны.
+    Точка входа для скринера. Уровни считаются point-in-time по UTC-дню внутри
+    evaluate_brk/evaluate_fbo (как scanSymbol day-cache в HTML): на каждом часе
+    lookback — cut = закрытые D1 до bar.ts + синтетический intraday день из H1,
+    build_levels(cut, []), затем BRK+FBO с этими уровнями. Не один build_levels
+    на полный d1/h4 для всех часов.
 
     strategies: подмножество ("brk",), ("fbo",) или ("brk", "fbo") — что сканировать.
     lookback_hours: сколько последних часов проверять на сигнал (по умолчанию 24 —
         чтобы скан раз в 15 минут не пропускал сигнал, случившийся между запусками).
     no_night: как чекбокс «без ночи» в HTML — пропускает часы 23:00–09:00 МСК
         поштучно, а не весь скан целиком.
+    fbo_threshold: пол модели для FBO; None → 0.20 (HTML DEF.thr).
     """
     d1c, h4c, h1c = last_closed(d1), last_closed(h4), last_closed(h1)
     out = {"version": VERSION, "ticker": ticker, "ok": False, "cards": [], "reason": ""}
@@ -689,29 +752,26 @@ def evaluate(
         out["reason"] = "мало баров"
         return out
 
+    # Метаданные по полному ряду (для out); сигналы используют PIT внутри BRK/FBO.
     atr_d = atr(d1c)
     if atr_d <= 0:
         out["reason"] = "ATR=0"
         return out
 
-    levels = build_levels(d1c, h4c)
-    bias = d1_bias(d1c)
     out["ok"] = True
     out["atr_d"] = atr_d
-    out["d1_bias"] = bias
-
-    if not levels:
-        return out
+    out["d1_bias"] = d1_bias(d1c)
 
     cards: list[dict] = []
+    # Пустые levels/bias — evaluate_* строят PIT сами (args игнорируются).
     if "brk" in strategies:
         cards.extend(evaluate_brk(
-            ticker, d1c, h4c, h1c, atr_d, levels, bias,
+            ticker, d1c, h4c, h1c, atr_d, [], "flat",
             lookback_hours=lookback_hours, no_night=no_night,
         ))
     if "fbo" in strategies:
         cards.extend(evaluate_fbo(
-            ticker, d1c, h4c, h1c, atr_d, levels, bias,
+            ticker, d1c, h4c, h1c, atr_d, [], "flat",
             threshold=fbo_threshold, lookback_hours=lookback_hours, no_night=no_night,
         ))
 
