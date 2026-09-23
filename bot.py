@@ -5,8 +5,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher, F
@@ -25,11 +24,8 @@ logger = logging.getLogger(__name__)
 TOKEN           = os.environ["TG_BOT_TOKEN"]
 SCAN_INTERVAL   = int(os.environ.get("SCAN_INTERVAL_MIN", "15")) * 60
 PORT            = int(os.environ.get("PORT", "8080"))
-PUBLIC_URL      = (
-    os.environ.get("PUBLIC_URL")
-    or os.environ.get("WEBAPP_URL")
-    or ""
-).rstrip("/")   # https://yourapp.railway.app (WEBAPP_URL — запасной алиас)
+PUBLIC_URL      = os.environ.get("PUBLIC_URL", "").rstrip("/")   # https://yourapp.railway.app
+MSK = timezone(timedelta(hours=3))
 
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
@@ -60,6 +56,7 @@ def _format_card(card: dict) -> str:
     level    = card["level"]
     risk_pct = abs(entry - stop) / entry * 100
     tp_pct   = abs(take - entry)  / entry * 100
+    dist_pct = card.get("dist_atr", 0) * 100   # dist_atr — доля ATR (0.72 = 72% ATR), не сам ATR
 
     market   = card.get("market", "crypto")
     market_label = _MARKET_LABEL.get(market, market)
@@ -71,17 +68,25 @@ def _format_card(card: dict) -> str:
     prob = card.get("prob")
     prob_line = f"  (модель p={prob:.2f})" if strategy == "fbo" and prob is not None else ""
 
+    # Время самого сигнала (час его появления на рынке), не время отправки сообщения. MSK, не UTC.
+    signal_ts = card.get("signal_ts")
+    if signal_ts:
+        ts_msk = datetime.fromtimestamp(signal_ts / 1000, tz=MSK)
+        time_str = ts_msk.strftime("%d.%m %H:%M МСК")
+    else:
+        time_str = datetime.now(MSK).strftime("%d.%m %H:%M МСК") + " (время скана)"
+
     return "\n".join([
         f"{side_emoji} <b>{card['ticker']}</b> — {card['side']}",
         f"{market_label}  ·  {strategy_label}{prob_line}",
         tpl_line.rstrip("\n"),
         f"🎯 Уровень: <code>{level:.4f}</code>  [{card['kind']}]",
-        f"📥 Вход: <code>{entry:.4f}</code>  (расст. {card['dist_atr']:.2f} ATR)",
+        f"📥 Вход: <code>{entry:.4f}</code>  (расст. {dist_pct:.0f}% ATR)",
         f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
         f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
         f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
         f"📊 Тренд D1: {bias}",
-        f"🕐 {datetime.utcnow().strftime('%H:%M UTC')}",
+        f"🕐 Сигнал: {time_str}",
     ])
 
 
@@ -168,7 +173,13 @@ async def cmd_status(msg: Message):
     elif not active_names:
         tpl_str = f"Шаблонов загружено: {len(tpls)}\nАктивных: нет — выбери через /filter"
     else:
-        tpl_str = f"Активных шаблонов: {len(active_names)}\n" + "\n".join(f"  ✅ {n}" for n in active_names)
+        overrides = storage.get_template_strategy_overrides(chat_id)
+        label = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
+        lines = []
+        for n in active_names:
+            strat = _effective_strategy(chat_id, n, tpls.get(n, {}).get("filters", {}), overrides)
+            lines.append(f"  ✅ {label.get(strat, '')} {n}")
+        tpl_str = f"Активных шаблонов: {len(active_names)}\n" + "\n".join(lines)
 
     await msg.answer(
         f"📋 <b>Статус</b>\n\n"
@@ -197,11 +208,23 @@ async def cmd_filter(msg: Message):
     await _send_filter_menu(msg.chat.id)
 
 
+_STRAT_CYCLE = {"fbo": "brk", "brk": "both", "both": "fbo"}
+_STRAT_ICON  = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
+
+
+def _effective_strategy(chat_id: int, name: str, tpl_filters: dict, overrides: dict) -> str:
+    """Явное переопределение из бота важнее _strat, записанного в HTML."""
+    if name in overrides:
+        return overrides[name]
+    return tpl_filters.get("_strat", "both")
+
+
 async def _send_filter_menu(chat_id: int, edit_msg=None):
-    tpls   = storage.get_html_templates(chat_id)
-    cfg    = storage.get_active_config(chat_id)
-    active = set(cfg["names"])
+    tpls      = storage.get_html_templates(chat_id)
+    cfg       = storage.get_active_config(chat_id)
+    active    = set(cfg["names"])
     active_markets = set(cfg["markets"])
+    overrides = storage.get_template_strategy_overrides(chat_id)
 
     buttons = []
 
@@ -215,19 +238,21 @@ async def _send_filter_menu(chat_id: int, edit_msg=None):
         ))
     buttons.append(mkt_row)
 
-    # Шаблоны
-    buttons.append([InlineKeyboardButton(text="── Шаблоны ──", callback_data="noop")])
-    strat_icon = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
+    # Шаблоны — для каждого своя строка: чекбокс включения + переключатель стратегии
+    buttons.append([InlineKeyboardButton(
+        text="── Шаблоны (жми на стратегию чтобы сменить) ──", callback_data="noop"
+    )])
     for name in tpls:
         check = "✅" if name in active else "⬜"
         market_tag = tpls[name]["market"]
         mkt_icon = "🌐" if market_tag == "crypto" else "🇷🇺"
-        tpl_strat = tpls[name]["filters"].get("_strat", "both")
-        strat_tag = strat_icon.get(tpl_strat, "")
-        buttons.append([InlineKeyboardButton(
-            text=f"{check} {mkt_icon} {strat_tag} {name}",
-            callback_data=f"tpl:{name[:40]}",
-        )])
+        strat = _effective_strategy(chat_id, name, tpls[name]["filters"], overrides)
+        strat_tag = _STRAT_ICON.get(strat, "")
+        key = name[:40]
+        buttons.append([
+            InlineKeyboardButton(text=f"{check} {mkt_icon} {name}", callback_data=f"tpl:{key}"),
+            InlineKeyboardButton(text=strat_tag, callback_data=f"strat:{key}"),
+        ])
 
     # Кнопки управления
     buttons.append([
@@ -237,7 +262,13 @@ async def _send_filter_menu(chat_id: int, edit_msg=None):
     buttons.append([InlineKeyboardButton(text="💾 Сохранить и закрыть", callback_data="filter_done")])
 
     kb  = InlineKeyboardMarkup(inline_keyboard=buttons)
-    txt = "🎛 <b>Настройка фильтров</b>\n\nВыбери рынки и шаблоны по которым приходят сигналы:\n📈 = Пробой  🔻 = Ложный пробой"
+    txt = (
+        "🎛 <b>Настройка фильтров</b>\n\n"
+        "Слева — включить/выключить шаблон.\n"
+        "Справа — нажми, чтобы переключить стратегию шаблона: "
+        "📈 Пробой → 🔻 Ложный пробой → 📈🔻 Оба → по кругу.\n\n"
+        "Рынки:"
+    )
 
     if edit_msg:
         await edit_msg.edit_text(txt, reply_markup=kb, parse_mode="HTML")
@@ -281,6 +312,24 @@ async def cb_tpl(call: CallbackQuery):
     storage.set_active_templates(chat_id, list(active))
     await _send_filter_menu(chat_id, edit_msg=call.message)
     await call.answer()
+
+
+@dp.callback_query(F.data.startswith("strat:"))
+async def cb_strat(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    name    = call.data.split(":", 1)[1]
+    tpls    = storage.get_html_templates(chat_id)
+    full_name = next((k for k in tpls if k[:40] == name), name)
+    if full_name not in tpls:
+        await call.answer("Шаблон не найден")
+        return
+    overrides = storage.get_template_strategy_overrides(chat_id)
+    current = _effective_strategy(chat_id, full_name, tpls[full_name]["filters"], overrides)
+    new_strat = _STRAT_CYCLE[current]
+    storage.set_template_strategy(chat_id, full_name, new_strat)
+    await _send_filter_menu(chat_id, edit_msg=call.message)
+    label = {"fbo": "Ложный пробой", "brk": "Пробой", "both": "Оба"}[new_strat]
+    await call.answer(f"{full_name}: {label}")
 
 
 @dp.callback_query(F.data.startswith("tpl_all:"))
@@ -334,6 +383,8 @@ def _build_filter_for_chat(chat_id: int) -> dict:
     if not active or not tpls:
         return storage.get_filter(chat_id)   # fallback — старый фильтр
 
+    overrides = storage.get_template_strategy_overrides(chat_id)
+
     # Объединяем активные шаблоны: сигнал проходит если подходит хотя бы под один.
     # Каждый элемент несёт своё имя (_name) и свой рынок (_market), чтобы screener.py
     # мог сообщить точно какой шаблон совпал и не путать рынки между шаблонами.
@@ -343,7 +394,7 @@ def _build_filter_for_chat(chat_id: int) -> dict:
             continue
         entry = tpls[n]
         tpl_filters = entry["filters"]
-        strat = tpl_filters.get("_strat", "both")   # 'fbo' | 'brk' | 'both', по умолчанию оба
+        strat = _effective_strategy(chat_id, n, tpl_filters, overrides)
         multi.append({
             "_name": n,
             "_market": entry.get("market", "crypto"),
@@ -466,16 +517,6 @@ async def handle_sync(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, "count": len(names)})
 
 
-
-async def handle_index(request: web.Request) -> web.Response:
-    """Отдать HTML-скринер (Mini App / браузер)."""
-    for name in ("HW_FBO_scanner_6.html", "webapp/screener.html"):
-        path = Path(__file__).resolve().parent / name
-        if path.is_file():
-            return web.FileResponse(path)
-    return web.Response(text="screener html missing", status=404)
-
-
 async def handle_health(request: web.Request) -> web.Response:
     return web.Response(text="ok")
 
@@ -506,8 +547,6 @@ async def main():
     app.router.add_post("/sync/{token}", handle_sync)
     app.router.add_get("/watchlist/{token}", handle_watchlist)
     app.router.add_get("/health", handle_health)
-    app.router.add_get("/", handle_index)
-    app.router.add_get("/app", handle_index)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
