@@ -13,7 +13,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
+    BotCommand, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup,
 )
 
 import storage
@@ -36,6 +37,17 @@ _pending_cards: dict[str, dict] = {}   # card_key → card data
 
 # ── Sync-токены: chat_id → token ──────────────────────────────────────────────
 _sync_tokens: dict[str, int] = {}   # token → chat_id
+
+# ── Основная клавиатура ──────────────────────────────────────────────────────
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📡 Скан"), KeyboardButton(text="⚙️ Фильтр")],
+        [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔗 Sync")],
+        [KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⛔ Стоп")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 def _make_token(chat_id: int) -> str:
     raw = f"{chat_id}:{TOKEN}:{int(time.time() // 3600)}"
@@ -115,6 +127,7 @@ async def send_signal(card: dict, chat_ids: list[int]):
 
 # ── /start ────────────────────────────────────────────────────────────────────
 @dp.message(Command("start"))
+@dp.message(F.text == "▶️ Старт")
 async def cmd_start(msg: Message):
     _subscribers.add(msg.chat.id)
     storage.init()
@@ -127,18 +140,24 @@ async def cmd_start(msg: Message):
         "/status — текущие настройки\n"
         "/stop — остановить сигналы",
         parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
 # ── /stop ─────────────────────────────────────────────────────────────────────
 @dp.message(Command("stop"))
+@dp.message(F.text == "⛔ Стоп")
 async def cmd_stop(msg: Message):
     _subscribers.discard(msg.chat.id)
-    await msg.answer("⛔ Сигналы остановлены. /start чтобы возобновить.")
+    await msg.answer(
+        "⛔ Сигналы остановлены. Нажми «▶️ Старт», чтобы возобновить.",
+        reply_markup=MAIN_KEYBOARD,
+    )
 
 
 # ── /syncurl — выдать ссылку для HTML ────────────────────────────────────────
 @dp.message(Command("syncurl"))
+@dp.message(F.text == "🔗 Sync")
 async def cmd_syncurl(msg: Message):
     if not PUBLIC_URL:
         await msg.answer(
@@ -146,6 +165,7 @@ async def cmd_syncurl(msg: Message):
             "Зайди в Railway → Variables → добавь:\n"
             "<code>PUBLIC_URL = https://&lt;твой домен&gt;.railway.app</code>",
             parse_mode="HTML",
+            reply_markup=MAIN_KEYBOARD,
         )
         return
     token = _make_token(msg.chat.id)
@@ -158,11 +178,13 @@ async def cmd_syncurl(msg: Message):
         f"(кнопка 📬 <b>Синхронизировать с ботом</b>).\n\n"
         f"Ссылка действует 1 час.",
         parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
 @dp.message(Command("status"))
+@dp.message(F.text == "📊 Статус")
 async def cmd_status(msg: Message):
     chat_id   = msg.chat.id
     cfg       = storage.get_active_config(chat_id)
@@ -197,11 +219,13 @@ async def cmd_status(msg: Message):
         f"{tpl_str}\n\n"
         f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин",
         parse_mode="HTML",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
 # ── /filter — выбор шаблонов и рынков ────────────────────────────────────────
 @dp.message(Command("filter"))
+@dp.message(F.text == "⚙️ Фильтр")
 async def cmd_filter(msg: Message):
     chat_id = msg.chat.id
     tpls    = storage.get_html_templates(chat_id)
@@ -370,8 +394,12 @@ async def cb_filter_done(call: CallbackQuery):
 
 # ── /scan ─────────────────────────────────────────────────────────────────────
 @dp.message(Command("scan"))
+@dp.message(F.text == "📡 Скан")
 async def cmd_scan(msg: Message):
-    await msg.answer("🔍 Запускаю скан... 1–3 минуты.\nТолько новые сигналы ≤12ч (без дампа истории).")
+    await msg.answer(
+        "🔍 Запускаю скан... 1–3 минуты.\nТолько новые сигналы ≤12ч (без дампа истории).",
+        reply_markup=MAIN_KEYBOARD,
+    )
     try:
         n = await run_scan(
             on_signal=send_signal,
@@ -574,6 +602,15 @@ async def scan_loop():
 # ── Запуск ────────────────────────────────────────────────────────────────────
 async def main():
     storage.init()
+
+    await bot.set_my_commands([
+        BotCommand(command="scan", description="Запустить скан сейчас"),
+        BotCommand(command="filter", description="Шаблоны и рынки"),
+        BotCommand(command="status", description="Текущие настройки"),
+        BotCommand(command="syncurl", description="Ссылка синхронизации HTML"),
+        BotCommand(command="start", description="Подписаться на сигналы"),
+        BotCommand(command="stop", description="Остановить сигналы"),
+    ])
 
     # HTTP-сервер для webhook
     app = web.Application()
