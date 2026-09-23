@@ -15,8 +15,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+def _api_key() -> str:
+    return (os.environ.get("GEMINI_API_KEY") or "").strip()
+
+
+def _model() -> str:
+    return (os.environ.get("GEMINI_MODEL") or "gemini-3.6-flash").strip() or "gemini-3.6-flash"
+
+
+# Back-compat aliases (tests / status); prefer _api_key()/_model() at call time
+GEMINI_API_KEY = _api_key()
+GEMINI_MODEL = _model()
 
 # Soft limits (free tier ~10 RPM / 250 RPD — keep prompts small)
 MAX_HISTORY_TURNS = 8          # user+model pairs kept in DB (we store messages)
@@ -82,12 +91,12 @@ class AiReply:
 
 
 def is_configured() -> bool:
-    return bool(GEMINI_API_KEY)
+    return bool(_api_key())
 
 
 def _client():
     from google import genai
-    return genai.Client(api_key=GEMINI_API_KEY)
+    return genai.Client(api_key=_api_key())
 
 
 def _parse_action_block(raw: str) -> tuple[str, dict | None]:
@@ -237,7 +246,7 @@ async def chat(
     try:
         client = _client()
         resp = await client.aio.models.generate_content(
-            model=GEMINI_MODEL,
+            model=_model(),
             contents=contents,
             config=config,
         )
