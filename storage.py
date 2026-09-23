@@ -13,6 +13,42 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
+def _column_exists(c: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = c.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _migrate(c: sqlite3.Connection):
+    """Досоздать колонки, если таблицы остались со старой схемой (не удаляя данные)."""
+    # dedup: старая PK была (ticker, side, level) без strategy — пересоздаём таблицу целиком,
+    # т.к. SQLite не может добавить колонку в составной PRIMARY KEY через ALTER TABLE.
+    tables = [r[0] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+
+    if "dedup" in tables and not _column_exists(c, "dedup", "strategy"):
+        c.executescript("""
+            ALTER TABLE dedup RENAME TO dedup_old;
+            CREATE TABLE dedup (
+                ticker   TEXT NOT NULL,
+                side     TEXT NOT NULL,
+                level    REAL NOT NULL,
+                strategy TEXT NOT NULL DEFAULT 'brk',
+                expires  INTEGER NOT NULL,
+                PRIMARY KEY (ticker, side, level, strategy)
+            );
+            INSERT INTO dedup (ticker, side, level, strategy, expires)
+                SELECT ticker, side, level, 'brk', expires FROM dedup_old;
+            DROP TABLE dedup_old;
+        """)
+
+    if "signals" in tables and not _column_exists(c, "signals", "kind"):
+        c.execute("ALTER TABLE signals ADD COLUMN kind TEXT")
+
+    if "watchlist" in tables and not _column_exists(c, "watchlist", "strategy"):
+        c.execute("ALTER TABLE watchlist ADD COLUMN strategy TEXT NOT NULL DEFAULT 'brk'")
+
+
 def init():
     with _conn() as c:
         c.executescript("""
@@ -40,6 +76,7 @@ def init():
             PRIMARY KEY (ticker, side, level, strategy)
         );
         """)
+        _migrate(c)
 
 
 # ── Дедупликация (правило: один сигнал на монету+уровень+стратегию раз в 12 ч) ─
@@ -170,6 +207,7 @@ def _ensure_watchlist(c: sqlite3.Connection):
             raw_json  TEXT
         )
     """)
+    _migrate(c)
 
 
 def add_to_watchlist(chat_id: int, item: dict) -> int:
@@ -335,3 +373,39 @@ def get_active_config(chat_id: int) -> dict:
         "names": json.loads(row["names"]),
         "markets": json.loads(row["markets"]),
     }
+
+
+# ── Переопределение стратегии для конкретного шаблона (per chat) ─────────────
+# По умолчанию стратегия берётся из _strat, записанного в HTML при сохранении
+# шаблона. Здесь хранится ТОЛЬКО явное переопределение, сделанное кнопкой в
+# /filter — если записи нет, действует значение из HTML.
+
+def _ensure_template_strategy(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS template_strategy (
+            chat_id  INTEGER NOT NULL,
+            name     TEXT NOT NULL,
+            strategy TEXT NOT NULL,
+            PRIMARY KEY (chat_id, name)
+        )
+    """)
+
+
+def set_template_strategy(chat_id: int, name: str, strategy: str):
+    """strategy: 'fbo' | 'brk' | 'both'."""
+    with _conn() as c:
+        _ensure_template_strategy(c)
+        c.execute(
+            "INSERT OR REPLACE INTO template_strategy(chat_id, name, strategy) VALUES(?,?,?)",
+            (chat_id, name, strategy),
+        )
+
+
+def get_template_strategy_overrides(chat_id: int) -> dict:
+    """Вернуть {name: strategy} только для шаблонов с явным переопределением."""
+    with _conn() as c:
+        _ensure_template_strategy(c)
+        rows = c.execute(
+            "SELECT name, strategy FROM template_strategy WHERE chat_id=?", (chat_id,)
+        ).fetchall()
+    return {r["name"]: r["strategy"] for r in rows}
