@@ -479,6 +479,98 @@ def _cap_cluster(pending: list[dict], cap: int = CAP_CLUSTER) -> list[dict]:
     return [p for p in pending if id(p) in keep_ids]
 
 
+def _best_only_rank(card: dict) -> tuple:
+    """Ключ ранжирования «лучший» (больше = лучше).
+
+    Порядок:
+      1) prob (float, default 0)
+      2) strength (int 1–5, default 0)
+      3) ближе вход: ниже dist_atr (default большой → хуже)
+      4) новее signal_ts
+    Тот же дух, что у _cap_cluster / coin_limit.
+    """
+    dist = card.get("dist_atr")
+    if dist is None:
+        dist = 1e9
+    return (
+        float(card.get("prob") or 0),
+        int(card.get("strength") or 0),
+        -float(dist),
+        int(card.get("signal_ts") or 0),
+    )
+
+
+def _apply_best_only(
+    pending: list[dict],
+    chat_best_only: Callable[[int], dict],
+) -> list[dict]:
+    """Если у чата best_only[market]=True — оставить только 1 лучший сигнал
+    этого рынка для чата; убрать chat_id из остальных by_template.
+
+    Независимые настройки crypto / ru. Чаты с выкл. — без изменений.
+    """
+    if not pending or chat_best_only is None:
+        return pending
+
+    all_chats: set[int] = set()
+    for item in pending:
+        for chats in (item.get("by_template") or {}).values():
+            all_chats.update(chats)
+    if not all_chats:
+        return pending
+
+    settings = {cid: (chat_best_only(cid) or {}) for cid in all_chats}
+
+    # Кандидаты: (chat_id, market) → индексы pending, где чат фигурирует
+    candidates: dict[tuple[int, str], list[int]] = {}
+    for idx, item in enumerate(pending):
+        market = item["card"].get("market", "crypto")
+        if market not in ("crypto", "ru"):
+            market = "crypto"
+        chats_in: set[int] = set()
+        for chat_list in (item.get("by_template") or {}).values():
+            chats_in.update(chat_list)
+        for cid in chats_in:
+            if (settings.get(cid) or {}).get(market):
+                candidates.setdefault((cid, market), []).append(idx)
+
+    keep_for: dict[tuple[int, str], int] = {}
+    for key, idxs in candidates.items():
+        if len(idxs) == 1:
+            keep_for[key] = idxs[0]
+        else:
+            keep_for[key] = max(idxs, key=lambda i: _best_only_rank(pending[i]["card"]))
+
+    if not keep_for:
+        return pending
+
+    out: list[dict] = []
+    for idx, item in enumerate(pending):
+        market = item["card"].get("market", "crypto")
+        if market not in ("crypto", "ru"):
+            market = "crypto"
+        new_by: dict = {}
+        for tpl, chats in (item.get("by_template") or {}).items():
+            filtered = []
+            for cid in chats:
+                if (settings.get(cid) or {}).get(market):
+                    if keep_for.get((cid, market)) == idx:
+                        filtered.append(cid)
+                else:
+                    filtered.append(cid)
+            if filtered:
+                new_by[tpl] = filtered
+        if new_by:
+            out.append({"card": item["card"], "by_template": new_by})
+
+    dropped = len(pending) - len(out)
+    if dropped or any(True for _ in keep_for):
+        logger.info(
+            "best_only: pending %d → %d (правил чат+рынок: %d)",
+            len(pending), len(out), len(keep_for),
+        )
+    return out
+
 
 def _needed_markets(subscribers: list[int], chat_filters: Callable[[int], dict]) -> set[str]:
     """Какие рынки реально нужны по активным фильтрам подписчиков.
@@ -507,6 +599,7 @@ async def run_scan(
     subscribers: list[int],
     chat_filters: Callable[[int], dict],
     incremental: bool = True,
+    chat_best_only: Callable[[int], dict] | None = None,
 ) -> int:
     """Один полный скан. on_signal вызывается для каждого прошедшего сигнала.
 
@@ -629,6 +722,9 @@ async def run_scan(
             before, len(pending), COIN_WINDOW_H, CAP_CLUSTER,
         )
 
+    if chat_best_only is not None:
+        pending = _apply_best_only(pending, chat_best_only)
+
     logger.info(
         "Скан фильтры: age=%d wm=%d dup=%d → pending=%d",
         skipped_age, skipped_wm, skipped_dup, len(pending),
@@ -709,6 +805,7 @@ async def run_manual_scan(
     template_name: str = "",
     filters: dict | None = None,
     on_progress: Callable[[dict], Awaitable[None]] | None = None,
+    chat_best_only: Callable[[int], dict] | None = None,
 ) -> int:
     """Ручной скан из Mini App: параметры формы HTML + выбранный шаблон.
 
@@ -866,6 +963,9 @@ async def run_manual_scan(
     pending = _cap_cluster(pending)
     if len(pending) != before:
         logger.info("Manual post-filters: %d → %d", before, len(pending))
+
+    if chat_best_only is not None:
+        pending = _apply_best_only(pending, chat_best_only)
 
     logger.info(
         "Manual scan filters: age=%d dup=%d → pending=%d",

@@ -563,9 +563,56 @@ def _ensure_active_templates(c: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS active_templates (
             chat_id INTEGER PRIMARY KEY,
             names   TEXT NOT NULL DEFAULT '[]',
-            markets TEXT NOT NULL DEFAULT '["crypto"]'
+            markets TEXT NOT NULL DEFAULT '["crypto"]',
+            best_only TEXT NOT NULL DEFAULT '{}'
         )
     """)
+    if not _column_exists(c, "active_templates", "best_only"):
+        c.execute(
+            "ALTER TABLE active_templates ADD COLUMN best_only TEXT NOT NULL DEFAULT '{}'"
+        )
+
+
+def _parse_best_only(raw) -> dict:
+    """Нормализовать best_only JSON → {"crypto": bool, "ru": bool}."""
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else (raw or {})
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = {}
+    if not isinstance(parsed, dict):
+        parsed = {}
+    return {
+        "crypto": bool(parsed.get("crypto")),
+        "ru": bool(parsed.get("ru")),
+    }
+
+
+def _upsert_active_templates(
+    c: sqlite3.Connection,
+    chat_id: int,
+    names_json: str,
+    markets_json: str,
+    best_only: dict | None = None,
+):
+    """INSERT OR REPLACE с сохранением best_only, если не передан явно."""
+    _ensure_active_templates(c)
+    if best_only is None:
+        row = c.execute(
+            "SELECT best_only FROM active_templates WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+        best_only = _parse_best_only(row["best_only"] if row else None)
+    else:
+        best_only = _parse_best_only(best_only)
+    c.execute(
+        "INSERT OR REPLACE INTO active_templates(chat_id, names, markets, best_only) "
+        "VALUES(?,?,?,?)",
+        (
+            chat_id,
+            names_json,
+            markets_json,
+            json.dumps(best_only, ensure_ascii=False),
+        ),
+    )
 
 
 def _parse_names_by_market(names_raw, tpls: dict | None) -> dict:
@@ -619,14 +666,11 @@ def set_active_templates(chat_id: int, names):
         by = {"crypto": list(flat), "ru": list(flat)}
     markets = _markets_from_names(by)
     with _conn() as c:
-        _ensure_active_templates(c)
-        c.execute(
-            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) VALUES(?,?,?)",
-            (
-                chat_id,
-                json.dumps(by, ensure_ascii=False),
-                json.dumps(markets, ensure_ascii=False),
-            ),
+        _upsert_active_templates(
+            c,
+            chat_id,
+            json.dumps(by, ensure_ascii=False),
+            json.dumps(markets, ensure_ascii=False),
         )
 
 
@@ -648,14 +692,11 @@ def set_active_templates_for_market(chat_id: int, market: str, names: list[str])
     if by[market] and market not in markets:
         markets.append(market)
     with _conn() as c:
-        _ensure_active_templates(c)
-        c.execute(
-            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) VALUES(?,?,?)",
-            (
-                chat_id,
-                json.dumps(by, ensure_ascii=False),
-                json.dumps(markets, ensure_ascii=False),
-            ),
+        _upsert_active_templates(
+            c,
+            chat_id,
+            json.dumps(by, ensure_ascii=False),
+            json.dumps(markets, ensure_ascii=False),
         )
 
 
@@ -668,14 +709,11 @@ def set_active_markets(chat_id: int, markets: list[str]):
     }
     wanted = [m for m in ("crypto", "ru") if m in set(markets or [])]
     with _conn() as c:
-        _ensure_active_templates(c)
-        c.execute(
-            "INSERT OR REPLACE INTO active_templates(chat_id, names, markets) VALUES(?,?,?)",
-            (
-                chat_id,
-                json.dumps(by, ensure_ascii=False),
-                json.dumps(wanted, ensure_ascii=False),
-            ),
+        _upsert_active_templates(
+            c,
+            chat_id,
+            json.dumps(by, ensure_ascii=False),
+            json.dumps(wanted, ensure_ascii=False),
         )
 
 
@@ -703,13 +741,15 @@ def get_active_config(chat_id: int) -> dict:
     with _conn() as c:
         _ensure_active_templates(c)
         row = c.execute(
-            "SELECT names, markets FROM active_templates WHERE chat_id=?", (chat_id,)
+            "SELECT names, markets, best_only FROM active_templates WHERE chat_id=?",
+            (chat_id,),
         ).fetchone()
     if not row:
         return {
             "names_by_market": {"crypto": [], "ru": []},
             "names": [],
             "markets": [],
+            "best_only": {"crypto": False, "ru": False},
         }
 
     # Подтянуть market шаблонов для миграции плоского списка
@@ -756,7 +796,40 @@ def get_active_config(chat_id: int) -> dict:
         "names_by_market": by,
         "names": names,
         "markets": markets,
+        "best_only": _parse_best_only(row["best_only"] if row is not None else None),
     }
+
+
+def get_best_only(chat_id: int) -> dict:
+    """Режим «только лучший» per-market: {"crypto": bool, "ru": bool}."""
+    return dict(get_active_config(chat_id).get("best_only") or {"crypto": False, "ru": False})
+
+
+def set_best_only(chat_id: int, market: str, enabled: bool):
+    """Вкл/выкл «только лучший» для одного рынка (crypto|ru)."""
+    if market not in ("crypto", "ru"):
+        return
+    with _conn() as c:
+        _ensure_active_templates(c)
+        row = c.execute(
+            "SELECT names, markets, best_only FROM active_templates WHERE chat_id=?",
+            (chat_id,),
+        ).fetchone()
+        bo = _parse_best_only(row["best_only"] if row else None)
+        bo[market] = bool(enabled)
+        if not row:
+            _upsert_active_templates(
+                c,
+                chat_id,
+                json.dumps({"crypto": [], "ru": []}, ensure_ascii=False),
+                json.dumps([], ensure_ascii=False),
+                best_only=bo,
+            )
+        else:
+            c.execute(
+                "UPDATE active_templates SET best_only=? WHERE chat_id=?",
+                (json.dumps(bo, ensure_ascii=False), chat_id),
+            )
 
 
 # ── Переопределение стратегии для конкретного шаблона (per chat) ─────────────

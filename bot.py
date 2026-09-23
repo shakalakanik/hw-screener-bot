@@ -332,10 +332,18 @@ async def cmd_status(msg: Message):
             blocks.append(f"{mlabel}:\n" + "\n".join(lines))
         tpl_str = "\n".join(blocks)
 
+    bo = cfg.get("best_only") or storage.get_best_only(chat_id)
+    bo_str = ", ".join(
+        f"{'Крипта' if m == 'crypto' else 'Мосбиржа'}: "
+        f"{'⭐ лучший' if bo.get(m) else 'все'}"
+        for m in ("crypto", "ru")
+    )
+
     await msg.answer(
         f"📋 <b>Статус</b>\n\n"
         f"Подписка: {'✅ активна' if subscribed else '❌ остановлена'}\n"
-        f"Рынки: {mkt_str}\n\n"
+        f"Рынки: {mkt_str}\n"
+        f"Режим: {bo_str}\n\n"
         f"{tpl_str}\n\n"
         f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин",
         parse_mode="HTML",
@@ -441,6 +449,13 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         callback_data=f"mkt_on:{market}",
     )])
 
+    bo = (cfg.get("best_only") or storage.get_best_only(chat_id)).get(market, False)
+    bo_label = "⭐ Только лучший ✓" if bo else "⭐ Только лучший"
+    buttons.append([InlineKeyboardButton(
+        text=bo_label,
+        callback_data=f"best_only:{market}",
+    )])
+
     if not shared_names:
         buttons.append([InlineKeyboardButton(
             text="(нет шаблонов — синхронизируй из HTML)",
@@ -472,11 +487,15 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     n_on = len(active)
+    bo_state = "вкл" if bo else "выкл"
     txt = (
         f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
         f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · "
-        f"активных шаблонов: <b>{n_on}</b>\n\n"
+        f"активных шаблонов: <b>{n_on}</b>\n"
+        f"Только лучший: <b>{bo_state}</b>\n\n"
         "• Вкл/выкл рынок — получать сигналы по нему\n"
+        "• ⭐ Только лучший — если в одном скане несколько сигналов "
+        "по этому рынку, отправить только лучший\n"
         "• Слева — шаблон для этого рынка (список общий)\n"
         "• Стратегия: 🔻ЛП → 📈Проб → 📈🔻Оба\n"
         "• Переименовать шаблон — в HTML (✏️ Переименовать)"
@@ -550,6 +569,19 @@ async def cb_mkt_on(call: CallbackQuery):
     storage.set_market_enabled(chat_id, mkt, turn_on)
     await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
     await call.answer("вкл" if turn_on else "выкл")
+
+
+@dp.callback_query(F.data.startswith("best_only:"))
+async def cb_best_only(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    cur = storage.get_best_only(chat_id).get(mkt, False)
+    storage.set_best_only(chat_id, mkt, not cur)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    await call.answer("только лучший: вкл" if not cur else "только лучший: выкл")
 
 
 @dp.callback_query(F.data.startswith("tpl:"))
@@ -1024,11 +1056,17 @@ async def cmd_scan(msg: Message):
             subscribers=[msg.chat.id],
             chat_filters=_build_filter_for_chat,
             incremental=True,
+            chat_best_only=_best_only_for_chat,
         )
         await msg.answer(f"✅ Скан завершён. Новых карточек: <b>{n}</b>.", parse_mode="HTML")
     except Exception as e:
         logger.exception("Ошибка скана")
         await msg.answer(f"❌ Ошибка: {e}")
+
+
+# ── best_only per chat (для screener._apply_best_only) ───────────────────────
+def _best_only_for_chat(chat_id: int) -> dict:
+    return storage.get_best_only(chat_id)
 
 
 # ── Построить фильтр для чата из активных шаблонов ───────────────────────────
@@ -1340,6 +1378,7 @@ async def handle_manual_scan_post(request: web.Request) -> web.Response:
                 template_name=template_name,
                 filters=filters,
                 on_progress=_on_progress,
+                chat_best_only=_best_only_for_chat,
             )
             job["n_sent"] = n
             job["status"] = "done"
@@ -1412,6 +1451,7 @@ async def scan_loop():
                     subscribers=list(_subscribers),
                     chat_filters=_build_filter_for_chat,
                     incremental=True,
+                    chat_best_only=_best_only_for_chat,
                 )
                 logger.info("Авто-скан: отправлено новых карточек=%d", n)
             except Exception:
