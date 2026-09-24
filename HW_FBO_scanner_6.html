@@ -1948,8 +1948,44 @@ function migrateWatch(){
   }catch(e){}
 }
 migrateWatch();
-function loadWatch(){ try{return JSON.parse(localStorage.getItem(watchKey())||'[]');}catch(e){return [];} }
-function saveWatch(w){ try{localStorage.setItem(watchKey(),JSON.stringify(w));}catch(e){} }
+/* Normalize watch row so price refresh always has base/sym (cloud hydrate / bot 👁 may omit sym). */
+function ensureWatchSym(t){
+  if(!t||typeof t!=='object') return t;
+  const m=t.mkt||t.market||'crypto';
+  let base=t.base, sym=t.sym;
+  const tick=t.ticker||t.symbol||'';
+  if(!base && sym){
+    if(m==='ru') base=sym;
+    else if(/-USDT-SWAP$/i.test(String(sym))) base=String(sym).split('-')[0];
+    else if(/USDT$/i.test(String(sym))) base=String(sym).replace(/USDT$/i,'');
+    else base=sym;
+  }
+  if(!base && tick){
+    if(m==='ru') base=tick;
+    else if(/USDT$/i.test(String(tick))) base=String(tick).replace(/USDT$/i,'');
+    else base=tick;
+  }
+  if(base) t.base=base;
+  if(!sym && base){
+    t.sym = m==='ru' ? base : (/USDT$/i.test(String(base))?base:base+'USDT');
+  }
+  return t;
+}
+/** Symbol form expected by the live exchange (Bybit BTCUSDT vs OKX BTC-USDT-SWAP). */
+function watchSymForEx(t,ex){
+  ensureWatchSym(t);
+  const m=t.mkt||t.market||'crypto';
+  if(m==='ru'||!ex||ex.name==='MOEX') return t.sym||t.base;
+  const base=t.base||'';
+  if(ex.name==='OKX'){
+    if(t.sym&&/-USDT-SWAP$/i.test(String(t.sym))) return t.sym;
+    return base+'-USDT-SWAP';
+  }
+  if(t.sym&&/USDT$/i.test(String(t.sym))&&!/-/.test(String(t.sym))) return t.sym;
+  return /USDT$/i.test(String(base))?base:base+'USDT';
+}
+function loadWatch(){ try{const a=JSON.parse(localStorage.getItem(watchKey())||'[]'); if(!Array.isArray(a)) return []; a.forEach(ensureWatchSym); return a;}catch(e){return [];} }
+function saveWatch(w){ try{localStorage.setItem(watchKey(),JSON.stringify(w));}catch(e){} try{ if(window.__hwOnWatchSave) window.__hwOnWatchSave(w); }catch(e){} }
 function isWatched(t){
   const m=t.mkt||MKT;
   return loadWatch().some(w=>w.base===t.base&&w.t===t.t&&(w.mkt||'crypto')===m);
@@ -2034,16 +2070,53 @@ async function renderWatch(){
 }
 async function refreshWatch(){
   const w=loadWatch(); if(!w.length){renderWatch();return;}
+  w.forEach(ensureWatchSym);
   const byMkt={crypto:[],ru:[]};
   for(const t of w) byMkt[(t.mkt||'crypto')==='ru'?'ru':'crypto'].push(t);
   for(const mkt of ['crypto','ru']){
     const items=byMkt[mkt]; if(!items.length) continue;
-    const ex=await resolveEx(mkt); if(!ex) continue;
+    // Prefer cached EX, but fall back across Bybit↔OKX when klines fail (sym format / geo-block).
+    let ex=await resolveEx(mkt);
+    const candidates=mkt==='ru'?[MOEX]
+      :(ex?[ex,...[Bybit,OKX].filter(x=>x!==ex)]:[Bybit,OKX]);
+    let tickByBase={}, tickBySym={}, usedEx=null;
+    for(const cand of candidates){
+      try{
+        const tks=await cand.tickers();
+        if(!tks||!tks.length) continue;
+        tickByBase={}; tickBySym={};
+        for(const x of tks){ tickByBase[x.base]=x.last; tickBySym[x.sym]=x.last; }
+        usedEx=cand; break;
+      }catch(e){}
+    }
+    if(!usedEx) continue;
+    if(mkt!=='ru') EX_CRYPTO=usedEx;
+    // Fast path: paint СЕЙЧАС from tickers so UI is not stuck on «—» while klines load.
+    for(const t of items){
+      const sym=watchSymForEx(t,usedEx);
+      const px=tickByBase[t.base]!=null?tickByBase[t.base]
+        :(tickBySym[sym]!=null?tickBySym[sym]:null);
+      if(px!=null) t._now=px;
+    }
+    // Persist before renderWatch — it reloads from localStorage.
+    saveWatch(w); renderWatch();
     for(const t of items){
       try{
-        const h1=await ex.kline(t.sym,'1h',400);
+        let h1=[];
+        let gotEx=usedEx;
+        for(const cand of candidates){
+          try{
+            const sym=watchSymForEx(t,cand);
+            const bars=await cand.kline(sym,'1h',400);
+            if(bars&&bars.length){ h1=bars; gotEx=cand; break; }
+          }catch(e1){}
+        }
+        if(!h1.length){
+          // Keep ticker _now / prior _res — never wipe on empty kline.
+          continue;
+        }
         const after=h1.filter(b=>b.ts>t.t);
-        t._now=h1.length?h1[h1.length-1].c:null; t._res=null;
+        t._now=h1[h1.length-1].c; t._res=null;
         const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
         let curStop=t.st, moved=false;
         for(const b of after){
@@ -2052,6 +2125,7 @@ async function refreshWatch(){
           if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
         }
         t._beMoved=moved;
+        if(mkt!=='ru'&&gotEx) EX_CRYPTO=gotEx;
       }catch(e){}
     }
   }
@@ -3108,6 +3182,7 @@ el('#btSplit').addEventListener('click',()=>{
 });
 el('#btCopyScan').addEventListener('click',()=>{copyF('sc','bt');renderBt();});
 el('#btClear').addEventListener('click',()=>{ if(confirm('Очистить бэктест?')){BT=[];renderBt();} });
+window.refreshWatch = refreshWatch;
 el('#refreshWatch').addEventListener('click',refreshWatch);
 el('#clearWatch').addEventListener('click',()=>{ if(confirm('Убрать все отслеживаемые?')){saveWatch([]);renderWatch();} });
 for(const id of FIDS){

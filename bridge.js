@@ -342,21 +342,69 @@
     return String(x.base || '') + '|' + String(x.t || '') + '|' + m;
   }
 
+  function preferWatchField(a, b) {
+    if (b !== undefined && b !== null && b !== '') return b;
+    if (a !== undefined && a !== null && a !== '') return a;
+    return (b !== undefined) ? b : a;
+  }
+
+  /** Merge two rows for the same key — keep sym/base/levels and live _now/_res from either side. */
+  function mergeWatchRow(serverRow, localRow) {
+    var a = serverRow || {};
+    var b = localRow || {};
+    var out = {};
+    var keys = {};
+    Object.keys(a).forEach(function (k) { keys[k] = 1; });
+    Object.keys(b).forEach(function (k) { keys[k] = 1; });
+    Object.keys(keys).forEach(function (k) {
+      out[k] = preferWatchField(a[k], b[k]);
+    });
+    // Live mark / outcome: prefer whichever side still has them (local often fresher).
+    if (b._now != null) out._now = b._now;
+    else if (a._now != null) out._now = a._now;
+    if (b._res) out._res = b._res;
+    else if (a._res) out._res = a._res;
+    // Identity fields: never drop sym/base if one side has them
+    out.sym = preferWatchField(a.sym, b.sym);
+    out.base = preferWatchField(a.base, b.base);
+    out.e = preferWatchField(a.e, b.e);
+    out.st = preferWatchField(a.st, b.st);
+    out.tk = preferWatchField(a.tk, b.tk);
+    out.mkt = preferWatchField(a.mkt || a.market, b.mkt || b.market) || 'crypto';
+    out.market = out.mkt;
+    // Derive Bybit-style sym from base when still missing (bot/cloud rows).
+    if (!out.sym && out.base && out.mkt !== 'ru') {
+      out.sym = /USDT$/i.test(String(out.base)) ? out.base : (out.base + 'USDT');
+    }
+    if (!out.base && out.sym) {
+      if (out.mkt === 'ru') out.base = out.sym;
+      else if (/-USDT-SWAP$/i.test(String(out.sym))) out.base = String(out.sym).split('-')[0];
+      else if (/USDT$/i.test(String(out.sym))) out.base = String(out.sym).replace(/USDT$/i, '');
+      else out.base = out.sym;
+    }
+    return out;
+  }
+
   function mergeWatchLists(serverArr, localArr) {
-    var out = [];
-    var seen = {};
-    function addAll(arr) {
+    var map = {};
+    var order = [];
+    function ingest(arr, asLocal) {
       (arr || []).forEach(function (row) {
         if (!row || typeof row !== 'object') return;
         var k = watchRowKey(row);
-        if (!k || seen[k]) return;
-        seen[k] = true;
-        out.push(row);
+        if (!k) return;
+        if (!map[k]) {
+          map[k] = row;
+          order.push(k);
+        } else {
+          map[k] = asLocal ? mergeWatchRow(map[k], row) : mergeWatchRow(row, map[k]);
+        }
       });
     }
-    addAll(serverArr);
-    addAll(localArr);
-    return out;
+    // Server first for presence, then local fills gaps (_now/_res/sym) and adds eye-clicks.
+    ingest(serverArr, false);
+    ingest(localArr, true);
+    return order.map(function (k) { return map[k]; });
   }
 
   function readLocalWatch() {
@@ -488,6 +536,14 @@
       // Push local→server once so account gets existing device data / adds during hydrate
       scheduleStatePush();
     }
+    // After cloud hydrate, refresh live «СЕЙЧАС» client-side (server stores rows, not tick prices).
+    try {
+      if (typeof window.refreshWatch === 'function') {
+        setTimeout(function () {
+          try { window.refreshWatch(); } catch (eR) { console.warn('[bridge] refreshWatch', eR); }
+        }, 400);
+      }
+    } catch (eH) {}
   }
 
   function scheduleStatePush() {

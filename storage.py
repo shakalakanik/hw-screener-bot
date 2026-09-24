@@ -564,6 +564,42 @@ def watchlist_item_html_shape(item: dict) -> dict:
     }
 
 
+def _normalize_watch_row(item: dict) -> dict:
+    """Ensure Mini App watch rows always carry base/sym/mkt for client price refresh."""
+    if not isinstance(item, dict):
+        return item
+    out = dict(item)
+    m = out.get("mkt") or out.get("market") or "crypto"
+    out["mkt"] = m
+    out["market"] = m
+    base = out.get("base")
+    sym = out.get("sym")
+    ticker = out.get("ticker") or out.get("symbol") or ""
+    if not base and sym:
+        if m == "ru":
+            base = sym
+        elif str(sym).endswith("-USDT-SWAP"):
+            base = str(sym).split("-")[0]
+        elif str(sym).endswith("USDT"):
+            base = str(sym)[:-4]
+        else:
+            base = sym
+    if not base and ticker:
+        if m == "ru":
+            base = ticker
+        elif str(ticker).endswith("USDT"):
+            base = str(ticker)[:-4]
+        else:
+            base = ticker
+    if base:
+        out["base"] = base
+    if not sym and base:
+        out["sym"] = base if m == "ru" else (
+            base if str(base).endswith("USDT") else f"{base}USDT"
+        )
+    return out
+
+
 def append_miniapp_watch_item(user_id: int, item_html: dict) -> None:
     """Append one HTML-shaped row into miniapp_watch (dedupe base+t+mkt)."""
     if not isinstance(item_html, dict):
@@ -586,7 +622,7 @@ def append_miniapp_watch_item(user_id: int, item_html: dict) -> None:
             xm = x.get("mkt") or x.get("market") or "crypto"
             if x.get("base") == base and x.get("t") == t and xm == m:
                 return
-        watch.append(item_html)
+        watch.append(_normalize_watch_row(item_html))
         if len(watch) > 500:
             watch = watch[-500:]
         c.execute(
@@ -1412,6 +1448,7 @@ def get_miniapp_state(user_id: int) -> dict:
     watch = _json_loads(w["data_json"] if w else None, [])
     if not isinstance(watch, list):
         watch = []
+    watch = [_normalize_watch_row(x) for x in watch if isinstance(x, dict)]
     backtest = _cap_market_lists(_json_loads(b["data_json"] if b else None, {}))
     signals = _cap_market_lists(_json_loads(s["data_json"] if s else None, {}))
 
@@ -1494,6 +1531,7 @@ def put_miniapp_state(
         if watch is not None:
             if not isinstance(watch, list):
                 watch = []
+            watch = [_normalize_watch_row(x) for x in watch if isinstance(x, dict)]
             server_w = current["watch"]
             if _empty_overwrite_blocked(
                 incoming_empty=len(watch) == 0,
