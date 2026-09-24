@@ -406,7 +406,7 @@ progress{width:100%;height:6px;margin-top:8px}
 <div id="paneWatch" style="display:none">
 <div class="card">
   <div class="row" style="justify-content:space-between">
-    <div class="note">Отслеживаемые сохраняются в этом браузере и делятся на крипту и акции РФ автоматически — по тому, на каком рынке был найден сигнал. «Обновить» подтягивает текущие цены по обоим рынкам сразу.</div>
+    <div class="note">Отслеживаемые привязаны к вашему Telegram-аккаунту (сервер Mini App) и делятся на крипту и акции РФ автоматически — по рынку сигнала. localStorage — только кэш. Очистка только по кнопке «Очистить всё». «Обновить» подтягивает цены по обоим рынкам.</div>
     <div style="display:flex;gap:8px"><button id="refreshWatch">Обновить</button><button id="clearWatch" class="ghost">Очистить всё</button></div>
   </div>
 </div>
@@ -758,7 +758,7 @@ progress{width:100%;height:6px;margin-top:8px}
     <th></th><th>Тикер</th><th>Время</th><th>Сторона</th><th>Тип уровня</th><th>Уровень</th><th>p</th>
     <th>Вход</th><th>Стоп</th><th>Тейк</th><th>Риск%</th><th>Исход</th>
   </tr></thead><tbody id="bttb"></tbody></table></div>
-  <div class="note" style="margin-top:8px">Показаны последние 300. Данные бэктеста живут до перезагрузки страницы.</div>
+  <div class="note" style="margin-top:8px">Показаны последние 300. Бэктест и последние сигналы сохраняются на сервере Mini App для вашего Telegram-аккаунта; сброс — только «Очистить бэктест».</div>
 </div>
 </div>
 
@@ -1949,7 +1949,7 @@ function migrateWatch(){
 }
 migrateWatch();
 function loadWatch(){ try{return JSON.parse(localStorage.getItem(watchKey())||'[]');}catch(e){return [];} }
-function saveWatch(w){ try{localStorage.setItem(watchKey(),JSON.stringify(w));}catch(e){} }
+function saveWatch(w){ try{localStorage.setItem(watchKey(),JSON.stringify(w));}catch(e){} try{ if(window.__hwOnWatchSave) window.__hwOnWatchSave(w); }catch(e){} }
 function isWatched(t){
   const m=t.mkt||MKT;
   return loadWatch().some(w=>w.base===t.base&&w.t===t.t&&(w.mkt||'crypto')===m);
@@ -3138,9 +3138,9 @@ el('#btSplit').addEventListener('click',()=>{
   el('#btMonth').innerHTML=h;
 });
 el('#btCopyScan').addEventListener('click',()=>{copyF('sc','bt');renderBt();});
-el('#btClear').addEventListener('click',()=>{ if(confirm('Очистить бэктест?')){BT=[];renderBt();} });
+el('#btClear').addEventListener('click',()=>{ if(confirm('Очистить бэктест?')){ try{ if(window.__hwMarkClearBacktest) window.__hwMarkClearBacktest(); }catch(e){} BT=[]; if(typeof MKT_STATE==='object'&&MKT_STATE[MKT]) MKT_STATE[MKT].BT=BT; renderBt(); } });
 el('#refreshWatch').addEventListener('click',refreshWatch);
-el('#clearWatch').addEventListener('click',()=>{ if(confirm('Убрать все отслеживаемые?')){saveWatch([]);renderWatch();} });
+el('#clearWatch').addEventListener('click',()=>{ if(confirm('Убрать все отслеживаемые?')){ try{ if(window.__hwMarkClearWatch) window.__hwMarkClearWatch(); }catch(e){} saveWatch([]);renderWatch(); } });
 for(const id of FIDS){
   const a=el('#sc_'+id); if(a) a.addEventListener('change',()=>{ if(LAST.length) renderScan(); });
 }
@@ -3252,64 +3252,24 @@ for(const pfx of ['sc','bt']){
 fillTplSelects();
 
 /* ===== синхронизация шаблонов с Telegram-ботом ===== */
-function getBotSyncUrl(){
-  try{
-    return localStorage.getItem('hw_fbo_sync_url')
-        || localStorage.getItem('hw_bot_sync_url')
-        || '';
-  }catch(e){ return ''; }
-}
-function setBotSyncUrl(u){
-  if(!u) return;
-  try{
-    localStorage.setItem('hw_fbo_sync_url', u);
-    localStorage.setItem('hw_bot_sync_url', u);
-  }catch(e){}
-}
-function clearBotSyncUrl(){
-  try{
-    localStorage.removeItem('hw_fbo_sync_url');
-    localStorage.removeItem('hw_bot_sync_url');
-  }catch(e){}
-}
-
-/* Подтянуть sync URL из ?sync= / ?token= (Mini App кнопка «Обновить шаблоны») */
-(function restoreSyncFromQuery(){
-  try{
-    const q = new URLSearchParams(location.search || '');
-    let u = q.get('sync') || q.get('sync_url') || q.get('syncUrl') || '';
-    const tok = q.get('token') || q.get('sync_token') || q.get('syncToken');
-    if (!u && tok) {
-      u = (location.origin || '') + '/sync/' + tok;
-    }
-    if (u) {
-      setBotSyncUrl(u);
-      if (q.get('autosync') !== '0') window.__HW_AUTOSYNC = true;
-    }
-  }catch(e){}
-})();
-
-async function pushTemplatesToBot(opts){
-  opts = opts || {};
-  let url = getBotSyncUrl();
+el('#sc_tplsync').addEventListener('click', async () => {
+  const BOT_SYNC_URL = localStorage.getItem('hw_bot_sync_url') || '';
+  let url = BOT_SYNC_URL;
   if (!url) {
-    if (opts.silent) return false;
     url = prompt(
-      'Введи URL синхронизации из бота (команда /syncurl) — сохранится и больше не спросит:\n\nПример: https://yourapp.railway.app/sync/…'
+      'Введи URL синхронизации из бота (команда /syncurl):\n\nПример: https://yourapp.railway.app/sync'
     );
-    if (!url) return false;
-    setBotSyncUrl(url.trim());
-    url = getBotSyncUrl();
+    if (!url) return;
+    try { localStorage.setItem('hw_bot_sync_url', url); } catch(e) {}
   }
   const userTpl = loadTpl();
   if (!Object.keys(userTpl).length) {
-    if (!opts.silent) {
-      alert('Нет сохранённых шаблонов. Сохрани хотя бы один шаблон кнопкой «Сохранить как шаблон».');
-    }
-    return false;
+    alert('Нет сохранённых шаблонов. Сохрани хотя бы один шаблон кнопкой «Сохранить как шаблон».');
+    return;
   }
   const btn = el('#sc_tplsync');
-  if (btn) { btn.textContent = '⏳ Отправка...'; btn.disabled = true; }
+  btn.textContent = '⏳ Отправка...';
+  btn.disabled = true;
   try {
     const res = await fetch(url, {
       method: 'POST',
@@ -3317,41 +3277,18 @@ async function pushTemplatesToBot(opts){
       body: JSON.stringify({ templates: userTpl, market: MKT })
     });
     if (res.ok) {
-      if (btn) {
-        btn.textContent = '✅ Готово!';
-        setTimeout(() => { btn.textContent = '📬 Синхронизировать с ботом'; btn.disabled = false; }, 2000);
-      }
-      return true;
+      btn.textContent = '✅ Готово!';
+      setTimeout(() => { btn.textContent = '📬 Синхронизировать с ботом'; btn.disabled = false; }, 2000);
+    } else {
+      throw new Error('HTTP ' + res.status);
     }
-    const err = new Error('HTTP ' + res.status);
-    err.status = res.status;
-    throw err;
   } catch(e) {
-    // Сбрасываем URL только при 401 (протухший/чужой токен), не при сети/5xx
-    if (e && (e.status === 401 || /HTTP 401/.test(String(e.message||'')))) {
-      clearBotSyncUrl();
-      if (!opts.silent) {
-        alert('Токен недействителен. Нажми «🔄 Обновить шаблоны» или /syncurl в боте — один раз.');
-      }
-    } else if (!opts.silent) {
-      alert('Ошибка: ' + (e && e.message || e) + '\n\nURL сохранён. Повтори 📬 позже или проверь сеть.');
-    }
-    if (btn) {
-      btn.textContent = '📬 Синхронизировать с ботом';
-      btn.disabled = false;
-    }
-    return false;
+    alert('Ошибка: ' + e.message + '\n\nПроверь URL или получи новый через /syncurl в боте.');
+    localStorage.removeItem('hw_bot_sync_url');
+    btn.textContent = '📬 Синхронизировать с ботом';
+    btn.disabled = false;
   }
-}
-
-el('#sc_tplsync').addEventListener('click', () => { pushTemplatesToBot(); });
-
-/* Авто-sync при открытии из бота (?autosync / ?sync=) */
-setTimeout(() => {
-  if (window.__HW_AUTOSYNC && getBotSyncUrl()) {
-    pushTemplatesToBot({ silent: false });
-  }
-}, 600);
+});
 
 /* ===== загрузка отслеживаемых из Telegram-бота ===== */
 (async function loadBotWatchlist() {

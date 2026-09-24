@@ -72,8 +72,8 @@ def _cors_headers(request: web.Request) -> dict[str, str]:
     allow = origin if origin else "*"
     return {
         "Access-Control-Allow-Origin": allow,
-        "Access-Control-Allow-Headers": "Content-Type, X-Telegram-Init-Data",
-        "Access-Control-Allow-Methods": "GET, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, X-Telegram-Init-Data, X-Sync-Token",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Credentials": "true",
     }
 

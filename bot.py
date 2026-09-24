@@ -1457,6 +1457,53 @@ def _extract_sync_token(request: web.Request, body: dict | None = None) -> str:
     return ""
 
 
+
+def _resolve_manual_scan_chat(request: web.Request, body: dict | None = None) -> int | None:
+    """chat_id для /api/manual-scan: sync-токен ИЛИ Telegram initData.
+
+    После DB migrate / stale localStorage sync-токен часто не резолвится,
+    но Mini App уже имеет валидный initData — принимаем оба пути.
+    При успехе через initData регистрируем sync-токен для будущих запросов.
+    """
+    token = _extract_sync_token(request, body)
+    if token:
+        chat_id = _resolve_sync_chat(token)
+        if chat_id is not None:
+            return chat_id
+
+    init_data = (
+        request.headers.get("X-Telegram-Init-Data")
+        or request.headers.get("x-telegram-init-data")
+        or (request.rel_url.query.get("initData") or "")
+    )
+    if not init_data and body and isinstance(body.get("initData"), str):
+        init_data = body["initData"].strip()
+    else:
+        init_data = (init_data or "").strip()
+    if not init_data:
+        return None
+
+    try:
+        from webapp_server import validate_init_data
+    except ImportError:
+        logger.warning("manual-scan: webapp_server.validate_init_data unavailable")
+        return None
+
+    parsed = validate_init_data(init_data)
+    if not parsed or not parsed.get("user"):
+        return None
+    uid = parsed["user"].get("id")
+    if uid is None:
+        return None
+    try:
+        chat_id = int(uid)
+    except (TypeError, ValueError):
+        return None
+    # Зарегистрировать sync-токен, чтобы последующие sync/scan работали без initData
+    _register_sync_token(chat_id)
+    return chat_id
+
+
 def _manual_job_snapshot(job: dict) -> dict:
     out = {
         "job_id": job["job_id"],
@@ -1479,10 +1526,15 @@ async def handle_manual_scan_post(request: web.Request) -> web.Response:
     if not isinstance(body, dict):
         return web.json_response({"error": "invalid json"}, status=400)
 
-    token = _extract_sync_token(request, body)
-    chat_id = _resolve_sync_chat(token) if token else None
+    chat_id = _resolve_manual_scan_chat(request, body)
     if not chat_id:
-        return web.json_response({"error": "unauthorized"}, status=401)
+        return web.json_response(
+            {
+                "error": "unauthorized",
+                "hint": "открой Mini App кнопкой из бота или /syncurl",
+            },
+            status=401,
+        )
 
     # Один активный manual job на чат
     existing_id = _manual_job_by_chat.get(chat_id)
@@ -1627,12 +1679,10 @@ async def handle_manual_scan_get(request: web.Request) -> web.Response:
     job = _manual_jobs.get(job_id)
     if not job:
         return web.json_response({"error": "not found"}, status=404)
-    # Опционально проверить токен — чтобы чужой job_id не светить
-    token = _extract_sync_token(request)
-    if token:
-        chat_id = _resolve_sync_chat(token)
-        if chat_id and chat_id != job.get("chat_id"):
-            return web.json_response({"error": "forbidden"}, status=403)
+    # Опционально проверить auth (token / initData) — чтобы чужой job_id не светить
+    chat_id = _resolve_manual_scan_chat(request)
+    if chat_id is not None and chat_id != job.get("chat_id"):
+        return web.json_response({"error": "forbidden"}, status=403)
     return web.json_response(_manual_job_snapshot(job))
 
 
