@@ -81,9 +81,30 @@
     try { localStorage.setItem(LS_KEY, JSON.stringify(obj || {})); } catch (e) {}
   }
 
+  function unwrapTplEntry(entry) {
+    if (entry && typeof entry === 'object' && entry.filters && typeof entry.filters === 'object') {
+      var flat = Object.assign({}, entry.filters);
+      if (entry.market && (flat._market === undefined || flat._market === null || flat._market === '')) {
+        flat._market = entry.market;
+      }
+      return flat;
+    }
+    return entry;
+  }
+
+  function unwrapRemoteTemplates(remote) {
+    var out = {};
+    var src = remote || {};
+    Object.keys(src).forEach(function (k) {
+      out[k] = unwrapTplEntry(src[k]);
+    });
+    return out;
+  }
+
   function mergeTpl(remote) {
     var local = readLocalTpl();
-    var out = Object.assign({}, local, remote || {});
+    var flatRemote = unwrapRemoteTemplates(remote || {});
+    var out = Object.assign({}, local, flatRemote);
     writeLocalTpl(out);
     return out;
   }
@@ -137,11 +158,35 @@
   async function syncFromServer() {
     try {
       var data = await api('GET', '/api/templates');
-      var remote = (data && data.templates) || {};
-      mergeTpl(remote);
+      var remoteRaw = (data && data.templates) || {};
+      var remote = unwrapRemoteTemplates(remoteRaw);
+      var local = readLocalTpl();
+      var remoteKeys = Object.keys(remote);
+      var localKeys = Object.keys(local || {});
+
+      // Never wipe local with empty remote; push local up instead
+      if (!remoteKeys.length && localKeys.length) {
+        setStatus('сервер пуст — храню локальные, отправляю на сервер');
+        api('PUT', '/api/templates', { templates: local })
+          .then(function () { setStatus('локальные шаблоны залиты на сервер'); })
+          .catch(function (e) {
+            setStatus('сервер пуст, локальные сохранены (' + (e.message || e) + ')');
+          });
+        if (typeof window.fillTplSelects === 'function') window.fillTplSelects();
+        return;
+      }
+
+      if (remoteKeys.length) {
+        mergeTpl(remote);
+      }
+      // Never call saveTplStore({}) from sync
       if (typeof window.fillTplSelects === 'function') window.fillTplSelects();
       if (data && data.active) {
-        setStatus('активный для бота: ' + data.active);
+        var act = data.active;
+        var label = Array.isArray(act)
+          ? act.join(', ')
+          : (act.names ? (act.names || []).join(', ') : String(act));
+        setStatus(label ? ('активный для бота: ' + label) : 'шаблоны синхронизированы');
       } else {
         setStatus('шаблоны синхронизированы');
       }
