@@ -1047,3 +1047,237 @@ def clear_ai_pending(chat_id: int) -> None:
     with _conn() as c:
         _ensure_ai_tables(c)
         c.execute("DELETE FROM ai_pending WHERE chat_id=?", (chat_id,))
+
+
+# ── Mini App UI state (watch / backtest / signals) — keyed by Telegram user_id ─
+# Separate from html_templates / watchlist bot tables. Never migrates templates.
+
+_MINIAPP_MAX_ITEMS = 2500  # per-market cap for backtest/signals blobs
+
+
+def _ensure_miniapp_state(c: sqlite3.Connection):
+    c.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS miniapp_watch (
+            user_id    INTEGER PRIMARY KEY,
+            data_json  TEXT NOT NULL DEFAULT '[]',
+            updated_at INTEGER NOT NULL,
+            cleared    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS miniapp_backtest (
+            user_id    INTEGER PRIMARY KEY,
+            data_json  TEXT NOT NULL DEFAULT '{}',
+            updated_at INTEGER NOT NULL,
+            cleared    INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS miniapp_signals (
+            user_id    INTEGER PRIMARY KEY,
+            data_json  TEXT NOT NULL DEFAULT '{}',
+            updated_at INTEGER NOT NULL,
+            cleared    INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+
+
+def _json_loads(raw: str | None, default):
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return default
+
+
+def _cap_market_lists(obj: dict, cap: int = _MINIAPP_MAX_ITEMS) -> dict:
+    """Keep only crypto/ru list keys; trim each list to last `cap` items."""
+    out: dict = {}
+    if not isinstance(obj, dict):
+        return {"crypto": [], "ru": []}
+    for m in ("crypto", "ru"):
+        v = obj.get(m, [])
+        if not isinstance(v, list):
+            v = []
+        if len(v) > cap:
+            v = v[-cap:]
+        out[m] = v
+    return out
+
+
+def get_miniapp_state(user_id: int) -> dict:
+    """Return watch + backtest + signals for Mini App hydrate."""
+    with _conn() as c:
+        _ensure_miniapp_state(c)
+        w = c.execute(
+            "SELECT data_json, updated_at, cleared FROM miniapp_watch WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        b = c.execute(
+            "SELECT data_json, updated_at, cleared FROM miniapp_backtest WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        s = c.execute(
+            "SELECT data_json, updated_at, cleared FROM miniapp_signals WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+
+    watch = _json_loads(w["data_json"] if w else None, [])
+    if not isinstance(watch, list):
+        watch = []
+    backtest = _cap_market_lists(_json_loads(b["data_json"] if b else None, {}))
+    signals = _cap_market_lists(_json_loads(s["data_json"] if s else None, {}))
+
+    return {
+        "watch": watch,
+        "backtest": backtest,
+        "signals": signals,
+        "updated_at": {
+            "watch": int(w["updated_at"]) if w else 0,
+            "backtest": int(b["updated_at"]) if b else 0,
+            "signals": int(s["updated_at"]) if s else 0,
+        },
+        "cleared": {
+            "watch": bool(w["cleared"]) if w else False,
+            "backtest": bool(b["cleared"]) if b else False,
+            "signals": bool(s["cleared"]) if s else False,
+        },
+    }
+
+
+def _empty_overwrite_blocked(
+    *,
+    incoming_empty: bool,
+    server_nonempty: bool,
+    clear: bool,
+    client_updated_at,
+    server_updated_at: int,
+) -> bool:
+    """Protect against accidental empty wipe (boot glitch / wiped WebView).
+
+    Allow empty write only when:
+      - clear=True (explicit reset from UI confirm), OR
+      - client_updated_at matches server (client was in sync and emptied intentionally).
+    """
+    if not incoming_empty or not server_nonempty:
+        return False
+    if clear:
+        return False
+    try:
+        cu = int(client_updated_at) if client_updated_at is not None else None
+    except (TypeError, ValueError):
+        cu = None
+    if cu is not None and server_updated_at and cu == int(server_updated_at):
+        return False
+    return True
+
+
+def put_miniapp_state(
+    user_id: int,
+    *,
+    watch=None,
+    backtest=None,
+    signals=None,
+    clear_watch: bool = False,
+    clear_backtest: bool = False,
+    clear_signals: bool = False,
+    client_updated_at: dict | None = None,
+) -> dict:
+    """Upsert Mini App state. Skips keys that are None (partial PUT).
+
+    Empty-overwrite guard (per key): if client sends empty while server has data,
+    require clear_*=True OR matching client_updated_at[key] == server updated_at.
+    Rejected keys are left unchanged and listed in result['rejected'].
+
+    Rule documented for operators: never wipe server watch/backtest/signals on a
+    blank first-load PUT; only explicit clear from UI confirm (or in-sync empty).
+    """
+    if client_updated_at is None:
+        client_updated_at = {}
+    if not isinstance(client_updated_at, dict):
+        client_updated_at = {}
+
+    now = int(time.time())
+    rejected: list[str] = []
+    current = get_miniapp_state(user_id)
+
+    with _conn() as c:
+        _ensure_miniapp_state(c)
+
+        if watch is not None:
+            if not isinstance(watch, list):
+                watch = []
+            server_w = current["watch"]
+            if _empty_overwrite_blocked(
+                incoming_empty=len(watch) == 0,
+                server_nonempty=bool(server_w),
+                clear=clear_watch,
+                client_updated_at=client_updated_at.get("watch"),
+                server_updated_at=current["updated_at"]["watch"],
+            ):
+                rejected.append("watch")
+            else:
+                c.execute(
+                    "INSERT OR REPLACE INTO miniapp_watch"
+                    "(user_id, data_json, updated_at, cleared) VALUES(?,?,?,?)",
+                    (
+                        user_id,
+                        json.dumps(watch, ensure_ascii=False),
+                        now,
+                        1 if (clear_watch or len(watch) == 0) else 0,
+                    ),
+                )
+
+        if backtest is not None:
+            bt = _cap_market_lists(backtest if isinstance(backtest, dict) else {})
+            server_b = current["backtest"]
+            incoming_empty = not bt.get("crypto") and not bt.get("ru")
+            server_nonempty = bool(server_b.get("crypto") or server_b.get("ru"))
+            if _empty_overwrite_blocked(
+                incoming_empty=incoming_empty,
+                server_nonempty=server_nonempty,
+                clear=clear_backtest,
+                client_updated_at=client_updated_at.get("backtest"),
+                server_updated_at=current["updated_at"]["backtest"],
+            ):
+                rejected.append("backtest")
+            else:
+                c.execute(
+                    "INSERT OR REPLACE INTO miniapp_backtest"
+                    "(user_id, data_json, updated_at, cleared) VALUES(?,?,?,?)",
+                    (
+                        user_id,
+                        json.dumps(bt, ensure_ascii=False),
+                        now,
+                        1 if (clear_backtest or incoming_empty) else 0,
+                    ),
+                )
+
+        if signals is not None:
+            sig = _cap_market_lists(signals if isinstance(signals, dict) else {})
+            server_s = current["signals"]
+            incoming_empty = not sig.get("crypto") and not sig.get("ru")
+            server_nonempty = bool(server_s.get("crypto") or server_s.get("ru"))
+            if _empty_overwrite_blocked(
+                incoming_empty=incoming_empty,
+                server_nonempty=server_nonempty,
+                clear=clear_signals,
+                client_updated_at=client_updated_at.get("signals"),
+                server_updated_at=current["updated_at"]["signals"],
+            ):
+                rejected.append("signals")
+            else:
+                c.execute(
+                    "INSERT OR REPLACE INTO miniapp_signals"
+                    "(user_id, data_json, updated_at, cleared) VALUES(?,?,?,?)",
+                    (
+                        user_id,
+                        json.dumps(sig, ensure_ascii=False),
+                        now,
+                        1 if (clear_signals or incoming_empty) else 0,
+                    ),
+                )
+
+    out = get_miniapp_state(user_id)
+    out["ok"] = True
+    out["rejected"] = rejected
+    return out

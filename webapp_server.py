@@ -189,9 +189,28 @@ async def api_templates_put(request: web.Request) -> web.Response:
     if not isinstance(templates, dict):
         raise web.HTTPBadRequest(text=json.dumps({"error": "templates must be object"}),
                                  content_type="application/json")
-    # Strip accidental wrapper keys if client sent {templates: ...} nested wrongly
-    storage.set_html_templates(uid, templates)
-    templates, active = storage.get_html_templates(uid)
+    # Refuse empty wipe — keep existing templates for this Telegram user
+    if not templates:
+        existing = storage.get_html_templates(uid)
+        if isinstance(existing, tuple):
+            existing_tpl, active = existing
+        else:
+            existing_tpl, active = existing, None
+        if existing_tpl:
+            return web.json_response({
+                "ok": True,
+                "skipped": "empty_templates_not_applied",
+                "templates": existing_tpl,
+                "active": active,
+            })
+    # Prefer merge-save helper; fall back if alias missing
+    saver = getattr(storage, "set_html_templates", None) or getattr(storage, "save_html_templates")
+    saver(uid, templates)
+    got = storage.get_html_templates(uid)
+    if isinstance(got, tuple):
+        templates, active = got
+    else:
+        templates, active = got, None
     return web.json_response({"ok": True, "templates": templates, "active": active})
 
 
@@ -340,6 +359,75 @@ async def api_signal_filter_put(request: web.Request) -> web.Response:
     )
 
 
+
+async def api_miniapp_state_get(request: web.Request) -> web.Response:
+    """Hydrate Mini App watch / backtest / signals for Telegram user."""
+    uid = require_user(request)
+    state = storage.get_miniapp_state(uid)
+    return web.json_response({"ok": True, **state})
+
+
+async def api_miniapp_state_put(request: web.Request) -> web.Response:
+    """Persist Mini App state. Empty overwrite guarded in storage.put_miniapp_state.
+
+    Body (all keys optional):
+      watch: list
+      backtest: {crypto: [...], ru: [...]}
+      signals: {crypto: [...], ru: [...]}  # LAST scan rows per market
+      clear_watch / clear_backtest / clear_signals: bool  # explicit UI reset
+      updated_at: {watch, backtest, signals}  # last known server stamps (for in-sync empty)
+      force: bool  # alias: sets all clear_* true
+    """
+    uid = require_user(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise web.HTTPBadRequest(text=json.dumps({"error": "invalid json"}),
+                                 content_type="application/json")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text=json.dumps({"error": "body must be object"}),
+                                 content_type="application/json")
+
+    force = bool(body.get("force") or body.get("clear"))
+    # ?force=1 query also counts
+    qforce = request.rel_url.query.get("force", "")
+    if str(qforce) in ("1", "true", "yes"):
+        force = True
+
+    clear_watch = bool(body.get("clear_watch")) or force
+    clear_backtest = bool(body.get("clear_backtest")) or force
+    clear_signals = bool(body.get("clear_signals")) or force
+
+    kwargs = {
+        "clear_watch": clear_watch,
+        "clear_backtest": clear_backtest,
+        "clear_signals": clear_signals,
+        "client_updated_at": body.get("updated_at") if isinstance(body.get("updated_at"), dict) else {},
+    }
+    if "watch" in body:
+        kwargs["watch"] = body.get("watch")
+    if "backtest" in body:
+        kwargs["backtest"] = body.get("backtest")
+    if "signals" in body:
+        kwargs["signals"] = body.get("signals")
+
+    if not any(k in kwargs for k in ("watch", "backtest", "signals")):
+        raise web.HTTPBadRequest(
+            text=json.dumps({"error": "provide watch, backtest, and/or signals"}),
+            content_type="application/json",
+        )
+
+    result = storage.put_miniapp_state(uid, **kwargs)
+    status = 200
+    if result.get("rejected"):
+        # Partial apply: 409 if ALL provided keys were rejected, else 200 with rejected list
+        provided = [k for k in ("watch", "backtest", "signals") if k in kwargs]
+        if provided and set(result["rejected"]) >= set(provided):
+            status = 409
+    return web.json_response(result, status=status)
+
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/", handle_app)
@@ -356,6 +444,8 @@ def create_app() -> web.Application:
     app.router.add_put("/api/active-template", api_active_template_put)
     app.router.add_get("/api/signal-filter", api_signal_filter_get)
     app.router.add_put("/api/signal-filter", api_signal_filter_put)
+    app.router.add_get("/api/miniapp/state", api_miniapp_state_get)
+    app.router.add_put("/api/miniapp/state", api_miniapp_state_put)
 
     # CORS preflight
     async def _options(request: web.Request) -> web.Response:

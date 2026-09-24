@@ -63,3 +63,23 @@ test -f webapp/bridge.js && test -f webapp/mobile.css && echo OK
 ## Замена HTML в будущем
 
 Перезаписать только `webapp/screener.html` → commit → redeploy. Инъекция перед `</body>` остаётся на сервере.
+
+
+## Persist отслеживаемых / бэктеста / сигналов (2026-09-24)
+
+Сервер = source of truth, ключ = Telegram `user_id` из initData (HMAC как у templates).
+
+### Новые таблицы SQLite (не трогают html_templates)
+- `miniapp_watch` (user_id PK, data_json, updated_at, cleared)
+- `miniapp_backtest` (user_id PK, data_json `{crypto:[],ru:[]}`, updated_at, cleared)
+- `miniapp_signals` (user_id PK, data_json LAST rows per market, updated_at, cleared)
+
+### API
+- `GET /api/miniapp/state` → `{ok, watch, backtest, signals, updated_at, cleared}`
+- `PUT /api/miniapp/state` body partial: `watch`, `backtest`, `signals`, `clear_watch|clear_backtest|clear_signals`, `updated_at`, `force` / `?force=1`
+
+### Empty-overwrite guard
+Пустой `watch`/`backtest`/`signals` при непустом сервере **не** затирает данные, если нет `clear_*=true` (кнопки «Очистить…» после confirm) и нет совпадения `updated_at` с сервером (осознанное опустошение после hydrate). Отклонённые ключи в `rejected[]`; HTTP 409 если отклонены все переданные.
+
+### Клиент
+`webapp/bridge.js` — GET при открытии, debounce PUT ~700ms на saveWatch / renderBt / renderScan. localStorage `hw_fbo_watch_all` — кэш. Шаблоны (`/api/templates`) не менялись.
