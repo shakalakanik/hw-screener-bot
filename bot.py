@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -39,7 +40,7 @@ bot = Bot(token=TOKEN)
 dp  = Dispatcher()
 
 _subscribers: set[int] = set()
-_pending_cards: dict[str, dict] = {}   # card_key → card data
+_pending_cards: dict[str, dict] = {}   # card_id → card data (also persisted in SQLite 48h)
 _pending_rename: dict[int, str] = {}   # chat_id → old template name
 _filter_tab: dict[int, str] = {}       # chat_id → "crypto" | "ru"
 
@@ -167,6 +168,124 @@ def _format_card(card: dict) -> str:
     ])
 
 
+
+def _parse_card_from_message(msg) -> dict | None:
+    """Восстановить карточку из уже отправленного Telegram-сообщения (для 👁 за 48ч)."""
+    raw = getattr(msg, "html_text", None) or getattr(msg, "text", None) or ""
+    if not raw:
+        return None
+    plain = re.sub(r"<[^>]+>", "", raw)
+
+    m_head = re.search(
+        r"[🟢🔴]\s*(\S+)\s*[—\-]\s*(LONG|SHORT)",
+        plain,
+        re.I,
+    )
+    if not m_head:
+        return None
+    ticker = m_head.group(1).strip()
+    side = m_head.group(2).upper()
+
+    market = "crypto"
+    if "Мосбиржа" in plain or "🇷🇺" in raw:
+        market = "ru"
+    strategy = "brk"
+    if "Ложный пробой" in plain:
+        strategy = "fbo"
+
+    def _code_after(label: str) -> float | None:
+        mm = re.search(
+            re.escape(label) + r"[^<]*<code>\s*([0-9]+(?:\.[0-9]+)?)\s*</code>",
+            raw,
+            re.I,
+        )
+        if mm:
+            try:
+                return float(mm.group(1))
+            except ValueError:
+                return None
+        mm = re.search(
+            re.escape(label) + r"[^\d]*([0-9]+(?:\.[0-9]+)?)",
+            plain,
+            re.I,
+        )
+        if mm:
+            try:
+                return float(mm.group(1))
+            except ValueError:
+                return None
+        return None
+
+    level = _code_after("Уровень")
+    entry = _code_after("Вход")
+    stop = _code_after("Стоп")
+    take = _code_after("Тейк")
+    if level is None or entry is None:
+        return None
+
+    kind = ""
+    mk = re.search(r"Уровень:[^\[]*\[([^\]]+)\]", plain)
+    if mk:
+        kind = mk.group(1).strip()
+
+    strength = plain.count("★")
+    if strength <= 0:
+        strength = 3
+
+    prob = None
+    mp = re.search(r"p\s*=\s*([0-9]+(?:\.[0-9]+)?)", plain, re.I)
+    if mp:
+        try:
+            prob = float(mp.group(1))
+        except ValueError:
+            prob = None
+
+    signal_ts = 0
+    mt = re.search(r"Сигнал:\s*(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})\s*МСК", plain)
+    if mt:
+        day, month, hour, minute = map(int, mt.groups())
+        now = datetime.now(MSK)
+        year = now.year
+        try:
+            ts = datetime(year, month, day, hour, minute, tzinfo=MSK)
+            if ts > now + timedelta(days=1):
+                ts = datetime(year - 1, month, day, hour, minute, tzinfo=MSK)
+            signal_ts = int(ts.timestamp() * 1000)
+        except ValueError:
+            signal_ts = 0
+    if not signal_ts and getattr(msg, "date", None):
+        d = msg.date
+        if getattr(d, "tzinfo", None) is None:
+            from datetime import timezone as _tz
+            d = d.replace(tzinfo=_tz.utc)
+        signal_ts = int(d.timestamp() * 1000)
+
+    dist_atr = 0.0
+    md = re.search(r"расст\.\s*(\d+(?:\.\d+)?)%\s*ATR", plain, re.I)
+    if md:
+        try:
+            dist_atr = float(md.group(1)) / 100.0
+        except ValueError:
+            dist_atr = 0.0
+
+    return {
+        "ticker": ticker,
+        "side": side,
+        "market": market,
+        "strategy": strategy,
+        "level": level,
+        "last": entry,
+        "stop": stop if stop is not None else entry,
+        "take": take if take is not None else entry,
+        "kind": kind,
+        "strength": min(5, max(1, strength)),
+        "prob": prob,
+        "signal_ts": signal_ts,
+        "dist_atr": dist_atr,
+        "d1_bias": "flat",
+    }
+
+
 async def send_signal(card: dict, chat_ids: list[int]):
     # Hard cap: never deliver a card older than 12h (defense in depth).
     signal_ts = int(card.get("signal_ts") or 0)
@@ -180,9 +299,18 @@ async def send_signal(card: dict, chat_ids: list[int]):
     for chat_id in chat_ids:
         try:
             card_key = f"{card['ticker']}:{card['side']}:{card.get('strategy','brk')}:{int(card['level']*1e6)}"
-            _pending_cards[card_key] = {**card, "chat_id": chat_id}
+            card_id = storage.make_pending_card_id(card_key, chat_id)
+            payload = {**card, "chat_id": chat_id}
+            _pending_cards[card_id] = payload
+            try:
+                storage.save_pending_signal_card(
+                    card_id, chat_id, payload, signal_ts=signal_ts,
+                )
+            except Exception as e:
+                logger.warning("pending card save failed %s: %s", card_id, e)
+            # watch:{16-hex} fits Telegram 64-byte callback_data limit
             kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_key[:60]}"),
+                InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_id}"),
             ]])
             await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
@@ -1118,11 +1246,68 @@ def _build_filter_for_chat(chat_id: int) -> dict:
 # ── 👁 Callback: отслеживать сигнал ──────────────────────────────────────────
 @dp.callback_query(F.data.startswith("watch:"))
 async def cb_watch(call: CallbackQuery):
-    chat_id  = call.message.chat.id
-    card_key = call.data[6:]
-    card     = _pending_cards.get(card_key)
+    chat_id = call.message.chat.id
+    card_id = call.data[6:]
+    if not card_id or card_id == "expired":
+        await call.answer(
+            "⏰ Сигнал устарел (доступно 48 ч после сигнала)",
+            show_alert=True,
+        )
+        return
+
+    card = _pending_cards.get(card_id)
+    signal_ts = int(card.get("signal_ts") or 0) if card else 0
+    created_at = int(time.time()) if card else 0
+
     if not card:
-        await call.answer("⏰ Сигнал устарел, данные не сохранились", show_alert=True)
+        row = storage.get_pending_signal_card(card_id, chat_id)
+        if row:
+            card, signal_ts, created_at = row
+            _pending_cards[card_id] = card  # warm memory after restart
+        else:
+            # Fallback: id may belong to this chat under older sends without chat filter
+            row = storage.get_pending_signal_card(card_id)
+            if row:
+                card, signal_ts, created_at = row
+                if int(card.get("chat_id") or 0) not in (0, chat_id):
+                    card = None
+
+    # Уже пришедшие карточки (до SQLite / после рестарта): из текста сообщения
+    if not card and call.message:
+        card = _parse_card_from_message(call.message)
+        if card:
+            signal_ts = int(card.get("signal_ts") or 0)
+            created_at = (
+                int(call.message.date.timestamp())
+                if getattr(call.message, "date", None)
+                else int(time.time())
+            )
+            try:
+                save_id = card_id
+                if not save_id or save_id == "expired" or save_id == "msg":
+                    save_id = storage.make_pending_card_id(
+                        f"{card['ticker']}:{card['side']}:{card.get('strategy', 'brk')}:"
+                        f"{int(card['level'] * 1e6)}",
+                        chat_id,
+                    )
+                storage.save_pending_signal_card(
+                    save_id,
+                    chat_id,
+                    {**card, "chat_id": chat_id},
+                    signal_ts=signal_ts,
+                )
+                _pending_cards[save_id] = {**card, "chat_id": chat_id}
+            except Exception as e:
+                logger.warning("re-save parsed pending card: %s", e)
+
+    if not card or not storage.pending_card_is_fresh(
+        signal_ts or int(card.get("signal_ts") or 0),
+        created_at,
+    ):
+        await call.answer(
+            "⏰ Сигнал устарел (доступно 48 ч после сигнала)",
+            show_alert=True,
+        )
         return
 
     entry    = card.get("last", 0)
@@ -1145,6 +1330,14 @@ async def cb_watch(call: CallbackQuery):
     }
     watch_id = storage.add_to_watchlist(chat_id, item)
 
+    # Mini App «Отслеживаемые»: also mirror into miniapp_watch (private chat_id == user_id)
+    try:
+        storage.append_miniapp_watch_item(
+            chat_id, storage.watchlist_item_html_shape(item),
+        )
+    except Exception as e:
+        logger.warning("miniapp_watch append failed: %s", e)
+
     # Обновляем кнопку → ✅ Отслеживается (с id для удаления)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(
@@ -1165,10 +1358,27 @@ async def cb_unwatch(call: CallbackQuery):
     watch_id = int(call.data.split(":", 1)[1])
     storage.remove_from_watchlist(chat_id, watch_id)
 
-    # Восстанавливаем кнопку "Отслеживать"
-    # Находим card_key из текста сообщения — просто убираем кнопку
+    # Восстанавливаем 👁 — cb_watch снова разберёт текст сообщения при необходимости
+    re_id = "msg"
+    try:
+        parsed = _parse_card_from_message(call.message)
+        if parsed:
+            re_key = (
+                f"{parsed['ticker']}:{parsed['side']}:{parsed.get('strategy', 'brk')}:"
+                f"{int(parsed['level'] * 1e6)}"
+            )
+            re_id = storage.make_pending_card_id(re_key, chat_id)
+            storage.save_pending_signal_card(
+                re_id,
+                chat_id,
+                {**parsed, "chat_id": chat_id},
+                signal_ts=int(parsed.get("signal_ts") or 0),
+            )
+            _pending_cards[re_id] = {**parsed, "chat_id": chat_id}
+    except Exception as e:
+        logger.warning("unwatch re-bind failed: %s", e)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="👁 Отслеживать", callback_data="watch:expired")
+        InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{re_id}")
     ]])
     try:
         await call.message.edit_reply_markup(reply_markup=kb)
@@ -1490,6 +1700,12 @@ async def scan_loop():
 # ── Запуск ────────────────────────────────────────────────────────────────────
 async def main():
     storage.init()
+    try:
+        n = storage.cleanup_pending_signal_cards()
+        if n:
+            logger.info("Очищено устаревших pending cards: %d", n)
+    except Exception:
+        logger.exception("cleanup_pending_signal_cards failed")
     _sync_tokens.update(storage.load_all_sync_tokens())
     logger.info("Загружено sync-токенов: %d", len(_sync_tokens))
 

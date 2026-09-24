@@ -2,6 +2,7 @@
 import sqlite3
 import json
 import time
+import hashlib
 from pathlib import Path
 
 DB_PATH = Path("hw_bot.db")
@@ -80,8 +81,19 @@ def init():
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS pending_signal_cards (
+            card_id    TEXT PRIMARY KEY,
+            chat_id    INTEGER NOT NULL,
+            card_json  TEXT NOT NULL,
+            signal_ts  INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_pending_signal_cards_created
+            ON pending_signal_cards(created_at);
         """)
         _migrate(c)
+        cleanup_pending_signal_cards()
 
 
 # ── Watermark: max signal_ts already sent (incremental autoscan) ──────────────
@@ -343,6 +355,194 @@ def remove_from_watchlist(chat_id: int, watch_id: int):
     with _conn() as c:
         _ensure_watchlist(c)
         c.execute("DELETE FROM watchlist WHERE id=? AND chat_id=?", (watch_id, chat_id))
+
+
+# ── Pending signal cards (👁 button survives restarts, TTL 48h) ───────────────
+
+PENDING_CARD_TTL_SEC = 48 * 3600
+
+
+def _ensure_pending_signal_cards(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS pending_signal_cards (
+            card_id    TEXT PRIMARY KEY,
+            chat_id    INTEGER NOT NULL,
+            card_json  TEXT NOT NULL,
+            signal_ts  INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )
+    """)
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_signal_cards_created "
+        "ON pending_signal_cards(created_at)"
+    )
+
+
+def make_pending_card_id(card_key: str, chat_id: int) -> str:
+    """Short stable id for Telegram callback_data (fits in 64 bytes with prefix)."""
+    raw = f"{card_key}:{int(chat_id)}".encode()
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def save_pending_signal_card(
+    card_id: str,
+    chat_id: int,
+    card: dict,
+    signal_ts: int | None = None,
+) -> None:
+    now = int(time.time())
+    if signal_ts is None:
+        signal_ts = int(card.get("signal_ts") or 0)
+    with _conn() as c:
+        _ensure_pending_signal_cards(c)
+        c.execute(
+            """INSERT OR REPLACE INTO pending_signal_cards
+               (card_id, chat_id, card_json, signal_ts, created_at)
+               VALUES (?,?,?,?,?)""",
+            (
+                card_id,
+                int(chat_id),
+                json.dumps(card, ensure_ascii=False),
+                int(signal_ts or 0),
+                now,
+            ),
+        )
+        cutoff = now - PENDING_CARD_TTL_SEC
+        c.execute(
+            "DELETE FROM pending_signal_cards WHERE created_at < ?",
+            (cutoff,),
+        )
+
+
+def get_pending_signal_card(
+    card_id: str,
+    chat_id: int | None = None,
+) -> tuple[dict, int, int] | None:
+    """Return (card, signal_ts, created_at) or None."""
+    with _conn() as c:
+        _ensure_pending_signal_cards(c)
+        if chat_id is not None:
+            row = c.execute(
+                "SELECT card_json, signal_ts, created_at FROM pending_signal_cards "
+                "WHERE card_id=? AND chat_id=?",
+                (card_id, int(chat_id)),
+            ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT card_json, signal_ts, created_at FROM pending_signal_cards "
+                "WHERE card_id=?",
+                (card_id,),
+            ).fetchone()
+    if not row:
+        return None
+    try:
+        card = json.loads(row["card_json"])
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(card, dict):
+        return None
+    return card, int(row["signal_ts"] or 0), int(row["created_at"] or 0)
+
+
+def pending_card_is_fresh(
+    signal_ts: int,
+    created_at: int,
+    max_age_sec: int = PENDING_CARD_TTL_SEC,
+) -> bool:
+    """Age ≤ max_age_sec; prefer signal_ts (ms or sec), else created_at (sec)."""
+    now = time.time()
+    ts = int(signal_ts or 0)
+    if ts > 0:
+        # Heuristic: values > 1e12 are milliseconds
+        age_base = ts / 1000.0 if ts > 1_000_000_000_000 else float(ts)
+        return (now - age_base) <= max_age_sec
+    ca = int(created_at or 0)
+    if ca > 0:
+        return (now - ca) <= max_age_sec
+    return False
+
+
+def cleanup_pending_signal_cards(max_age_sec: int = PENDING_CARD_TTL_SEC) -> int:
+    cutoff = int(time.time()) - int(max_age_sec)
+    with _conn() as c:
+        _ensure_pending_signal_cards(c)
+        cur = c.execute(
+            "DELETE FROM pending_signal_cards WHERE created_at < ?",
+            (cutoff,),
+        )
+        return cur.rowcount or 0
+
+
+def watchlist_item_html_shape(item: dict) -> dict:
+    """Map bot watchlist item to HTML / Mini App watch row shape."""
+    mkt = item.get("market", "crypto") or "crypto"
+    ticker = item["ticker"]
+    if mkt == "ru":
+        base = ticker
+        sym = ticker
+    else:
+        base = ticker[:-4] if ticker.endswith("USDT") else ticker
+        sym = ticker if ticker.endswith("USDT") else (ticker + "USDT")
+    side = item.get("side", "LONG")
+    side_int = 1 if side == "LONG" or side is True or side == 1 else 0
+    return {
+        "type": item.get("strategy", "brk"),
+        "mkt": mkt,
+        "market": mkt,
+        "base": base,
+        "sym": sym,
+        "t": int(item.get("signal_ts") or int(time.time() * 1000)),
+        "d": side_int,
+        "side": "LONG" if side_int else "SHORT",
+        "lv": item.get("level", 0),
+        "k": item.get("kind", ""),
+        "p": item.get("prob", 0) or 0,
+        "e": item.get("entry", 0),
+        "st": item.get("stop", 0),
+        "tk": item.get("take", 0),
+        "rp": item.get("risk_pct", 0),
+        "strength": 3,
+        "crosses": 0,
+        "vol_mult": 1.0,
+        "added": int(time.time() * 1000),
+    }
+
+
+def append_miniapp_watch_item(user_id: int, item_html: dict) -> None:
+    """Append one HTML-shaped row into miniapp_watch (dedupe base+t+mkt)."""
+    if not isinstance(item_html, dict):
+        return
+    m = item_html.get("mkt") or item_html.get("market") or "crypto"
+    base = item_html.get("base")
+    t = item_html.get("t")
+    with _conn() as c:
+        _ensure_miniapp_state(c)
+        row = c.execute(
+            "SELECT data_json FROM miniapp_watch WHERE user_id=?",
+            (int(user_id),),
+        ).fetchone()
+        watch = _json_loads(row["data_json"] if row else None, [])
+        if not isinstance(watch, list):
+            watch = []
+        for x in watch:
+            if not isinstance(x, dict):
+                continue
+            xm = x.get("mkt") or x.get("market") or "crypto"
+            if x.get("base") == base and x.get("t") == t and xm == m:
+                return
+        watch.append(item_html)
+        if len(watch) > 500:
+            watch = watch[-500:]
+        c.execute(
+            "INSERT OR REPLACE INTO miniapp_watch"
+            "(user_id, data_json, updated_at, cleared) VALUES(?,?,?,?)",
+            (
+                int(user_id),
+                json.dumps(watch, ensure_ascii=False),
+                int(time.time()),
+                0,
+            ),
+        )
 
 
 def _ensure_html_templates(c: sqlite3.Connection):
