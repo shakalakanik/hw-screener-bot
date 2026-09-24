@@ -3,13 +3,68 @@ import sqlite3
 import json
 import time
 import hashlib
+import os
+import shutil
 from pathlib import Path
 
-DB_PATH = Path("hw_bot.db")
+
+def _resolve_db_path() -> Path:
+    """Prefer Railway volume /data; allow override via DB_PATH env."""
+    env = (os.environ.get("DB_PATH") or "").strip()
+    if env:
+        return Path(env)
+    data = Path("/data")
+    try:
+        if data.is_dir() and os.access(data, os.W_OK):
+            return data / "hw_bot.db"
+    except OSError:
+        pass
+    return Path("./hw_bot.db")
+
+
+def _maybe_migrate_legacy_db(dest: Path) -> None:
+    """One-time copy from image WORKDIR DB into volume if dest is missing."""
+    if dest.exists() and dest.stat().st_size > 0:
+        return
+    candidates = [Path("/app/hw_bot.db"), Path("./hw_bot.db")]
+    try:
+        dest_resolved = dest.resolve()
+    except OSError:
+        dest_resolved = dest
+    for src in candidates:
+        try:
+            if not src.exists() or src.stat().st_size <= 0:
+                continue
+            if src.resolve() == dest_resolved:
+                continue
+        except OSError:
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        print(f"[storage] Migrated legacy DB {src} → {dest}", flush=True)
+        return
+
+
+_DB_PATH_LOGGED = False
+
+
+def _ensure_db_path() -> Path:
+    global _DB_PATH_LOGGED, DB_PATH
+    DB_PATH = _resolve_db_path()
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _maybe_migrate_legacy_db(DB_PATH)
+    if not _DB_PATH_LOGGED:
+        print(f"[storage] DB_PATH={DB_PATH}", flush=True)
+        _DB_PATH_LOGGED = True
+    return DB_PATH
+
+
+DB_PATH = _resolve_db_path()
 
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH)
+    path = _ensure_db_path()
+    c = sqlite3.connect(path)
     c.row_factory = sqlite3.Row
     return c
 
@@ -51,6 +106,7 @@ def _migrate(c: sqlite3.Connection):
 
 
 def init():
+    _ensure_db_path()
     with _conn() as c:
         c.executescript("""
         CREATE TABLE IF NOT EXISTS signals (
@@ -557,13 +613,45 @@ def _ensure_html_templates(c: sqlite3.Connection):
     """)
 
 
-def save_html_templates(chat_id: int, templates: dict, market: str = "crypto"):
-    """Сохранить шаблоны из HTML-скринера (merge по имени, per-market replace).
+def _normalize_incoming_template(filters, default_market: str) -> tuple[dict, str]:
+    """Accept flat HTML filters or nested {filters, market} from get_html_templates."""
+    if not isinstance(filters, dict):
+        m = default_market if default_market in ("crypto", "ru") else "crypto"
+        return {}, m
+    # Nested API/DB shape → flatten for storage + Mini App
+    if "filters" in filters and isinstance(filters.get("filters"), dict):
+        flt = dict(filters["filters"])
+        m = filters.get("market") or flt.get("_market")
+    else:
+        flt = dict(filters)
+        m = flt.get("_market")
+    if m not in ("crypto", "ru"):
+        m = default_market if default_market in ("crypto", "ru") else "crypto"
+    flt["_market"] = m
+    return flt, m
 
-    Рынок шаблона: filters[_market] если есть, иначе аргумент market.
-    Шаблоны других рынков не трогаем. Strategy overrides по имени сохраняются.
-    Если в HTML переименовали (1 ушёл / 1 пришёл) — обновляем active + strategy.
+
+def save_html_templates(
+    chat_id: int,
+    templates: dict,
+    market: str = "crypto",
+    *,
+    replace: bool = False,
+    remove_missing: bool = False,
+):
+    """Сохранить шаблоны из HTML-скринера (merge-only upsert by default).
+
+    Рынок шаблона: filters[_market] / nested market, иначе аргумент market.
+    По умолчанию НЕ удаляет шаблоны, которых нет во входящем dict
+    (защита от partial/empty sync wipe). Явное удаление отсутствующих —
+    только при replace=True или remove_missing=True.
+    Пустой templates → no-op.
     """
+    if not templates:
+        return
+
+    do_remove = bool(replace or remove_missing)
+
     with _conn() as c:
         _ensure_html_templates(c)
         _ensure_template_strategy(c)
@@ -571,11 +659,8 @@ def save_html_templates(chat_id: int, templates: dict, market: str = "crypto"):
 
         items: list[tuple[str, dict, str]] = []
         for name, filters in templates.items():
-            flt = filters if isinstance(filters, dict) else {}
-            m = flt.get("_market") if isinstance(flt, dict) else None
-            if m not in ("crypto", "ru"):
-                m = market if market in ("crypto", "ru") else "crypto"
-            items.append((name, flt if isinstance(filters, dict) else filters, m))
+            flt, m = _normalize_incoming_template(filters, market)
+            items.append((name, flt, m))
 
         markets_touched = {m for _, _, m in items} or {
             market if market in ("crypto", "ru") else "crypto"
@@ -596,6 +681,9 @@ def save_html_templates(chat_id: int, templates: dict, market: str = "crypto"):
                 "VALUES(?,?,?,?)",
                 (chat_id, name, json.dumps(flt, ensure_ascii=False), m),
             )
+
+        if not do_remove:
+            return
 
         removed = set()
         for m in markets_touched:

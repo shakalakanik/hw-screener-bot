@@ -172,9 +172,27 @@ async def api_me(request: web.Request) -> web.Response:
     })
 
 
+def _templates_for_client(tpls: dict | None) -> dict:
+    """Flatten {name: {filters, market}} → {name: {..filters, _market}} for Mini App."""
+    out: dict = {}
+    for name, entry in (tpls or {}).items():
+        if isinstance(entry, dict) and isinstance(entry.get("filters"), dict):
+            flat = dict(entry["filters"])
+            m = entry.get("market")
+            if m and flat.get("_market") not in ("crypto", "ru"):
+                flat["_market"] = m
+            out[name] = flat
+        elif isinstance(entry, dict):
+            out[name] = entry
+        else:
+            out[name] = entry
+    return out
+
+
 async def api_templates_get(request: web.Request) -> web.Response:
     uid = require_user(request)
-    templates, active = storage.get_html_templates(uid)
+    templates = _templates_for_client(storage.get_html_templates(uid))
+    active = storage.get_active_config(uid)
     return web.json_response({"templates": templates, "active": active})
 
 
@@ -191,26 +209,18 @@ async def api_templates_put(request: web.Request) -> web.Response:
                                  content_type="application/json")
     # Refuse empty wipe — keep existing templates for this Telegram user
     if not templates:
-        existing = storage.get_html_templates(uid)
-        if isinstance(existing, tuple):
-            existing_tpl, active = existing
-        else:
-            existing_tpl, active = existing, None
-        if existing_tpl:
-            return web.json_response({
-                "ok": True,
-                "skipped": "empty_templates_not_applied",
-                "templates": existing_tpl,
-                "active": active,
-            })
-    # Prefer merge-save helper; fall back if alias missing
-    saver = getattr(storage, "set_html_templates", None) or getattr(storage, "save_html_templates")
-    saver(uid, templates)
-    got = storage.get_html_templates(uid)
-    if isinstance(got, tuple):
-        templates, active = got
-    else:
-        templates, active = got, None
+        existing_tpl = _templates_for_client(storage.get_html_templates(uid))
+        active = storage.get_active_config(uid)
+        return web.json_response({
+            "ok": True,
+            "skipped": "empty_templates_not_applied",
+            "templates": existing_tpl,
+            "active": active,
+        })
+    # Merge-only upsert (never delete missing names)
+    storage.save_html_templates(uid, templates, remove_missing=False)
+    templates = _templates_for_client(storage.get_html_templates(uid))
+    active = storage.get_active_config(uid)
     return web.json_response({"ok": True, "templates": templates, "active": active})
 
 
@@ -262,8 +272,8 @@ async def api_active_template_put(request: web.Request) -> web.Response:
 async def api_signal_filter_get(request: web.Request) -> web.Response:
     uid = require_user(request)
     f = storage.get_filter(uid)
-    _, active = storage.get_html_templates(uid)
-    return web.json_response({"filter": f, "active_template": active})
+    active = storage.get_active_config(uid)
+    return web.json_response({"filter": f, "active_template": active.get("names") or []})
 
 
 async def api_signal_filter_put(request: web.Request) -> web.Response:

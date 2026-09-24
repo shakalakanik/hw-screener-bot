@@ -1417,7 +1417,8 @@ async def handle_sync(request: web.Request) -> web.Response:
     if not isinstance(templates, dict) or not templates:
         return web.json_response({"error": "no templates"}, status=400)
 
-    storage.save_html_templates(chat_id, templates, market)
+    # Merge-only: never delete templates missing from this body
+    storage.save_html_templates(chat_id, templates, market, remove_missing=False)
 
     # Уведомить пользователя в Telegram
     names = list(templates.keys())
