@@ -105,8 +105,14 @@
 
     window.saveTplStore = function (o) {
       _origSave(o);
+      // Never push empty templates — would wipe server copy for this Telegram user
+      var keys = o && typeof o === 'object' ? Object.keys(o) : [];
+      if (!keys.length) {
+        setStatus('шаблоны: пустой набор не отправляю на сервер');
+        return;
+      }
       // Fire-and-forget sync to backend
-      api('PUT', '/api/templates', { templates: o || {} })
+      api('PUT', '/api/templates', { templates: o })
         .then(function () { setStatus('шаблоны сохранены на сервере'); })
         .catch(function (e) {
           setStatus('офлайн: только localStorage (' + (e.message || e) + ')');
@@ -243,11 +249,333 @@
     } catch (e) {}
   }
 
+
+  /* ---- Mini App state: watch / backtest / signals (server = source of truth) ----
+   * Templates sync above is untouched. Empty server wipe requires clear_* or matching updated_at.
+   * Page-scope helpers (__hwSnapshotMiniappState / __hwApplyMiniappState) are injected so
+   * `let BT` / `const MKT_STATE` in screener.html are reachable.
+   */
+  var STATE_LS_WATCH = 'hw_fbo_watch_all';
+  var _stateMeta = { watch: 0, backtest: 0, signals: 0 };
+  var _stateHydrated = false;
+  var _hydrating = false;
+  var _statePushTimer = null;
+  var _pendingClear = { watch: false, backtest: false, signals: false };
+  var _stateSyncing = false;
+
+  function readLocalWatch() {
+    try { return JSON.parse(localStorage.getItem(STATE_LS_WATCH) || '[]'); } catch (e) { return []; }
+  }
+
+  function writeLocalWatch(arr) {
+    try { localStorage.setItem(STATE_LS_WATCH, JSON.stringify(arr || [])); } catch (e) {}
+  }
+
+  function ensurePageHelpers() {
+    if (document.getElementById('hw-miniapp-state-boot')) return;
+    var s = document.createElement('script');
+    s.id = 'hw-miniapp-state-boot';
+    // Classic script shares top-level let/const with screener.html
+    s.textContent = [
+      'window.__hwSnapshotMiniappState = function () {',
+      '  var bt = { crypto: [], ru: [] }, sig = { crypto: [], ru: [] };',
+      '  try {',
+      '    if (typeof MKT_STATE === "object" && MKT_STATE) {',
+      '      if (typeof MKT === "string" && MKT_STATE[MKT]) {',
+      '        MKT_STATE[MKT].BT = (typeof BT !== "undefined" && Array.isArray(BT)) ? BT : (MKT_STATE[MKT].BT || []);',
+      '        MKT_STATE[MKT].LAST = (typeof LAST !== "undefined" && Array.isArray(LAST)) ? LAST : (MKT_STATE[MKT].LAST || []);',
+      '      }',
+      '      ["crypto","ru"].forEach(function (m) {',
+      '        var s = MKT_STATE[m] || {};',
+      '        bt[m] = Array.isArray(s.BT) ? s.BT.slice() : [];',
+      '        sig[m] = Array.isArray(s.LAST) ? s.LAST.slice() : [];',
+      '      });',
+      '    } else {',
+      '      var m = (typeof MKT === "string" && MKT === "ru") ? "ru" : "crypto";',
+      '      if (typeof BT !== "undefined" && Array.isArray(BT)) bt[m] = BT.slice();',
+      '      if (typeof LAST !== "undefined" && Array.isArray(LAST)) sig[m] = LAST.slice();',
+      '    }',
+      '  } catch (e) { console.warn("[bridge] snapshot", e); }',
+      '  return { backtest: bt, signals: sig };',
+      '};',
+      'window.__hwApplyMiniappState = function (data) {',
+      '  if (!data) return;',
+      '  try {',
+      '    if (Array.isArray(data.watch)) {',
+      '      try { localStorage.setItem("hw_fbo_watch_all", JSON.stringify(data.watch)); } catch (e0) {}',
+      '    }',
+      '    var bt = data.backtest || {}, sig = data.signals || {};',
+      '    if (typeof MKT_STATE === "object" && MKT_STATE) {',
+      '      ["crypto","ru"].forEach(function (m) {',
+      '        if (!MKT_STATE[m]) return;',
+      '        if (Array.isArray(bt[m])) MKT_STATE[m].BT = bt[m];',
+      '        if (Array.isArray(sig[m])) MKT_STATE[m].LAST = sig[m];',
+      '      });',
+      '      var m = (typeof MKT === "string") ? MKT : "crypto";',
+      '      if (MKT_STATE[m]) { BT = MKT_STATE[m].BT || []; LAST = MKT_STATE[m].LAST || []; }',
+      '    }',
+      '    try { if (typeof renderWatch === "function") renderWatch(); } catch (e1) {}',
+      '    try { if (typeof updCounts === "function") updCounts(); } catch (e2) {}',
+      '    try { if (typeof renderBt === "function") renderBt(); } catch (e3) {}',
+      '    try { if (typeof LAST !== "undefined" && LAST.length && typeof renderScan === "function") renderScan(); } catch (e4) {}',
+      '  } catch (e) { console.warn("[bridge] apply", e); }',
+      '};',
+      'window.__hwOnWatchSave = function (w) {',
+      '  if (typeof window.__hwScheduleStatePush === "function") window.__hwScheduleStatePush({ from: "watch" });',
+      '};',
+      'window.__hwMarkClearWatch = function () { window.__hwPendingClearWatch = true; };',
+      'window.__hwMarkClearBacktest = function () { window.__hwPendingClearBacktest = true; };'
+    ].join('\n');
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  function hydrateFromServer(data) {
+    if (!data) return;
+    _hydrating = true;
+    var needSeed = false;
+    try {
+      if (data.updated_at) {
+        _stateMeta.watch = data.updated_at.watch || 0;
+        _stateMeta.backtest = data.updated_at.backtest || 0;
+        _stateMeta.signals = data.updated_at.signals || 0;
+      }
+      ensurePageHelpers();
+
+      var serverWatch = Array.isArray(data.watch) ? data.watch : [];
+      var localWatch = readLocalWatch();
+      var cleared = data.cleared || {};
+      // First deploy / empty server: keep local cache and seed server (do not wipe local).
+      // If user explicitly cleared on server (tombstone), respect empty.
+      if (!serverWatch.length && localWatch.length && !cleared.watch) {
+        data = Object.assign({}, data, { watch: localWatch });
+        needSeed = true;
+      } else {
+        writeLocalWatch(serverWatch);
+      }
+
+      // Backtest / signals: if server empty & not cleared, keep page memory / seed after apply probe
+      var snap = null;
+      try { snap = window.__hwSnapshotMiniappState && window.__hwSnapshotMiniappState(); } catch (e0) {}
+      var bt = (data.backtest && typeof data.backtest === 'object') ? data.backtest : { crypto: [], ru: [] };
+      var sig = (data.signals && typeof data.signals === 'object') ? data.signals : { crypto: [], ru: [] };
+      var btEmpty = !(bt.crypto && bt.crypto.length) && !(bt.ru && bt.ru.length);
+      var sigEmpty = !(sig.crypto && sig.crypto.length) && !(sig.ru && sig.ru.length);
+      if (snap) {
+        var locBtEmpty = !(snap.backtest.crypto && snap.backtest.crypto.length) && !(snap.backtest.ru && snap.backtest.ru.length);
+        var locSigEmpty = !(snap.signals.crypto && snap.signals.crypto.length) && !(snap.signals.ru && snap.signals.ru.length);
+        if (btEmpty && !locBtEmpty && !cleared.backtest) {
+          data = Object.assign({}, data, { backtest: snap.backtest });
+          needSeed = true;
+        }
+        if (sigEmpty && !locSigEmpty && !cleared.signals) {
+          data = Object.assign({}, data, { signals: snap.signals });
+          needSeed = true;
+        }
+      }
+
+      if (typeof window.__hwApplyMiniappState === 'function') {
+        window.__hwApplyMiniappState(data);
+      }
+      window.__hwLastState = data;
+    } finally {
+      _hydrating = false;
+      _stateHydrated = true;
+    }
+    if (needSeed) {
+      // Push local→server once so account gets existing device data
+      scheduleStatePush();
+    }
+  }
+
+  function scheduleStatePush() {
+    if (!_stateHydrated || _hydrating) return;
+    clearTimeout(_statePushTimer);
+    _statePushTimer = setTimeout(pushStateToServer, 700);
+  }
+  window.__hwScheduleStatePush = scheduleStatePush;
+
+  async function pushStateToServer() {
+    if (!_stateHydrated || _hydrating || _stateSyncing) return;
+    _stateSyncing = true;
+    try {
+      ensurePageHelpers();
+      var snap = (typeof window.__hwSnapshotMiniappState === 'function')
+        ? window.__hwSnapshotMiniappState()
+        : { backtest: { crypto: [], ru: [] }, signals: { crypto: [], ru: [] } };
+
+      if (window.__hwPendingClearWatch) { _pendingClear.watch = true; window.__hwPendingClearWatch = false; }
+      if (window.__hwPendingClearBacktest) { _pendingClear.backtest = true; window.__hwPendingClearBacktest = false; }
+
+      var body = {
+        watch: readLocalWatch(),
+        backtest: snap.backtest,
+        signals: snap.signals,
+        updated_at: {
+          watch: _stateMeta.watch,
+          backtest: _stateMeta.backtest,
+          signals: _stateMeta.signals
+        },
+        clear_watch: !!_pendingClear.watch,
+        clear_backtest: !!_pendingClear.backtest,
+        clear_signals: !!_pendingClear.signals
+      };
+      _pendingClear = { watch: false, backtest: false, signals: false };
+
+      var data = await api('PUT', '/api/miniapp/state', body);
+      if (data && data.updated_at) {
+        _stateMeta.watch = data.updated_at.watch || _stateMeta.watch;
+        _stateMeta.backtest = data.updated_at.backtest || _stateMeta.backtest;
+        _stateMeta.signals = data.updated_at.signals || _stateMeta.signals;
+      }
+      if (data && data.rejected && data.rejected.length) {
+        if (data.rejected.indexOf('watch') >= 0 && Array.isArray(data.watch)) {
+          _hydrating = true;
+          try {
+            writeLocalWatch(data.watch);
+            if (typeof window.__hwApplyMiniappState === 'function') {
+              window.__hwApplyMiniappState({ watch: data.watch, backtest: data.backtest, signals: data.signals });
+            }
+          } finally { _hydrating = false; }
+        }
+        setStatus('сервер: защита от пустой перезаписи');
+      } else {
+        setStatus('отслеживаемые / бэктест сохранены в Telegram-аккаунте');
+      }
+    } catch (e) {
+      setStatus('офлайн: watch/бэктест локально (' + (e.message || e) + ')');
+      console.warn('[bridge] state push failed', e);
+    } finally {
+      _stateSyncing = false;
+    }
+  }
+
+  async function syncStateFromServer() {
+    try {
+      var data = await api('GET', '/api/miniapp/state');
+      hydrateFromServer(data);
+      var n = (data.watch && data.watch.length) || 0;
+      var btN = 0;
+      try {
+        btN = ((data.backtest && data.backtest.crypto) || []).length
+            + ((data.backtest && data.backtest.ru) || []).length;
+      } catch (e0) {}
+      setStatus('из аккаунта: отслеживаемых ' + n + ', бэктест ' + btN);
+    } catch (e) {
+      // Without auth do not mark hydrated — avoids empty PUT wiping nothing useful / retries
+      if (e && e.status === 401) {
+        _stateHydrated = false;
+        console.warn('[bridge] state sync: no auth, local only');
+      } else {
+        // Network blip: allow later local-only saves to try again, but don't PUT empty on boot
+        _stateHydrated = false;
+        console.warn('[bridge] state sync failed', e);
+      }
+    }
+  }
+
+  function installStateHooks() {
+    if (window.__hwStateHooks) return typeof window.saveWatch === 'function';
+    if (typeof window.saveWatch !== 'function') return false;
+    // MKT_STATE is declared late in HTML — wait until it exists in page helpers
+    ensurePageHelpers();
+    // Need MKT_STATE from page; helpers reference it at call time, so OK even if not yet declared
+    // But apply/snapshot only work after MKT_STATE script ran:
+    var ready = false;
+    try {
+      ready = typeof window.__hwSnapshotMiniappState === 'function';
+    } catch (e) { ready = false; }
+    if (!ready) return false;
+
+    // Wait until screener declared MKT_STATE (near end of HTML)
+    var mktReady = false;
+    try {
+      // Probe via snapshot — empty but defined means script ran past MKT_STATE
+      var probe = document.querySelector('#mkt');
+      mktReady = !!probe && typeof window.__hwApplyMiniappState === 'function';
+    } catch (e2) {}
+    if (!mktReady) return false;
+
+    window.__hwStateHooks = true;
+
+    var _origSave = window.saveWatch;
+    window.saveWatch = function (w) {
+      _origSave(w);
+      if (!_hydrating) scheduleStatePush();
+    };
+
+    if (typeof window.renderBt === 'function') {
+      var _origBt = window.renderBt;
+      window.renderBt = function () {
+        var r = _origBt.apply(this, arguments);
+        if (!_hydrating) scheduleStatePush();
+        return r;
+      };
+    }
+    if (typeof window.renderScan === 'function') {
+      var _origSc = window.renderScan;
+      window.renderScan = function () {
+        var r = _origSc.apply(this, arguments);
+        if (!_hydrating) scheduleStatePush();
+        return r;
+      };
+    }
+
+    var cw = document.getElementById('clearWatch');
+    if (cw && !cw.__hwClearHook) {
+      cw.__hwClearHook = true;
+      cw.addEventListener('click', function () {
+        // If user confirms, HTML handler calls saveWatch([]). Mark clear on next empty save.
+        window.__hwPendingClearWatch = true;
+        setTimeout(function () {
+          // If confirm was cancelled, saveWatch([]) never ran — drop the flag
+          // (saveWatch would have already consumed it via schedule; if still set and watch non-empty, clear flag)
+          if (window.__hwPendingClearWatch && readLocalWatch().length > 0) {
+            window.__hwPendingClearWatch = false;
+          }
+        }, 500);
+      }, true);
+    }
+    var cb = document.getElementById('btClear');
+    if (cb && !cb.__hwClearHook) {
+      cb.__hwClearHook = true;
+      cb.addEventListener('click', function () {
+        window.__hwPendingClearBacktest = true;
+        setTimeout(function () {
+          try {
+            var snap = window.__hwSnapshotMiniappState && window.__hwSnapshotMiniappState();
+            var empty = snap && !(snap.backtest.crypto && snap.backtest.crypto.length)
+              && !(snap.backtest.ru && snap.backtest.ru.length);
+            if (window.__hwPendingClearBacktest && !empty) {
+              window.__hwPendingClearBacktest = false;
+            }
+          } catch (e) {}
+        }, 500);
+      }, true);
+    }
+    return true;
+  }
+
+  function waitStateHooks(cb) {
+    if (installStateHooks()) { cb(); return; }
+    var n = 0;
+    var t = setInterval(function () {
+      n++;
+      if (installStateHooks() || n > 120) {
+        clearInterval(t);
+        cb();
+      }
+    }, 50);
+  }
+
   function start() {
     bootTelegram();
     injectBar();
     waitHooks(function () {
       syncFromServer();
+    });
+    // Additive: watch / backtest / LAST — does not touch templates
+    waitStateHooks(function () {
+      syncStateFromServer();
     });
   }
 
