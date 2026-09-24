@@ -29,6 +29,12 @@
   }
 
   function initDataHeader() {
+    // Always re-read — TG captured at load may miss initData; SDK can fill later
+    try {
+      if (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData) {
+        return String(window.Telegram.WebApp.initData);
+      }
+    } catch (e0) {}
     if (TG && TG.initData) return TG.initData;
     try {
       var q = new URLSearchParams(location.search);
@@ -38,14 +44,33 @@
     }
   }
 
+  function extractSyncToken() {
+    try {
+      var u = '';
+      try { u = localStorage.getItem('hw_fbo_sync_url') || localStorage.getItem('hw_bot_sync_url') || ''; } catch (e1) {}
+      if (!u) {
+        var q = new URLSearchParams(location.search || '');
+        u = q.get('sync') || q.get('sync_url') || '';
+        var tok = q.get('token') || q.get('sync_token') || '';
+        if (!u && tok) u = (location.origin || '') + '/sync/' + tok;
+      }
+      if (!u) return '';
+      var m = String(u).match(/\/sync\/([A-Za-z0-9_-]+)/);
+      return m ? m[1] : '';
+    } catch (e) { return ''; }
+  }
+
   function apiUrl(path) {
     var u = path;
     var id = initDataHeader();
+    var tok = extractSyncToken();
     var q = new URLSearchParams(location.search);
-    if (q.get('debug_user_id') && !id) {
+    if (q.get('debug_user_id') && !id && !tok) {
       u += (u.indexOf('?') >= 0 ? '&' : '?') + 'debug_user_id=' + encodeURIComponent(q.get('debug_user_id'));
     } else if (id) {
       u += (u.indexOf('?') >= 0 ? '&' : '?') + 'initData=' + encodeURIComponent(id);
+    } else if (tok) {
+      u += (u.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(tok);
     }
     return u;
   }
@@ -54,6 +79,8 @@
     var h = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     var id = initDataHeader();
     if (id) h['X-Telegram-Init-Data'] = id;
+    var tok = extractSyncToken();
+    if (tok) h['X-Sync-Token'] = tok;
     return h;
   }
 
@@ -304,9 +331,33 @@
   var _stateMeta = { watch: 0, backtest: 0, signals: 0 };
   var _stateHydrated = false;
   var _hydrating = false;
+  var _dirtyDuringHydrate = false;
   var _statePushTimer = null;
   var _pendingClear = { watch: false, backtest: false, signals: false };
   var _stateSyncing = false;
+
+  function watchRowKey(x) {
+    if (!x || typeof x !== 'object') return '';
+    var m = x.mkt || x.market || 'crypto';
+    return String(x.base || '') + '|' + String(x.t || '') + '|' + m;
+  }
+
+  function mergeWatchLists(serverArr, localArr) {
+    var out = [];
+    var seen = {};
+    function addAll(arr) {
+      (arr || []).forEach(function (row) {
+        if (!row || typeof row !== 'object') return;
+        var k = watchRowKey(row);
+        if (!k || seen[k]) return;
+        seen[k] = true;
+        out.push(row);
+      });
+    }
+    addAll(serverArr);
+    addAll(localArr);
+    return out;
+  }
 
   function readLocalWatch() {
     try { return JSON.parse(localStorage.getItem(STATE_LS_WATCH) || '[]'); } catch (e) { return []; }
@@ -391,11 +442,17 @@
       var cleared = data.cleared || {};
       // First deploy / empty server: keep local cache and seed server (do not wipe local).
       // If user explicitly cleared on server (tombstone), respect empty.
-      if (!serverWatch.length && localWatch.length && !cleared.watch) {
+      // Always union server∪local so eye-clicks during hydrate / Telegram 👁 + HTML are not lost.
+      if (cleared.watch && !serverWatch.length) {
+        writeLocalWatch([]);
+      } else if (!serverWatch.length && localWatch.length) {
         data = Object.assign({}, data, { watch: localWatch });
         needSeed = true;
       } else {
-        writeLocalWatch(serverWatch);
+        var merged = mergeWatchLists(serverWatch, localWatch);
+        writeLocalWatch(merged);
+        data = Object.assign({}, data, { watch: merged });
+        if (merged.length > serverWatch.length) needSeed = true;
       }
 
       // Backtest / signals: if server empty & not cleared, keep page memory / seed after apply probe
@@ -426,8 +483,9 @@
       _hydrating = false;
       _stateHydrated = true;
     }
-    if (needSeed) {
-      // Push local→server once so account gets existing device data
+    if (needSeed || _dirtyDuringHydrate) {
+      _dirtyDuringHydrate = false;
+      // Push local→server once so account gets existing device data / adds during hydrate
       scheduleStatePush();
     }
   }
@@ -545,6 +603,10 @@
     var _origSave = window.saveWatch;
     window.saveWatch = function (w) {
       _origSave(w);
+      if (_hydrating) {
+        _dirtyDuringHydrate = true;
+        return;
+      }
       if (!_hydrating) scheduleStatePush();
     };
 
