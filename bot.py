@@ -1426,13 +1426,41 @@ async def handle_manual_scan_get(request: web.Request) -> web.Response:
 
 
 async def handle_index(request: web.Request) -> web.Response:
-    """Отдать HTML-скринер (Mini App / браузер)."""
+    """Отдать HTML-скринер с inject bridge.js (серверное хранение watch/BT)."""
+    import webapp_server as wa
+    # Предпочитаем webapp/screener.html; иначе корневой HTML + тот же inject
+    if wa.SCREENER_HTML.is_file():
+        return await wa.handle_app(request)
     base = Path(__file__).resolve().parent
-    for name in ("HW_FBO_scanner_6.html", "webapp/screener.html"):
+    for name in ("HW_FBO_scanner_6.html",):
         path = base / name
         if path.is_file():
-            return web.FileResponse(path)
+            html = wa._inject_html(path.read_text(encoding="utf-8"))
+            return web.Response(text=html, content_type="text/html", charset="utf-8")
     return web.Response(text="screener html missing", status=404)
+
+
+def _mount_miniapp_routes(app: web.Application) -> None:
+    """Маршруты Mini App из webapp_server (иначе /bridge.js и /api/miniapp/* 404)."""
+    import webapp_server as wa
+    app.middlewares.append(wa.cors_middleware)
+    app.router.add_get("/bridge.js", wa.handle_bridge_js)
+    app.router.add_get("/mobile.css", wa.handle_mobile_css)
+    app.router.add_get("/api/me", wa.api_me)
+    app.router.add_get("/api/templates", wa.api_templates_get)
+    app.router.add_put("/api/templates", wa.api_templates_put)
+    app.router.add_put("/api/templates/{name}", wa.api_template_one_put)
+    app.router.add_delete("/api/templates/{name}", wa.api_template_one_delete)
+    app.router.add_put("/api/active-template", wa.api_active_template_put)
+    app.router.add_get("/api/signal-filter", wa.api_signal_filter_get)
+    app.router.add_put("/api/signal-filter", wa.api_signal_filter_put)
+    app.router.add_get("/api/miniapp/state", wa.api_miniapp_state_get)
+    app.router.add_put("/api/miniapp/state", wa.api_miniapp_state_put)
+
+    async def _options(request: web.Request) -> web.Response:
+        return web.Response(status=204, headers=wa._cors_headers(request))
+
+    app.router.add_route("OPTIONS", "/api/{tail:.*}", _options)
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -1487,6 +1515,7 @@ async def main():
     app.router.add_get("/health", handle_health)
     app.router.add_get("/", handle_index)
     app.router.add_get("/app", handle_index)
+    _mount_miniapp_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
