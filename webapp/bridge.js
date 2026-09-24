@@ -612,7 +612,27 @@
     }, 50);
   }
 
+
+  /** Save ?sync= / ?token= into localStorage (Mini App from bot). Never wipe existing. */
+  function restoreSyncFromQuery() {
+    try {
+      var q = new URLSearchParams(location.search || '');
+      var u = q.get('sync') || q.get('sync_url') || q.get('syncUrl') || '';
+      var tok = q.get('token') || q.get('sync_token') || q.get('syncToken');
+      if (!u && tok) {
+        u = (location.origin || '') + '/sync/' + tok;
+      }
+      if (!u) return;
+      try {
+        localStorage.setItem('hw_fbo_sync_url', u);
+        localStorage.setItem('hw_bot_sync_url', u);
+      } catch (e) {}
+      if (q.get('autosync') !== '0') window.__HW_AUTOSYNC = true;
+    } catch (e) {}
+  }
+
   function start() {
+    restoreSyncFromQuery();
     bootTelegram();
     injectBar();
     waitHooks(function () {

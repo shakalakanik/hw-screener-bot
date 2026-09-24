@@ -2120,6 +2120,13 @@ function renderRegime(){
 
 
 /* ===== фоновый скан на сервере (Mini App) ===== */
+function tgInitData(){
+  try{
+    if(window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.initData)
+      return String(window.Telegram.WebApp.initData);
+  }catch(e){}
+  return '';
+}
 function extractSyncToken(){
   const u = (typeof getBotSyncUrl==='function' ? getBotSyncUrl() : '')
     || (function(){ try{ return localStorage.getItem('hw_fbo_sync_url')||localStorage.getItem('hw_bot_sync_url')||''; }catch(e){ return ''; } })();
@@ -2133,8 +2140,8 @@ function isTelegramMiniApp(){
   }catch(e){ return false; }
 }
 function preferServerScan(){
-  // В Telegram Mini App — всегда сервер; вне TG — если есть sync-токен тоже сервер по умолчанию
-  return isTelegramMiniApp() || !!extractSyncToken();
+  // В Telegram Mini App — всегда сервер; вне TG — если есть sync-токен / initData тоже сервер
+  return isTelegramMiniApp() || !!extractSyncToken() || !!tgInitData();
 }
 function collectManualScanPayload(){
   const winH = (typeof windowHours==='function') ? windowHours() : (+el('#win').value||3);
@@ -2159,14 +2166,34 @@ function collectManualScanPayload(){
   };
   return payload;
 }
-async function pollManualJob(jobId, token, onTick){
+function _manualScanAuthHeaders(token, initData){
+  const headers = { 'Content-Type':'application/json' };
+  if(token) headers['X-Sync-Token'] = token;
+  if(initData) headers['X-Telegram-Init-Data'] = initData;
+  return headers;
+}
+function _manualScanAuthQuery(token, initData){
+  const qs = [];
+  if(token) qs.push('token='+encodeURIComponent(token));
+  if(initData) qs.push('initData='+encodeURIComponent(initData));
+  return qs.length ? ('?'+qs.join('&')) : '';
+}
+async function pollManualJob(jobId, auth, onTick){
+  let token = '', initData = '';
+  if(typeof auth === 'string'){ token = auth; }
+  else if(auth && typeof auth === 'object'){
+    token = auth.token || '';
+    initData = auth.initData || '';
+  }
   const base = (location.origin || '') + '/api/manual-scan/' + encodeURIComponent(jobId);
-  const headers = token ? { 'X-Sync-Token': token } : {};
+  const headers = _manualScanAuthHeaders(token, initData);
+  // Content-Type не нужен на GET — убрать лишний
+  delete headers['Content-Type'];
   for(let i=0;i<900;i++){ // ~30 мин при 2с
     await new Promise(r=>setTimeout(r, 2000));
     let res;
     try{
-      res = await fetch(base + (token?('?token='+encodeURIComponent(token)):''), { headers });
+      res = await fetch(base + _manualScanAuthQuery(token, initData), { headers });
     }catch(e){ continue; }
     if(!res.ok) continue;
     const j = await res.json();
@@ -2175,32 +2202,47 @@ async function pollManualJob(jobId, token, onTick){
   }
   return { status:'error', error:'timeout', message:'таймаут ожидания' };
 }
-async function startServerManualScan(){
-  const token = extractSyncToken();
-  if(!token) throw new Error('нет sync-токена — открой Mini App из бота или /syncurl');
+async function startServerManualScan(opts){
+  opts = opts || {};
+  let token = (opts.token !== undefined) ? (opts.token || '') : extractSyncToken();
+  let initData = (opts.initData !== undefined) ? (opts.initData || '') : tgInitData();
+  if(!token && !initData){
+    throw new Error('нет sync-токена — открой Mini App из бота или /syncurl');
+  }
   const payload = collectManualScanPayload();
-  payload.token = token;
+  if(token) payload.token = token;
+  if(initData) payload.initData = initData;
   setStatus('фоновый скан на сервере…');
   const res = await fetch((location.origin||'') + '/api/manual-scan', {
     method:'POST',
-    headers:{ 'Content-Type':'application/json', 'X-Sync-Token': token },
+    headers: _manualScanAuthHeaders(token, initData),
     body: JSON.stringify(payload),
   });
   const data = await res.json().catch(()=>({}));
+  // Stale sync token after DB migrate: clear localStorage и один раз retry с initData
+  if(res.status===401 && !opts._retried && token && initData){
+    try{
+      localStorage.removeItem('hw_fbo_sync_url');
+      localStorage.removeItem('hw_bot_sync_url');
+    }catch(e){}
+    return await startServerManualScan({ token:'', initData:initData, _retried:true });
+  }
+  const auth = { token, initData };
   if(res.status===409 && data.job_id){
     setStatus('уже идёт фоновый скан — жду…');
-    return await pollManualJob(data.job_id, token, j=>{
+    return await pollManualJob(data.job_id, auth, j=>{
       setStatus(`фоновый скан: ${j.message||j.status} (${Math.round(j.progress||0)}%)`);
     });
   }
   if(!res.ok){
     const err = new Error(data.error || data.message || ('HTTP '+res.status));
     err.status = res.status;
+    err.hint = data.hint || '';
     throw err;
   }
   const jobId = data.job_id;
   setStatus('фоновый скан запущен — можно свернуть Mini App; карточки придут в Telegram');
-  return await pollManualJob(jobId, token, j=>{
+  return await pollManualJob(jobId, auth, j=>{
     setStatus(`фоновый скан: ${j.message||j.status} (${Math.round(j.progress||0)}%)`);
   });
 }
