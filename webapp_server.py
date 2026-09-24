@@ -101,8 +101,31 @@ def _extract_init_data(request: web.Request) -> str:
     return request.rel_url.query.get("initData") or ""
 
 
+def _extract_sync_token(request: web.Request) -> str:
+    """X-Sync-Token header or ?token= (Mini App opens with ?sync=/sync/TOKEN)."""
+    h = (
+        request.headers.get("X-Sync-Token")
+        or request.headers.get("x-sync-token")
+        or ""
+    ).strip()
+    if h:
+        return h
+    q = (request.rel_url.query.get("token") or "").strip()
+    if q:
+        return q
+    # Also accept ?sync=https://host/sync/TOKEN
+    sync = (request.rel_url.query.get("sync") or "").strip()
+    if "/sync/" in sync:
+        return sync.rstrip("/").rsplit("/sync/", 1)[-1].strip()
+    return ""
+
+
 def require_user(request: web.Request) -> int:
-    """Resolve Telegram user_id from initData (or debug). Raises HTTPUnauthorized/Forbidden."""
+    """Resolve Telegram user_id from initData, sync token, or debug.
+
+    Auth order: valid initData → sync token (DB) → ALLOW_DEBUG_WEBAPP debug_user_id.
+    Sync token ties Mini App to the same chat_id as /sync and Telegram 👁 watch.
+    """
     init_data = _extract_init_data(request)
     if init_data:
         parsed = validate_init_data(init_data)
@@ -115,6 +138,13 @@ def require_user(request: web.Request) -> int:
                                        content_type="application/json")
         request["tg_user"] = parsed["user"]
         return int(uid)
+
+    token = _extract_sync_token(request)
+    if token:
+        chat_id = storage.get_chat_id_by_sync_token(token)
+        if chat_id is not None:
+            request["tg_user"] = {"id": int(chat_id), "username": f"sync_{chat_id}"}
+            return int(chat_id)
 
     # Local debug
     if os.environ.get("ALLOW_DEBUG_WEBAPP") == "1":

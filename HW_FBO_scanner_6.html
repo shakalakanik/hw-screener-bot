@@ -2140,8 +2140,9 @@ function isTelegramMiniApp(){
   }catch(e){ return false; }
 }
 function preferServerScan(){
-  // В Telegram Mini App — всегда сервер; вне TG — если есть sync-токен / initData тоже сервер
-  return isTelegramMiniApp() || !!extractSyncToken() || !!tgInitData();
+  // Manual «Сканировать» = HTML/WebView only (results in UI, no Telegram cards).
+  // Server /api/manual-scan kept for other callers; Mini App button must not use it.
+  return false;
 }
 function collectManualScanPayload(){
   const winH = (typeof windowHours==='function') ? windowHours() : (+el('#win').value||3);
@@ -2314,40 +2315,8 @@ el('#run').addEventListener('click',async()=>{
   const btn=el('#run'); btn.disabled=true;
   const prog=el('#prog'); if(prog){ prog.style.display=''; prog.value=0; }
   try{
-    if(preferServerScan()){
-      try{
-        const j = await startServerManualScan();
-        if(j && j.status==='done'){
-          setStatus(`готово (сервер): отправлено в Telegram ${j.n_sent||0}`);
-          if(prog) prog.value=100;
-          return;
-        }
-        if(j && j.status==='error'){
-          setStatus('ошибка сервера: '+(j.error||j.message||''));
-          // fallback?
-          if(confirm('Серверный скан не удался. Запустить локальный в браузере?')){
-            await runLocalBrowserScan();
-          }
-          return;
-        }
-      }catch(e){
-        console.warn('server scan failed', e);
-        if(isTelegramMiniApp()){
-          // В TG по умолчанию сервер; предложить локальный
-          if(confirm('Не удалось запустить фоновый скан ('+e.message+'). Локальный скан в WebView?')){
-            await runLocalBrowserScan();
-          } else {
-            setStatus('ошибка: '+e.message);
-          }
-          return;
-        }
-        // вне TG без токена / с ошибкой — локальный
-        await runLocalBrowserScan();
-        return;
-      }
-    } else {
-      await runLocalBrowserScan();
-    }
+    // Always client-side: display in HTML only — never POST /api/manual-scan (no Telegram spam)
+    await runLocalBrowserScan();
   }catch(e){ setStatus('ошибка: '+e.message+' — попробуй сменить источник'); }
   finally{ btn.disabled=false; if(prog) prog.style.display='none'; }
 });
