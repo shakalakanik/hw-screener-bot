@@ -23,6 +23,7 @@ INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/mobile.css">
 <script src="/bridge.js"></script>
+<script src="/lean.js"></script>
 """
 
 
@@ -190,6 +191,11 @@ async def handle_mobile_css(request: web.Request) -> web.Response:
 
 async def handle_bridge_js(request: web.Request) -> web.Response:
     path = WEBAPP_DIR / "bridge.js"
+    return web.FileResponse(path)
+
+
+async def handle_lean_js(request: web.Request) -> web.Response:
+    path = WEBAPP_DIR / "lean.js"
     return web.FileResponse(path)
 
 
@@ -407,6 +413,31 @@ async def api_miniapp_state_get(request: web.Request) -> web.Response:
     return web.json_response({"ok": True, **state})
 
 
+async def api_signal_stats_get(request: web.Request) -> web.Response:
+    """История реально отправленных в Telegram сигналов + исход (win/loss/open/expired).
+
+    Query: market=crypto|ru, strategy=brk|fbo, template=<имя>, status=open|win|loss|expired,
+    limit=<int, default 200>.
+    """
+    uid = require_user(request)
+    q = request.rel_url.query
+    limit = 200
+    try:
+        limit = max(1, min(1000, int(q.get("limit", "200"))))
+    except (TypeError, ValueError):
+        pass
+    rows = storage.get_signal_history(
+        uid,
+        market=q.get("market") or None,
+        strategy=q.get("strategy") or None,
+        template=q.get("template") or None,
+        status=q.get("status") or None,
+        limit=limit,
+    )
+    stats = storage.get_signal_history_stats(uid)
+    return web.json_response({"ok": True, "rows": rows, "stats": stats})
+
+
 async def api_miniapp_state_put(request: web.Request) -> web.Response:
     """Persist Mini App state. Empty overwrite guarded in storage.put_miniapp_state.
 
@@ -475,6 +506,7 @@ def create_app() -> web.Application:
     app.router.add_get("/health", handle_health)
     app.router.add_get("/mobile.css", handle_mobile_css)
     app.router.add_get("/bridge.js", handle_bridge_js)
+    app.router.add_get("/lean.js", handle_lean_js)
 
     app.router.add_get("/api/me", api_me)
     app.router.add_get("/api/templates", api_templates_get)
@@ -486,6 +518,7 @@ def create_app() -> web.Application:
     app.router.add_put("/api/signal-filter", api_signal_filter_put)
     app.router.add_get("/api/miniapp/state", api_miniapp_state_get)
     app.router.add_put("/api/miniapp/state", api_miniapp_state_put)
+    app.router.add_get("/api/miniapp/stats", api_signal_stats_get)
 
     # CORS preflight
     async def _options(request: web.Request) -> web.Response:

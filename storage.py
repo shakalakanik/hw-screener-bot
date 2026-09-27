@@ -1607,3 +1607,142 @@ def put_miniapp_state(
     out["ok"] = True
     out["rejected"] = rejected
     return out
+
+
+# ── История отправленных сигналов + автоотслеживание исхода (тейк/стоп) ──────
+# Отдельная таблица от `signals` (лёгкий лог dedup) — тут полноценная карточка
+# на момент отправки в Telegram, плюс статус после проверки цены (win/loss/
+# open/expired). Источник для вкладки «Статистика» в Mini App.
+
+_SIGHIST_STATUSES = ("open", "win", "loss", "expired")
+
+
+def _ensure_signal_history(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS signal_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id       INTEGER NOT NULL,
+            ticker        TEXT NOT NULL,
+            market        TEXT NOT NULL DEFAULT 'crypto',
+            strategy      TEXT NOT NULL DEFAULT 'brk',
+            side          TEXT NOT NULL,
+            template      TEXT,
+            kind          TEXT,
+            level         REAL NOT NULL,
+            entry         REAL NOT NULL,
+            stop          REAL NOT NULL,
+            take          REAL NOT NULL,
+            prob          REAL,
+            strength      INTEGER,
+            signal_ts     INTEGER NOT NULL,
+            sent_ts       INTEGER NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'open',
+            outcome_ts    REAL,
+            outcome_price REAL
+        )
+    """)
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sighist_status ON signal_history(status)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_sighist_chat ON signal_history(chat_id, sent_ts)")
+
+
+def record_signal_delivery(chat_id: int, card: dict) -> int:
+    """Записать сигнал в момент реальной отправки в Telegram. Возвращает id строки."""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        cur = c.execute(
+            """INSERT INTO signal_history
+               (chat_id, ticker, market, strategy, side, template, kind,
+                level, entry, stop, take, prob, strength, signal_ts, sent_ts, status)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open')""",
+            (
+                chat_id,
+                card.get("ticker", ""),
+                card.get("market", "crypto"),
+                card.get("strategy", "brk"),
+                card.get("side", "LONG"),
+                card.get("matched_template") or None,
+                card.get("kind"),
+                float(card.get("level") or 0),
+                float(card.get("last") or card.get("entry") or 0),
+                float(card.get("stop") or 0),
+                float(card.get("take") or 0),
+                card.get("prob"),
+                card.get("strength"),
+                int(card.get("signal_ts") or int(time.time() * 1000)),
+                int(time.time() * 1000),
+            ),
+        )
+        return cur.lastrowid
+
+
+def get_open_signal_rows(limit: int = 300) -> list[dict]:
+    """Открытые (ещё не решённые) сигналы — для фонового чекера исходов."""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        rows = c.execute(
+            "SELECT * FROM signal_history WHERE status='open' ORDER BY sent_ts ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_signal_outcome(row_id: int, status: str, outcome_ts: int, outcome_price: float):
+    if status not in _SIGHIST_STATUSES:
+        status = "open"
+    with _conn() as c:
+        _ensure_signal_history(c)
+        c.execute(
+            "UPDATE signal_history SET status=?, outcome_ts=?, outcome_price=? WHERE id=?",
+            (status, outcome_ts, outcome_price, row_id),
+        )
+
+
+def get_signal_history(
+    chat_id: int,
+    market: str | None = None,
+    strategy: str | None = None,
+    template: str | None = None,
+    status: str | None = None,
+    limit: int = 200,
+) -> list[dict]:
+    """История сигналов для вкладки «Статистика» — с фильтрами, новые первыми."""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        q = "SELECT * FROM signal_history WHERE chat_id=?"
+        args: list = [chat_id]
+        if market:
+            q += " AND market=?"
+            args.append(market)
+        if strategy:
+            q += " AND strategy=?"
+            args.append(strategy)
+        if template:
+            q += " AND template=?"
+            args.append(template)
+        if status:
+            q += " AND status=?"
+            args.append(status)
+        q += " ORDER BY sent_ts DESC LIMIT ?"
+        args.append(limit)
+        rows = c.execute(q, args).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_signal_history_stats(chat_id: int) -> dict:
+    """Агрегат win/loss/open/expired по каждой связке рынок+стратегия+шаблон."""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        rows = c.execute(
+            """SELECT market, strategy, COALESCE(template,'') AS template, status, COUNT(*) AS n
+               FROM signal_history WHERE chat_id=? GROUP BY market, strategy, template, status""",
+            (chat_id,),
+        ).fetchall()
+    out: dict[str, dict] = {}
+    for r in rows:
+        key = f"{r['market']}|{r['strategy']}|{r['template']}"
+        out.setdefault(key, {
+            "market": r["market"], "strategy": r["strategy"], "template": r["template"],
+            "open": 0, "win": 0, "loss": 0, "expired": 0,
+        })
+        out[key][r["status"]] = r["n"]
+    return list(out.values())

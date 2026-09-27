@@ -999,3 +999,67 @@ async def run_manual_scan(
 
     await _progress(100, f"готово, отправлено {sent_count}", n_sent=sent_count)
     return sent_count
+
+
+# ── Автопроверка исхода отправленных сигналов (тейк/стоп) ────────────────────
+# Не влияет на сам скан — отдельный проход по открытым записям signal_history.
+# Конвенция при "прокол в одном баре сразу через оба уровня": считаем стоп
+# (консервативно, чтобы не завышать винрейт).
+
+OUTCOME_HORIZON_MS = 7 * 24 * 3_600_000  # не решилось за 7 суток → expired
+
+
+async def _fetch_outcome_bars(
+    crypto_client: httpx.AsyncClient, moex_c: httpx.AsyncClient, row: dict,
+) -> list[Bar]:
+    ticker = row["ticker"]
+    if row.get("market") == "ru":
+        return await fetch_klines_moex_h1(moex_c, ticker, limit=200)
+    return await fetch_klines_bybit(crypto_client, ticker, "60", limit=200)
+
+
+def _resolve_outcome(row: dict, bars: list[Bar]) -> tuple[str, int, float] | None:
+    """Вернуть (status, outcome_ts, outcome_price) если решилось, иначе None."""
+    side = row["side"]
+    stop, take = float(row["stop"]), float(row["take"])
+    signal_ts = int(row["signal_ts"])
+    relevant = [b for b in bars if b.ts >= signal_ts]
+    for b in relevant:
+        hit_take = (b.h >= take) if side == "LONG" else (b.l <= take)
+        hit_stop = (b.l <= stop) if side == "LONG" else (b.h >= stop)
+        if hit_take and hit_stop:
+            return ("loss", b.ts, stop)  # оба в одном баре — консервативно стоп
+        if hit_stop:
+            return ("loss", b.ts, stop)
+        if hit_take:
+            return ("win", b.ts, take)
+    return None
+
+
+async def check_signal_outcomes(limit: int = 300) -> dict:
+    """Проверить открытые сигналы из signal_history, обновить исход. Вызывать раз в скан."""
+    rows = storage.get_open_signal_rows(limit=limit)
+    if not rows:
+        return {"checked": 0, "resolved": 0}
+
+    resolved = 0
+    now_ms = int(time.time() * 1000)
+    async with httpx.AsyncClient() as crypto_client, moex_client() as moex_c:
+        for row in rows:
+            try:
+                bars = await _fetch_outcome_bars(crypto_client, moex_c, row)
+            except Exception as e:
+                logger.debug("outcome fetch failed %s: %s", row.get("ticker"), e)
+                continue
+            if not bars:
+                continue
+            outcome = _resolve_outcome(row, bars)
+            if outcome:
+                status, ts, price = outcome
+                storage.update_signal_outcome(row["id"], status, ts, price)
+                resolved += 1
+            elif now_ms - int(row["signal_ts"]) > OUTCOME_HORIZON_MS:
+                last = bars[-1]
+                storage.update_signal_outcome(row["id"], "expired", last.ts, last.c)
+                resolved += 1
+    return {"checked": len(rows), "resolved": resolved}

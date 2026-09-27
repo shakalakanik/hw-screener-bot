@@ -25,7 +25,7 @@ from urllib.parse import quote
 
 import storage
 import ai_chat
-from screener import run_scan, run_manual_scan
+from screener import run_scan, run_manual_scan, check_signal_outcomes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -308,6 +308,10 @@ async def send_signal(card: dict, chat_ids: list[int]):
                 )
             except Exception as e:
                 logger.warning("pending card save failed %s: %s", card_id, e)
+            try:
+                storage.record_signal_delivery(chat_id, card)
+            except Exception as e:
+                logger.warning("signal_history record failed %s: %s", card_id, e)
             # watch:{16-hex} fits Telegram 64-byte callback_data limit
             kb = InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_id}"),
@@ -1745,6 +1749,15 @@ async def scan_loop():
                 logger.info("Авто-скан: отправлено новых карточек=%d", n)
             except Exception:
                 logger.exception("Ошибка авто-скана")
+            try:
+                res = await check_signal_outcomes()
+                if res.get("resolved"):
+                    logger.info(
+                        "Исходы сигналов: проверено=%d решено=%d",
+                        res.get("checked", 0), res.get("resolved", 0),
+                    )
+            except Exception:
+                logger.exception("Ошибка проверки исходов сигналов")
         await asyncio.sleep(SCAN_INTERVAL)
 
 
