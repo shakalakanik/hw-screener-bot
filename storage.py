@@ -1686,6 +1686,21 @@ def get_open_signal_rows(limit: int = 300) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def count_open_signals(chat_id: int, template: str) -> int:
+    """Сколько сейчас открыто (status='open') сигналов у этого чата по этому шаблону.
+
+    Используется для живого ограничения «Одновременно в рынке, макс» (_conc в шаблоне) —
+    новый сигнал по шаблону не шлётся, пока столько же уже открыто.
+    """
+    with _conn() as c:
+        _ensure_signal_history(c)
+        row = c.execute(
+            "SELECT COUNT(*) AS n FROM signal_history WHERE chat_id=? AND template=? AND status='open'",
+            (chat_id, template),
+        ).fetchone()
+    return int(row["n"]) if row else 0
+
+
 def update_signal_outcome(row_id: int, status: str, outcome_ts: int, outcome_price: float):
     if status not in _SIGHIST_STATUSES:
         status = "open"

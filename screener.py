@@ -418,6 +418,24 @@ def match_filter(card: dict, f: dict) -> str | None:
     # Старый формат (без шаблонов из HTML)
     return "" if _matches_single(card, f) else None
 
+def _template_conc_limit(f: dict, tpl_name: str) -> int:
+    """Достать _conc (макс. одновременно открытых сигналов) выбранного шаблона. 0 = без лимита."""
+    for tpl in f.get("_multi", []):
+        if tpl.get("_name") == tpl_name:
+            try:
+                return int(tpl.get("filters", {}).get("_conc") or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def concurrency_allows(chat_id: int, tpl_name: str, f: dict) -> bool:
+    """True если можно слать новый сигнал по этому шаблону (лимит «Одновременно в рынке» не превышен)."""
+    limit = _template_conc_limit(f, tpl_name)
+    if limit <= 0:
+        return True
+    return storage.count_open_signals(chat_id, tpl_name) < limit
+
 
 # Оставлен для обратной совместимости, если где-то ещё вызывается напрямую
 def apply_filter(card: dict, f: dict) -> bool:
@@ -668,7 +686,7 @@ async def run_scan(
                 for chat_id in subscribers:
                     f = chat_filters(chat_id)
                     tpl_name = match_filter(card, f)
-                    if tpl_name is not None:
+                    if tpl_name is not None and concurrency_allows(chat_id, tpl_name, f):
                         by_template.setdefault(tpl_name, []).append(chat_id)
                 if by_template:
                     pending.append({"card": card, "by_template": by_template})
@@ -872,6 +890,8 @@ async def run_manual_scan(
 
                 matched = match_filter(card, chat_filter)
                 if matched is None:
+                    continue
+                if not concurrency_allows(chat_id, matched, chat_filter):
                     continue
                 pending.append({
                     "card": card,

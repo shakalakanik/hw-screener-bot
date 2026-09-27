@@ -220,7 +220,7 @@ def _parse_card_from_message(msg) -> dict | None:
     entry = _code_after("Вход")
     stop = _code_after("Стоп")
     take = _code_after("Тейк")
-    if level is None or entry is None:
+    if level is None or entry is None or stop is None or take is None:
         return None
 
     kind = ""
@@ -275,8 +275,8 @@ def _parse_card_from_message(msg) -> dict | None:
         "strategy": strategy,
         "level": level,
         "last": entry,
-        "stop": stop if stop is not None else entry,
-        "take": take if take is not None else entry,
+        "stop": stop,
+        "take": take,
         "kind": kind,
         "strength": min(5, max(1, strength)),
         "prob": prob,
