@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>HW FBO — скринер и бэктест</title>
 <style>
 :root{--bg:#12131a;--panel:#1b1d27;--line:#2c2f3d;--fg:#e6e8ef;--muted:#9aa0b5;
@@ -58,6 +58,80 @@ progress{width:100%;height:6px;margin-top:8px}
 .regimeRow b{display:block;font-size:16px;margin-top:2px}
 .sect{border-top:1px dashed var(--line);margin:12px 0 10px;padding-top:10px}
 .sect>span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+/* ===== Responsive layout (phones <600 · tablets 600–1024 · desktop >1024) ===== */
+html,body{max-width:100%;overflow-x:hidden}
+img,canvas,svg,video{max-width:100%}
+img,video{height:auto}
+.scroll{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.card{max-width:100%;min-width:0}
+html body{padding-left:calc(16px + env(safe-area-inset-left,0px));padding-right:calc(16px + env(safe-area-inset-right,0px));
+  padding-bottom:calc(16px + env(safe-area-inset-bottom,0px))}
+#paneWatch tr.hw-focus,#paneWatch tr.hw-focus td{background-color:rgba(76,154,255,.16)}
+#paneWatch tr.hw-focus{outline:2px solid #4c9aff;outline-offset:-2px;animation:hwPulse 1.2s ease-in-out 3}
+@keyframes hwPulse{50%{outline-color:transparent}}
+@media (max-width:1024px){
+  html body{padding:10px;padding-top:calc(10px + env(safe-area-inset-top,0px) + var(--tg-content-safe-area-inset-top,0px));
+    padding-left:calc(10px + env(safe-area-inset-left,0px));padding-right:calc(10px + env(safe-area-inset-right,0px));
+    padding-bottom:calc(14px + env(safe-area-inset-bottom,0px))}
+  .wrap{max-width:100%}
+  .kpi{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+  .kpi div{min-width:0;padding:8px 10px}
+  .kpi b{font-size:18px}
+  .row,.frow{flex-wrap:wrap}
+  html body .row>.field,html body .frow>.field{flex:1 1 calc(50% - 12px);min-width:0;width:auto}
+  select.flt,.field select,.field input{min-width:0;width:100%;max-width:100%}
+  .regimeRow div{min-width:0;flex:1 1 calc(50% - 10px)}
+  .bar{min-width:0}
+  .charts{grid-template-columns:1fr 1fr}
+  /* «Отслеживаю»: table → cards (2 per row on tablets) */
+  #paneWatch .scroll{overflow-x:visible}
+  #paneWatch table{display:block;width:100%}
+  #paneWatch thead{display:none}
+  #paneWatch tbody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;width:100%}
+  #paneWatch tr.clickable{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));column-gap:12px;row-gap:1px;
+    background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:8px 10px;min-width:0}
+  html body #paneWatch tr.clickable td{display:flex;justify-content:space-between;align-items:baseline;gap:6px;
+    border:0;padding:2px 0;white-space:normal;min-width:0;overflow-wrap:anywhere;background:transparent!important}
+  #paneWatch tr.clickable td::before{color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+  #paneWatch tr.clickable td:nth-child(1){display:none}
+  #paneWatch tr.clickable td:nth-child(2){order:-1;grid-column:2;justify-content:flex-end}
+  #paneWatch tr.clickable td:nth-child(3){order:-2;grid-column:1;font-weight:700;font-size:15px}
+  #paneWatch tr.clickable td:nth-child(4){grid-column:1/-1}
+  #paneWatch tr.clickable td:nth-child(13){grid-column:1/-1;border-top:1px dashed var(--line);margin-top:3px;padding-top:4px}
+  #paneWatch tr.clickable td:nth-child(4)::before{content:"Добавлен"}
+  #paneWatch tr.clickable td:nth-child(5)::before{content:"Сторона"}
+  #paneWatch tr.clickable td:nth-child(6)::before{content:"Уровень"}
+  #paneWatch tr.clickable td:nth-child(7)::before{content:"p"}
+  #paneWatch tr.clickable td:nth-child(8)::before{content:"Вход"}
+  #paneWatch tr.clickable td:nth-child(9)::before{content:"Стоп"}
+  #paneWatch tr.clickable td:nth-child(10)::before{content:"Тейк"}
+  #paneWatch tr.clickable td:nth-child(11)::before{content:"Сейчас"}
+  #paneWatch tr.clickable td:nth-child(12)::before{content:"Оценка"}
+  #paneWatch tr.clickable td:nth-child(13)::before{content:"Результат"}
+  #paneWatch tr.detail{display:block;grid-column:1/-1;min-width:0}
+  html body #paneWatch tr.detail>td{display:block;width:100%;padding:0;border:0;white-space:normal}
+  .tradeInfo{gap:4px 14px}
+  th,td{padding:5px 6px}
+}
+@media (max-width:599px){
+  h1{font-size:17px}
+  .sub{font-size:12px;margin-bottom:10px}
+  .card{padding:10px;border-radius:9px}
+  .kpi{grid-template-columns:repeat(2,minmax(0,1fr))}
+  html body .row>.field,html body .frow>.field{flex:1 1 100%}
+  #paneWatch tbody{grid-template-columns:minmax(0,1fr)}
+  .charts{grid-template-columns:1fr;padding:8px 0}
+  .charts .c3{grid-column:auto}
+  canvas{width:100%!important;max-width:100%}
+  table{font-size:12px}
+  .regimeRow div{flex:1 1 100%}
+  /* action buttons full-width (not tabs / eye / bridge bar) */
+  .card button,.card .row>div[style*="display:flex"]{width:100%}
+  .card .row>div[style*="display:flex"]{flex-wrap:wrap}
+  .card .row>div[style*="display:flex"]>button{flex:1 1 0}
+  .tabs button{flex:1 1 auto}
+}
+@media (min-width:1025px){html body .wrap{max-width:1250px;margin:0 auto}}
 </style></head><body><div class="wrap">
 
 <h1>HW FBO — скринер и бэктест</h1>
@@ -2280,6 +2354,7 @@ function renderWatchSection(mkt,tbSel,kpiSel){
   let done=0,win=0;
   for(const t of w){
     const tr=document.createElement('tr'); tr.className='clickable';
+    tr.dataset.base=t.base||''; tr.dataset.t=String(t.t||''); tr.dataset.mkt=mkt;
     let res='<span class="muted">в работе</span>';
     if(t._res==='take'){res='<span class="take">тейк</span>';done++;win++;}
     else if(t._res==='stop'){res='<span class="stop">стоп −1R</span>';done++;}
