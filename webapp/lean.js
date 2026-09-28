@@ -31,7 +31,7 @@
   function ready() {
     return !!(document.getElementById('tabScan') && document.getElementById('tabBt')
       && document.getElementById('tabWatch') && document.getElementById('paneBt')
-      && typeof window.el === 'function' && typeof window.currentTplObj === 'function');
+      && typeof window.currentTplObj === 'function' && typeof window.applyTpl === 'function');
   }
 
   /* ---- patch currentTplObj / applyTpl: сохранить и восстановить _conc для bt ---- */
@@ -102,9 +102,47 @@
 
   function renameTemplatesTab() {
     var tabBt = document.getElementById('tabBt');
-    if (tabBt) tabBt.innerHTML = 'Шаблоны';
+    if (tabBt) {
+      // Оставляем <span id="btCnt"> (его обновляет исходный скрипт), только прячем счётчик
+      var first = tabBt.firstChild;
+      if (first && first.nodeType === 3) first.textContent = 'Шаблоны ';
+      var cnt = document.getElementById('btCnt');
+      if (cnt) cnt.style.display = 'none';
+    }
     var sect = document.querySelector('#paneBt .sect span');
     if (sect) sect.textContent = 'Все фильтры отбора — «авто» значит фильтр выключен';
+  }
+
+  /* Deep link из бота: ?tab=watch&focus=BASE&ft=<signal_ts_ms>&fm=crypto|ru —
+     открыть «Отслеживаю», найти строку сигнала, раскрыть её (графики, уровни, оценка). */
+  function focusFromLink() {
+    var q;
+    try { q = new URLSearchParams(location.search); } catch (e) { return; }
+    var base = q.get('focus');
+    if (!base) return;
+    var ft = parseInt(q.get('ft') || '0', 10);
+    var tbody = (q.get('fm') === 'ru') ? '#wtb_ru' : '#wtb_crypto';
+    var want = ft ? new Date(ft + 3600000).toLocaleString('ru-RU',
+      { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries++;
+      var rows = document.querySelectorAll(tbody + ' tr.clickable');
+      for (var i = 0; i < rows.length; i++) {
+        var cells = rows[i].children;
+        if (cells.length < 4) continue;
+        var tk = (cells[2].textContent || '').trim();
+        var tm = (cells[3].textContent || '').trim();
+        if (tk === base && (!want || tm === want)) {
+          clearInterval(timer);
+          rows[i].scrollIntoView({ block: 'center' });
+          rows[i].style.outline = '2px solid #4c9aff';
+          rows[i].click();
+          return;
+        }
+      }
+      if (tries > 40) clearInterval(timer);   // ~16 c: сервер мог не успеть отдать состояние
+    }, 400);
   }
 
   function selectDefaultTab() {
@@ -125,6 +163,7 @@
         hideOtherTabs();
         renameTemplatesTab();
         selectDefaultTab();
+        focusFromLink();
       }
     }, 50);
   }
