@@ -1848,3 +1848,26 @@ def count_signals_in_week(chat_id: int, market: str, week_start_ms: int) -> int:
             (chat_id, market, week_start_ms, week_start_ms + 7 * 86_400_000),
         ).fetchone()
     return int(row["n"]) if row else 0
+
+
+def was_sent_to_chat(chat_id: int, ticker: str, signal_ts: int, strategy: str, side: str) -> bool:
+    """Этот сигнал уже приходил этому чату? (по истории отправок)"""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        row = c.execute(
+            "SELECT 1 FROM signal_history WHERE chat_id=? AND ticker=? AND signal_ts=? "
+            "AND strategy=? AND side=? LIMIT 1",
+            (chat_id, ticker, int(signal_ts), strategy, side),
+        ).fetchone()
+    return row is not None
+
+
+def list_sent_signal_ts(chat_id: int, market: str, since_ms: int) -> list[int]:
+    """signal_ts отправленных чату сигналов рынка начиная с since_ms (для недельной квоты)."""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        rows = c.execute(
+            "SELECT signal_ts FROM signal_history WHERE chat_id=? AND market=? AND signal_ts>=?",
+            (chat_id, market, int(since_ms)),
+        ).fetchall()
+    return [int(r["signal_ts"]) for r in rows if r["signal_ts"] is not None]

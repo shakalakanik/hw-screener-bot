@@ -616,7 +616,7 @@ def evaluate_brk(
         vw = sorted(b.vol_quote for b in h1_upto[-25:-1] if b.vol_quote > 0)
         v_med = vw[len(vw) // 2] if vw else 0.0
 
-        for lv in pit_levels:
+        for li, lv in enumerate(pit_levels):
             side = _side_of(lv.kind)
 
             def beyond(b: Bar, _price=lv.price, _side=side) -> bool:
@@ -674,6 +674,8 @@ def evaluate_brk(
                 "ticker": ticker,
                 "version": VERSION,
                 "score": score,
+                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[i + 1: i + 1 + 168]],
+                "_ord": (i, li),
                 "feat": _card_feat(sf, "brk", side, bar.ts, lv.kind, 0, score),
                 "strategy": "brk",
                 "side": "LONG" if side == "long" else "SHORT",
@@ -795,7 +797,7 @@ def evaluate_fbo(
         if len(w) != lookback:
             continue
 
-        for lv in pit_levels:
+        for li, lv in enumerate(pit_levels):
             br_side = _side_of(lv.kind)
 
             def beyond_br(b: Bar, _price=lv.price, _side=br_side) -> bool:
@@ -910,6 +912,8 @@ def evaluate_fbo(
                 "ticker": ticker,
                 "version": VERSION,
                 "score": score,
+                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[hi_idx + 1: hi_idx + 1 + 168]],
+                "_ord": (hi_idx, li),
                 "feat": _card_feat(sf, "fbo", side, bar.ts, lv.kind, p, score),
                 "strategy": "fbo",
                 "side": "LONG" if side == "long" else "SHORT",
@@ -927,7 +931,7 @@ def evaluate_fbo(
                 "risk": risk,
                 "d1_bias": pit_bias,
                 "crosses": cross,
-                "prob": round(p, 4),
+                "prob": p,
                 "level_age_h": feat["level_age_h"],
                 "vol_mult": feat["vol_mult"],
                 "poke_atr": poke,

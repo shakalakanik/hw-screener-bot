@@ -2371,9 +2371,41 @@ async function refreshWatch(){
   }
   saveWatch(w); renderWatch();
 }
+// Проверка «оценка работает» — группирует закрытые сделки по диапазону оценки (0–1, 1–2, …
+// 9–10) и считает винрейт внутри каждого. Если оценка сигнала осмысленна, столбики должны
+// расти слева направо. Считается на РЕАЛЬНЫХ сделках из бэктеста — не подгоняется вручную.
+function scoreCalibration(res){
+  const buckets=Array.from({length:10},()=>({n:0,w:0}));
+  for(const t of res){
+    const b=Math.max(0,Math.min(9,Math.floor(t.score!=null?t.score:5)));
+    buckets[b].n++; if(t.o==='take') buckets[b].w++;
+  }
+  return buckets;
+}
+function renderCalibration(res){
+  const buckets=scoreCalibration(res), MINN=5;
+  let rows='';
+  for(let i=0;i<10;i++){
+    const b=buckets[i], ok=b.n>=MINN, wr=ok?b.w/b.n:null;
+    const color=wr==null?'var(--line)':wr>=0.4?'var(--green)':wr>=0.25?'var(--warn)':'var(--red)';
+    rows+=`<div style="display:flex;align-items:center;gap:8px;margin:3px 0">`+
+      `<span class="muted" style="width:44px;font-size:12px">${i}–${i+1}</span>`+
+      `<div style="flex:1;background:var(--line);height:14px;border-radius:3px;overflow:hidden">`+
+      `<div style="width:${wr!=null?Math.round(wr*100):0}%;height:100%;background:${color}"></div></div>`+
+      `<b style="width:44px;text-align:right;font-size:13px">${wr!=null?(wr*100).toFixed(0)+'%':'—'}</b>`+
+      `<span class="muted" style="width:64px;text-align:right;font-size:11px">n=${b.n}${ok?'':' (мало)'}</span></div>`;
+  }
+  return `<div class="note"><b>Калибровка: оценка → винрейт</b> — если оценка работает как должна, столбики растут слева направо. `+
+    `Диапазоны с n&lt;${MINN} серые — на них рано делать выводы.</div><div style="margin-top:6px">${rows}</div>`;
+}
 function renderBt(){
+  const btMetaEl=el('#btMeta');
+  if(btMetaEl) btMetaEl.textContent=BT.length?`Состав: ${BT.length} сделок · ${sigLabel(BT_META)}${BT_RANGE.a?' · период: '+btRangeLabel():''}${btLastWeeks()?' · считаются только последние '+btLastWeeks()+' нед.':''}`:'Бэктест пуст — отсканируй и добавь «В бэктест»';
+  if(BT_CAL_OPEN) renderBtCal();
   const f=readF('bt');
-  const rows=applyAll(byStrat(BT,stratOf('bt')),f);
+  let rows=applyAll(byStrat(btPeriodCut(BT),stratOf('bt')),f,false,undefined,brkF('bt'));
+  const minSc=parseFloat(el('#bt_minscore')?el('#bt_minscore').value:'');
+  if(!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
   const res=rows.filter(t=>t.o==='take'||t.o==='stop');
   const w=res.filter(t=>t.o==='take').length;
   const wr=res.length?w/res.length:0;
@@ -2387,6 +2419,21 @@ function renderBt(){
     `<div><label>Ожидание</label><b class="${exp>=0?'take':'stop'}">${closed.length?(exp>=0?'+':'')+exp.toFixed(2)+'R':'—'}</b></div>`+
     `<div><label>Сделок/нед</label><b>${span>0?(res.length/span*7).toFixed(1):'—'}</b></div>`+
     `<div><label>Итого</label><b class="${tot>=0?'take':'stop'}">${closed.length?(tot>=0?'+':'')+tot.toFixed(1)+'R':'—'}</b></div>`;
+  if(seqMode(f) && rows.length){
+    const R=rangeStatsBt(byStrat(btPeriodCut(BT),stratOf('bt')),f,brkF('bt'));
+    el('#btkpi').innerHTML+=
+      `<div style="flex-basis:100%;min-width:0;background:transparent;border:0;padding:4px 0 0">`+
+      `<div class="note"><b>Устойчивость</b> — ${RANGE_RUNS} прогонов, в каждом ~${Math.round(RANGE_DROP*100)}% монет заменено (как при дневных колебаниях оборота). `+
+      `Мин … <b>медиана</b> … макс:</div>`+
+      `<div class="kpi" style="margin:8px 0 0">`+
+      `<div><label>Винрейт: мин … медиана … макс</label><b style="font-size:17px">${fmtRange(R.wr,'wr')}</b></div>`+
+      `<div><label>Макс. стопов подряд</label><b style="font-size:17px">${fmtRange(R.ms,'ms')}</b></div>`+
+      `<div><label>Итог</label><b style="font-size:17px">${fmtRange(R.tot,'tot')}</b></div></div>`+
+      `<div class="note" style="margin-top:4px">При лимите позиций одно число ненадёжно: смотри на диапазон, особенно на худший край.</div></div>`;
+  }
+  el('#btCalib').innerHTML = res.length ? renderCalibration(res) : '';
+  BT_EQ_ROWS=rows; if(BT_EQ_OPEN) drawBtEquity();
+  if(typeof m5AutoCheck==='function') m5AutoCheck();
   const bm={};
   for(const t of closed){ const d=new Date(t.t); (bm[d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0')+'-'+String(d.getUTCDate()).padStart(2,'0')]??=[]).push(t); }
   let h='<h3>По дням</h3><div class="scroll"><table><thead><tr><th>День</th><th>Сделок</th><th>Тейк</th><th>Стоп</th><th>Винрейт</th><th>R</th></tr></thead><tbody>';
@@ -2402,11 +2449,11 @@ function renderBt(){
     const tr=document.createElement('tr'); tr.className='clickable';
     const oc=outcomeHtml(t.o);
     tr.innerHTML=`<td class="muted">▸</td><td>${t.base}</td>`+
-      `<td class="muted">${new Date(t.t).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</td>`+
+      `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
-      `<td>${fmt(t.lv)}</td><td>${pStr(t)}</td><td>${fmt(t.e)}</td>`+
+      `<td>${fmt(t.lv)}</td><td>${pStr(t)}</td><td title="через сколько минут после появления сигнала вход: 0 — сразу">${fmt(t.e)} <span class="muted">(${t.entryDelay||0})</span></td>`+
       `<td class="stop">${fmt(t.st)}</td><td class="take">${fmt(t.tk)}</td>`+
-      `<td class="muted">${(t.rp*100).toFixed(2)}%</td><td>${oc}</td>`;
+      `<td class="muted">${(t.rp*100).toFixed(2)}%</td><td>${scoreEl(t.score)}</td><td>${oc}${t.m5used?' <span class="muted" title="исход уточнён по 5-минуткам" style="font-size:11px">5м</span>':t.ambH?' <span class="muted" title="стоп и тейк в одном часе — не уточнено" style="font-size:11px">?</span>':''}</td>`;
     tr.addEventListener('click',()=>expandRow(tr,t,12));
     tb.appendChild(tr);
   }
@@ -2568,16 +2615,15 @@ async function runLocalBrowserScan(){
   const {ex,tk}=await pickSource(el('#src').value); EX=ex;
   const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
   const noStocks=MKT==='crypto'&&el('#noStocks').checked;
-  // Кандидаты — с запасом: оборот за последние сутки плавает, поэтому берём в 1.5 раза больше
-  // монет и с половинным порогом, а окончательный список ниже строится по СРЕДНЕМУ обороту за
-  // весь период. Так список не меняется день ото дня из-за колебаний суточного оборота.
+  // Сканируется ровно столько инструментов, сколько указано в «Инструментов» (топ по обороту),
+  // затем отсеиваются те, у кого средний дневной оборот за период ниже «Мин. оборота».
   let list=tk.filter(t=>t.turn>=minVol*0.5&&t.last>0);
   if(noStocks) list=list.filter(t=>!isStock(t.base));
-  list=list.sort((a,b)=>b.turn-a.turn).slice(0,Math.ceil(nInst*1.5));
+  list=list.sort((a,b)=>b.turn-a.turn).slice(0,nInst);
   const perCoin={};   // base -> {avg, sig}
   const winH=windowHours(), need=Math.min(9100,winH+280);
   const estMin=Math.ceil(list.length*(need/1000)*(ex.name==='OKX'?3:ex.name==='MOEX'?1.6:1)/40);
-  setStatus(`${ex.name}: анализирую ${list.length} кандидатов (из них будет отобрано до ${nInst} по среднему обороту), окно ${winH}ч — загрузка займёт примерно ${estMin} мин…`);
+  setStatus(`${ex.name}: сканирую ${list.length} инструментов, окно ${winH}ч — загрузка займёт примерно ${estMin} мин…`);
   const opt={noNight:MKT==='crypto'&&el('#noNight').checked,scanBars:winH+8};
   let raw=[],i=0,brk=0,rev=0;
   for(const it of list){
@@ -2587,7 +2633,7 @@ async function runLocalBrowserScan(){
       const d1n=Math.min(450, Math.ceil(winH/24)+60);
       const [d1,h1]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need)]);
       const sigC=scanSymbol(it.base,it.sym,d1,h1,opt).map(s=>(s.mkt=MKT,s));
-      const dW=lastClosed(d1).filter(b=>b.ts>=Date.now()-Math.max(winH,24)*3600000);
+      const d1cl=lastClosed(d1), dW0=d1cl.filter(b=>b.ts>=Date.now()-winH*3600000), dW=dW0.length>=3?dW0:d1cl.slice(-3);
       const avgT=dW.length?dW.reduce((a,b)=>a+(b.vol_quote||0),0)/dW.length:0;
       perCoin[it.base]={avg:avgT, sig:sigC};
       const h1c=lastClosed(h1),d1c=lastClosed(d1);
@@ -2610,7 +2656,7 @@ async function runLocalBrowserScan(){
   // окончательный список: по среднему дневному обороту за период
   const kept=Object.entries(perCoin).filter(([,v])=>v.avg>=minVol).sort((a,b)=>b[1].avg-a[1].avg).slice(0,nInst);
   raw=[]; for(const [,v] of kept) raw=raw.concat(v.sig);
-  UNIVERSE_NOTE=`список: ${kept.length} инструментов по среднему дневному обороту за период (из ${list.length} кандидатов)`;
+  UNIVERSE_NOTE=`просканировано ${list.length} инструментов, из них ${kept.length} с достаточным средним оборотом`;
   LAST=raw.sort((a,b)=>b.t-a.t);   // дедуп уже сделан внутри scanSymbol
   LAST_SCAN_META=scanSignature();
   const f=readF('sc');

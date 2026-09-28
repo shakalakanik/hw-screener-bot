@@ -274,24 +274,27 @@ async def scan_one_moex(
         ask = float(ticker.get("ask1Price", 0) or 0)
         vol24 = float(ticker.get("turnover24h", 0))
 
-        d1, h1, m5 = await asyncio.gather(
-            fetch_klines_moex_d1(client, symbol, 200),
-            fetch_klines_moex_h1(client, symbol, 400),
-            fetch_klines_moex_m5(client, symbol, 300),
+        # Глубина как в HTML: MOEX.kline(sym,'1d',ceil(win/24)+60) / ('1h', win+280)
+        d1, h1 = await asyncio.gather(
+            fetch_klines_moex_d1(client, symbol, -(-lookback_hours // 24) + 60),
+            fetch_klines_moex_h1(client, symbol, lookback_hours + 280),
         )
-        # H4: evaluate PIT строит уровни с пустым H4; синтез на всякий случай
-        h4 = _h1_to_h4(h1)
-
-        # vol в ₽; PARAMS.vol_usd_min=1e6 — при MOEX_MIN_TURN≥1e6 уже отфильтровано.
         result = evaluate(
-            symbol, last, bid, ask, d1, h4, h1, m5, vol24,
-            fbo_threshold=0.20, no_night=bool(no_night), lookback_hours=lookback_hours,
+            symbol, last, bid, ask, d1, [], h1, [], 0,
+            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lookback_hours + 8,
         )
-        cards = result.get("cards", [])
+        from html_pipeline import dedup_list
+        cards = dedup_list(result.get("cards", []))
         for c in cards:
             c["market"] = "ru"
             c["exchange"] = "moex"
-        return cards
+        # Средний дневной оборот за окно (HTML): закрытые D1 в окне, иначе последние 3 закрытых
+        closed = [b for b in d1 if b.confirmed]
+        now_ms = int(time.time() * 1000)
+        w0 = [b for b in closed if b.ts >= now_ms - int(lookback_hours) * 3_600_000]
+        w = w0 if len(w0) >= 3 else closed[-3:]
+        turn = (sum((b.vol_quote or 0) for b in w) / len(w)) if w else 0.0
+        return {"cards": cards, "turn": turn, "base": symbol}
     except Exception as e:
         logger.debug("scan_one_moex %s error: %s", symbol, e)
-        return []
+        return {"cards": [], "turn": 0.0, "base": symbol}
