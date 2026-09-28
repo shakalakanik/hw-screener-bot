@@ -407,6 +407,57 @@
     return order.map(function (k) { return map[k]; });
   }
 
+  /* ---- Watch tombstones: {tombs:{key:deletedAtMs}, cleared_at:ms} ----
+   * Explicit deletes / «Очистить всё» are recorded here and pushed to the server,
+   * so union-merge (server∪local∪bot) never resurrects removed rows. A row survives
+   * only if its `added` (fallback `t`) is newer than its tombstone and cleared_at. */
+  var STATE_LS_TOMB = 'hw_fbo_watch_tomb';
+  function readTomb() {
+    try {
+      var o = JSON.parse(localStorage.getItem(STATE_LS_TOMB) || '{}') || {};
+      return { tombs: (o.tombs && typeof o.tombs === 'object') ? o.tombs : {}, cleared_at: +o.cleared_at || 0 };
+    } catch (e) { return { tombs: {}, cleared_at: 0 }; }
+  }
+  function writeTomb(tb) {
+    try { localStorage.setItem(STATE_LS_TOMB, JSON.stringify(tb)); } catch (e) {}
+  }
+  function mergeTomb(a, b) {
+    var out = { tombs: {}, cleared_at: Math.max(+a.cleared_at || 0, +b.cleared_at || 0) };
+    var minTs = Date.now() - 90 * 86400000;  // same TTL as server (_TOMB_TTL_MS)
+    [a.tombs || {}, b.tombs || {}].forEach(function (t) {
+      Object.keys(t).forEach(function (k) {
+        var v = +t[k] || 0;
+        if (v > out.cleared_at && v >= minTs && v > (out.tombs[k] || 0)) out.tombs[k] = v;
+      });
+    });
+    return out;
+  }
+  function watchRowTime(x) { return +(x && (x.added || x.t)) || 0; }
+  function watchAlive(x, tb) {
+    var rt = watchRowTime(x);
+    if (tb.cleared_at && rt <= tb.cleared_at) return false;
+    var d = tb.tombs[watchRowKey(x)];
+    return !(d && rt <= d);
+  }
+  function filterAlive(arr, tb) {
+    return (arr || []).filter(function (x) { return x && typeof x === 'object' && watchAlive(x, tb); });
+  }
+  window.__hwWatchTomb = function (row) {
+    var k = watchRowKey(row);
+    if (!k) return;
+    var tb = readTomb();
+    tb.tombs[k] = Math.max(Date.now(), watchRowTime(row));
+    writeTomb(tb);
+  };
+  window.__hwWatchClearedAll = function () {
+    var tb = readTomb();
+    var mx = Date.now();
+    readLocalWatch().forEach(function (x) { mx = Math.max(mx, watchRowTime(x)); });
+    tb.cleared_at = mx;
+    tb.tombs = {};
+    writeTomb(tb);
+  };
+
   function readLocalWatch() {
     try { return JSON.parse(localStorage.getItem(STATE_LS_WATCH) || '[]'); } catch (e) { return []; }
   }
@@ -467,7 +518,8 @@
       'window.__hwOnWatchSave = function (w) {',
       '  if (typeof window.__hwScheduleStatePush === "function") window.__hwScheduleStatePush({ from: "watch" });',
       '};',
-      'window.__hwMarkClearWatch = function () { window.__hwPendingClearWatch = true; };',
+      'window.__hwMarkClearWatch = function () { window.__hwPendingClearWatch = true; try { if (window.__hwWatchClearedAll) window.__hwWatchClearedAll(); } catch (e) {} };',
+      'window.__hwCurMkt = function () { return (typeof MKT === "string" && MKT) ? MKT : "crypto"; };',
       'window.__hwMarkClearBacktest = function () { window.__hwPendingClearBacktest = true; };'
     ].join('\n');
     (document.head || document.documentElement).appendChild(s);
@@ -485,23 +537,25 @@
       }
       ensurePageHelpers();
 
-      var serverWatch = Array.isArray(data.watch) ? data.watch : [];
-      var localWatch = readLocalWatch();
       var cleared = data.cleared || {};
-      // First deploy / empty server: keep local cache and seed server (do not wipe local).
-      // If user explicitly cleared on server (tombstone), respect empty.
-      // Always union server∪local so eye-clicks during hydrate / Telegram 👁 + HTML are not lost.
-      if (cleared.watch && !serverWatch.length) {
-        writeLocalWatch([]);
-      } else if (!serverWatch.length && localWatch.length) {
-        data = Object.assign({}, data, { watch: localWatch });
-        needSeed = true;
-      } else {
-        var merged = mergeWatchLists(serverWatch, localWatch);
-        writeLocalWatch(merged);
-        data = Object.assign({}, data, { watch: merged });
-        if (merged.length > serverWatch.length) needSeed = true;
+      // Tombstones: server ∪ local; both lists filtered so deletes/clears never come back.
+      var localTb = readTomb();
+      var serverTb = { tombs: data.watch_tombstones || {}, cleared_at: +data.watch_cleared_at || 0 };
+      var tb = mergeTomb(localTb, serverTb);
+      writeTomb(tb);
+      if (tb.cleared_at > serverTb.cleared_at) needSeed = true;
+      Object.keys(tb.tombs).forEach(function (k) { if ((serverTb.tombs[k] || 0) < tb.tombs[k]) needSeed = true; });
+      var serverWatch = filterAlive(Array.isArray(data.watch) ? data.watch : [], tb);
+      var localWatch = filterAlive(readLocalWatch(), tb);
+      // Legacy server tombstone (pre-20260928c): cleared & empty with no cleared_at → respect empty.
+      if (cleared.watch && !serverWatch.length && !serverTb.cleared_at && !(Array.isArray(data.watch) && data.watch.length)) {
+        localWatch = [];
       }
+      // Union server∪local so eye-clicks during hydrate / Telegram 👁 + HTML are not lost.
+      var merged = mergeWatchLists(serverWatch, localWatch);
+      writeLocalWatch(merged);
+      data = Object.assign({}, data, { watch: merged });
+      if (merged.length > serverWatch.length) needSeed = true;
 
       // Backtest / signals: if server empty & not cleared, keep page memory / seed after apply probe
       var snap = null;
@@ -549,9 +603,19 @@
   function scheduleStatePush() {
     if (!_stateHydrated || _hydrating) return;
     clearTimeout(_statePushTimer);
-    _statePushTimer = setTimeout(pushStateToServer, 700);
+    _statePushTimer = setTimeout(function () { _statePushTimer = null; pushStateToServer(); }, 700);
   }
   window.__hwScheduleStatePush = scheduleStatePush;
+  function flushStatePush() {
+    if (!_statePushTimer) return;
+    clearTimeout(_statePushTimer);
+    _statePushTimer = null;
+    try { pushStateToServer(); } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushStatePush();
+  });
+  window.addEventListener('pagehide', flushStatePush);
 
   async function pushStateToServer() {
     if (!_stateHydrated || _hydrating || _stateSyncing) return;
@@ -565,8 +629,12 @@
       if (window.__hwPendingClearWatch) { _pendingClear.watch = true; window.__hwPendingClearWatch = false; }
       if (window.__hwPendingClearBacktest) { _pendingClear.backtest = true; window.__hwPendingClearBacktest = false; }
 
+      var tbP = readTomb();
       var body = {
-        watch: readLocalWatch(),
+        watch: filterAlive(readLocalWatch(), tbP),
+        watch_deleted: tbP.tombs,
+        watch_cleared_at: tbP.cleared_at,
+        watch_merge: true,
         backtest: snap.backtest,
         signals: snap.signals,
         updated_at: {
@@ -590,15 +658,19 @@
         if (data.rejected.indexOf('watch') >= 0 && Array.isArray(data.watch)) {
           _hydrating = true;
           try {
-            writeLocalWatch(data.watch);
+            var rw = filterAlive(data.watch, readTomb());
+            writeLocalWatch(rw);
             if (typeof window.__hwApplyMiniappState === 'function') {
-              window.__hwApplyMiniappState({ watch: data.watch, backtest: data.backtest, signals: data.signals });
+              window.__hwApplyMiniappState({ watch: rw, backtest: data.backtest, signals: data.signals });
             }
           } finally { _hydrating = false; }
         }
         setStatus('сервер: защита от пустой перезаписи');
       } else {
         setStatus('отслеживаемые / бэктест сохранены в Telegram-аккаунте');
+      }
+      if (data && data.watch_tombstones) {
+        writeTomb(mergeTomb(readTomb(), { tombs: data.watch_tombstones, cleared_at: +data.watch_cleared_at || 0 }));
       }
     } catch (e) {
       setStatus('офлайн: watch/бэктест локально (' + (e.message || e) + ')');
@@ -658,6 +730,10 @@
 
     var _origSave = window.saveWatch;
     window.saveWatch = function (w) {
+      var tbS = readTomb();
+      if (Array.isArray(w) && (tbS.cleared_at || Object.keys(tbS.tombs).length)) {
+        w = filterAlive(w, tbS);
+      }
       _origSave(w);
       if (_hydrating) {
         _dirtyDuringHydrate = true;
@@ -665,6 +741,23 @@
       }
       if (!_hydrating) scheduleStatePush();
     };
+
+    // 👁 un-watch (row eye / scan eye) → tombstone, so server∪local merge can't resurrect it.
+    // (Stale async saves, e.g. refreshWatch writing back its old snapshot, are dropped by the
+    // tombstone filter in saveWatch above.)
+    if (typeof window.toggleWatch === 'function' && !window.toggleWatch.__hwTomb) {
+      var _origToggle = window.toggleWatch;
+      window.toggleWatch = function (t) {
+        try {
+          var m = (t && t.mkt) || (typeof window.__hwCurMkt === 'function' ? window.__hwCurMkt() : null) || 'crypto';
+          readLocalWatch().forEach(function (x) {
+            if (x && t && x.base === t.base && x.t === t.t && (x.mkt || 'crypto') === m) window.__hwWatchTomb(x);
+          });
+        } catch (eT) {}
+        return _origToggle.apply(this, arguments);
+      };
+      window.toggleWatch.__hwTomb = true;
+    }
 
     if (typeof window.renderBt === 'function') {
       var _origBt = window.renderBt;
