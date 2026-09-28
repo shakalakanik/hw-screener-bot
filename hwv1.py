@@ -374,6 +374,194 @@ def _pit_day_state(d1c: list[Bar], h1c: list[Bar], bar: Bar) -> tuple[float, lis
     return atr_d, build_levels(cut, []), d1_bias(cut)
 
 
+
+# ═════════════ признаки для оценки сигнала 0–10 (порт из HW_FBO_scanner_6.html) ═════════════
+
+_SCORE_PATH = os.path.join(os.path.dirname(__file__), "score_model.json")
+_SCORE = None
+
+
+def _load_score_model() -> dict:
+    global _SCORE
+    if _SCORE is None:
+        with open(_SCORE_PATH, "r", encoding="utf-8") as f:
+            _SCORE = json.load(f)
+    return _SCORE
+
+
+def _free_zone(h1c: list, formed_ts: int, br_side: str, level: float) -> float:
+    before = [b for b in h1c if b.ts < formed_ts][-720:]
+    for k in range(len(before) - 1, -1, -1):
+        c = before[k].c
+        if (c > level) if br_side == "long" else (c < level):
+            return (formed_ts - before[k].ts) / 3_600_000
+    return (formed_ts - before[0].ts) / 3_600_000 if before else 9999.0
+
+
+def _wall_dist_r(levels: list, cur, side: str, px: float, risk: float) -> float:
+    if risk <= 0:
+        return 99.0
+    best = None
+    for L in levels:
+        if L.price == cur.price:
+            continue
+        beyond = (L.price > px) if side == "long" else (L.price < px)
+        if not beyond:
+            continue
+        d = abs(L.price - px)
+        if best is None or d < best:
+            best = d
+    return 99.0 if best is None else best / risk
+
+
+def _day_pos(h1c: list, i: int, px: float) -> float:
+    day_start = (h1c[i].ts // 86_400_000) * 86_400_000
+    td = []
+    k = i
+    while k >= 0 and h1c[k].ts >= day_start:
+        td.append(h1c[k])
+        k -= 1
+    if not td:
+        return 0.5
+    hi, lo = max(b.h for b in td), min(b.l for b in td)
+    return (px - lo) / (hi - lo) if hi > lo else 0.5
+
+
+def _vol_ret_brk(win: list, bar, br_side: str, level: float) -> float:
+    br = [b for b in win if ((b.c > level) if br_side == "long" else (b.c < level))]
+    if not br:
+        return 1.0
+    mx = max((b.vol_quote or 0) for b in br)
+    return (bar.vol_quote or 0) / mx if mx > 0 else 1.0
+
+
+def _ema_side(h1cut: list, side: str) -> bool:
+    n = 50
+    w = h1cut[-n - 1:-1]
+    if len(w) < n:
+        return True
+    k = 2 / (n + 1)
+    e = w[0].c
+    for b in w:
+        e = b.c * k + e * (1 - k)
+    px = h1cut[-1].c
+    return px >= e if side == "long" else px <= e
+
+
+def _approach_atr(h1cut: list, a_h1: float) -> float:
+    w = h1cut[-5:-1]
+    if len(w) < 4 or a_h1 <= 0:
+        return 0.0
+    return (max(b.h for b in w) - min(b.l for b in w)) / a_h1
+
+
+def _round_dist(px: float) -> float:
+    if px <= 0:
+        return 0.5
+    mag = 10 ** math.floor(math.log10(px))
+    step = mag / 2
+    x = px / step
+    return abs(x - math.floor(x + 0.5))
+
+
+def _green_ratio(h1cut: list) -> float:
+    w = h1cut[-25:-1]
+    if not w:
+        return 0.5
+    return sum(1 for b in w if b.c >= b.o) / len(w)
+
+
+def _d1_streak(d1c: list, ts: int) -> int:
+    d = [b for b in d1c if b.ts + 86_400_000 <= ts]
+    if len(d) < 2:
+        return 0
+    up = d[-1].c >= d[-1].o
+    s = 0
+    for b in reversed(d):
+        if (b.c >= b.o) == up:
+            s += 1
+        else:
+            break
+    return s if up else -s
+
+
+def _extra_feats(h1c, h1_upto, i, bar, lv, levels, wall_side, wall_risk, ema_side,
+                 wick_side_long, br_side, win, pit_atr_d, a_h1, d1c) -> dict:
+    rng = bar.h - bar.l
+    if rng > 0:
+        body = abs(bar.c - bar.o) / rng
+        if wick_side_long:
+            wick = (min(bar.o, bar.c) - bar.l) / rng
+        else:
+            wick = (bar.h - max(bar.o, bar.c)) / rng
+    else:
+        body = wick = 0.0
+    return {
+        "free_zone_h": _free_zone(h1c, lv.formed_ts, br_side, lv.price),
+        "wall_r": _wall_dist_r(levels, lv, wall_side, bar.c, wall_risk),
+        "day_pos": _day_pos(h1c, i, bar.c),
+        "body_ratio": body,
+        "wick_ratio": wick,
+        "ema_ok": 1 if _ema_side(h1_upto, ema_side) else 0,
+        "approach_atr": _approach_atr(h1_upto, a_h1),
+        "atr_ratio": (a_h1 / pit_atr_d) if pit_atr_d > 0 else 0.0,
+        "lvl_density": sum(1 for L in levels if abs(L.price - lv.price) <= pit_atr_d),
+        "round_dist": _round_dist(lv.price),
+        "green_ratio": _green_ratio(h1_upto),
+        "d1_streak": _d1_streak(d1c, bar.ts),
+    }
+
+
+def signal_score(feat: dict, strategy: str) -> float:
+    """Оценка сигнала 0–10 — 1:1 с signalScore() в HW_FBO_scanner_6.html.
+
+    Логистическая регрессия по 32 признакам + флаг типа (отдельная для ЛП и для пробоя),
+    затем интерполяция по ступеням PAV (реальный винрейт ступени) и нормировка на 0–10.
+    """
+    sm = _load_score_model()
+    m = sm["B"] if strategy == "brk" else sm["F"]
+    x = []
+    for k in sm["feats"]:
+        try:
+            v = float(feat.get(k, 0))
+        except (TypeError, ValueError):
+            v = 0.0
+        x.append(v if math.isfinite(v) else 0.0)
+    x.append(1.0 if strategy == "brk" else 0.0)
+    z = m["b0"]
+    for j in range(len(x)):
+        sd = m["sd"][j] or 1
+        z += m["w"][j] * max(-3.0, min(3.0, (x[j] - m["mu"][j]) / sd))
+    p = 1.0 / (1.0 + math.exp(-z))
+    st = m["st"]
+    if p <= st[0]["c"]:
+        v = st[0]["v"]
+    elif p >= st[-1]["c"]:
+        v = st[-1]["v"]
+    else:
+        v = st[-1]["v"]
+        for j in range(1, len(st)):
+            if p <= st[j]["c"]:
+                a, b = st[j - 1], st[j]
+                v = a["v"] + (b["v"] - a["v"]) * (p - a["c"]) / ((b["c"] - a["c"]) or 1)
+                break
+    frac = max(0.0, min(1.0, (v - sm["vmin"]) / (sm["vmax"] - sm["vmin"])))
+    return math.floor(frac * 100 + 0.5) / 10
+
+
+
+def _card_feat(sf: dict, strategy: str, side: str, ts: int, kind: str, p, score: float) -> dict:
+    """Сырые признаки сигнала для фильтров шаблона (порт passes() из HTML) и оценки."""
+    import time as _t
+    d = dict(sf)
+    d.update({
+        "type": strategy, "d": 1 if side == "long" else 0,
+        "dow": (_t.gmtime(ts / 1000).tm_wday + 1) % 7,   # JS getUTCDay: вс=0
+        "p": p if p is not None else 0, "k": kind, "t": ts, "_sc": score,
+    })
+    return d
+
+
 def evaluate_brk(
     ticker: str,
     d1c: list[Bar],
@@ -459,9 +647,34 @@ def evaluate_brk(
                 continue
             stop, take, risk = rst
 
+            win8b = h1_upto[-9:-1]
+            min_risk_b = max(0.10 * pit_atr_d, 0.02 * bar.c)
+            sf = {
+                "strength": lv.strength, "crosses": cross_b,
+                "touched8": 1 if (len(win8b) >= 8 and min(b.l for b in win8b) <= lv.price <= max(b.h for b in win8b)) else 0,
+                "acc": 1,
+                "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
+                "vol_contraction": _vol_contraction(h1_upto),
+                "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
+                "overshoot_atr": abs(bar.c - lv.price) / a_h1,
+                "dist_atr": abs(bar.c - lv.price) / a_h1,
+                "bias_ok": 1, "p": 0,
+                "brk_bars": 1, "vol_ret_brk": 1,
+                "v6_fresh": 1, "v6_poke": 0, "v6_covers": 1,
+                "v6_preAcc": 0, "v6_smooth": 0, "v6_d1Against": 0,
+                "atrD_pct": pit_atr_d / bar.c,
+            }
+            sf.update(_extra_feats(
+                h1c, h1_upto, i, bar, lv, pit_levels, side, min_risk_b, side,
+                side == "long", side, [], pit_atr_d, a_h1, d1c,
+            ))
+            score = signal_score(sf, "brk")
+
             cards.append({
                 "ticker": ticker,
                 "version": VERSION,
+                "score": score,
+                "feat": _card_feat(sf, "brk", side, bar.ts, lv.kind, 0, score),
                 "strategy": "brk",
                 "side": "LONG" if side == "long" else "SHORT",
                 "status": "SIGNAL",
@@ -678,9 +891,26 @@ def evaluate_fbo(
                 continue
             stop, take, risk = rst
 
+            sf = dict(feat)
+            sf.update({
+                "p": p,
+                "brk_bars": sum(1 for b in w if beyond_br(b)),
+                "vol_ret_brk": _vol_ret_brk(w, bar, br_side, lv.price),
+                "v6_fresh": 1, "v6_poke": poke, "v6_covers": 1 if covers else 0,
+                "v6_preAcc": pre_acc, "v6_smooth": smooth, "v6_d1Against": d1_against,
+            })
+            sf.update(_extra_feats(
+                h1c, h1_upto, hi_idx, bar, lv, pit_levels, side,
+                max(0.10 * pit_atr_d, 0.02 * bar.c), side,
+                side == "long", br_side, w, pit_atr_d, a_h1, d1c,
+            ))
+            score = signal_score(sf, "fbo")
+
             cards.append({
                 "ticker": ticker,
                 "version": VERSION,
+                "score": score,
+                "feat": _card_feat(sf, "fbo", side, bar.ts, lv.kind, p, score),
                 "strategy": "fbo",
                 "side": "LONG" if side == "long" else "SHORT",
                 "status": "SIGNAL",

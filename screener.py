@@ -282,6 +282,217 @@ async def scan_one(
         return []
 
 
+# ── Точный порт фильтров шаблона из HTML (readF + passes + recompute) ───────────
+_F_DEF = {
+    "thr": 0.20, "stop": 10.0, "tgt": 3.0, "str": 0.0, "cross": 99.0, "touch": None, "acc": None,
+    "dist": 99.0, "over": 0.0, "vc": None, "vol": 0.0, "bias": None, "side": None, "cap": 3,
+    "age": 0.0, "kind": None, "maxrisk": 99.0, "hours": "9-23", "daycap": 99, "streak": 0,
+    "pause": 24, "free": 0.0, "wall": 0.0, "daypos": None, "body": 0.0, "wick": 0.0,
+    "brkbars": None, "volret": 0.0, "dow": None, "ema": None, "appr": None, "atrr": None,
+    "dens": 99.0, "round": None, "green": None, "streakd": 0.0, "atrd": None, "minn": 8,
+    "cov": None, "preacc": None, "smooth": None, "d1ag": None, "poke": 0.0, "msc": 0.0,
+}
+_F_STR = ("kind", "hours", "daypos", "dow", "appr", "atrr", "round", "green", "atrd")
+_F_INT = ("touch", "acc", "bias", "side", "ema", "brkbars", "cov", "preacc", "smooth", "d1ag")
+MAXRISK = 0.20  # как MAXRISK в HTML: риск > 20% цены — сделка отбрасывается
+
+
+def _f_from_template(raw: dict) -> dict:
+    """Как readF() в HTML: отсутствующее/«auto» значение → DEF."""
+    f = {}
+    for k, dv in _F_DEF.items():
+        v = raw.get(k, "auto") if isinstance(raw, dict) else "auto"
+        if v is None or v == "auto":
+            f[k] = dv
+        elif k in _F_STR:
+            f[k] = str(v)
+        elif k in _F_INT:
+            try:
+                f[k] = float(v)
+            except (TypeError, ValueError):
+                f[k] = dv
+        else:
+            try:
+                f[k] = float(v)
+            except (TypeError, ValueError):
+                f[k] = dv
+    return f
+
+
+def _sfx(v: str, x: float, kind: str) -> bool:
+    """Селекторы вида s0.04 / f0.08: s — меньше, f — больше."""
+    try:
+        lim = float(v[1:])
+    except ValueError:
+        return True
+    if v[0] == "s":
+        return x < lim
+    if v[0] == "f":
+        return x > lim
+    return True
+
+
+def passes_html(s: dict, f: dict) -> bool:
+    """1:1 с passes(s,f) из HW_FBO_scanner_6.html. s — card['feat'], f — из _f_from_template."""
+    is_b = s.get("type") == "brk"
+    if not is_b and s.get("p", 0) < f["thr"]:
+        return False
+    if f["msc"] > 0 and s.get("_sc", 0) < f["msc"]:
+        return False
+    if s["strength"] < f["str"]:
+        return False
+    if s["crosses"] > f["cross"]:
+        return False
+    if f["touch"] is not None and s["touched8"] != f["touch"]:
+        return False
+    if f["acc"] is not None and s["acc"] != f["acc"]:
+        return False
+    if s["dist_atr"] > f["dist"]:
+        return False
+    if not is_b and s["overshoot_atr"] < f["over"]:
+        return False
+    if f["vc"] is not None:
+        if f["vc"] >= 99:
+            if s["vol_contraction"] <= 1.0:
+                return False
+        elif s["vol_contraction"] >= f["vc"]:
+            return False
+    if s["vol_mult"] < f["vol"]:
+        return False
+    if f["bias"] is not None and s["bias_ok"] != f["bias"]:
+        return False
+    if f["side"] is not None and s["d"] != f["side"]:
+        return False
+    if s["level_age_h"] < f["age"]:
+        return False
+    if f["kind"]:
+        k = s.get("k") or ""
+        if f["kind"] == "swing" and "swing" not in k:
+            return False
+        if f["kind"] == "5d" and "5d" not in k:
+            return False
+        if f["kind"] == "prev" and "prev" not in k:
+            return False
+    if f["hours"] and f["hours"] != "0-24":
+        try:
+            a, b = (int(x) for x in f["hours"].split("-"))
+            hl = (time.gmtime(s["t"] / 1000).tm_hour + 3) % 24
+            if not (a <= hl < b):
+                return False
+        except ValueError:
+            pass
+    if s["free_zone_h"] < f["free"]:
+        return False
+    if f["wall"] and s["wall_r"] < f["wall"]:
+        return False
+    if f["daypos"]:
+        d = s["day_pos"]
+        if f["daypos"] == "lo" and not d < 0.3:
+            return False
+        if f["daypos"] == "mid" and not (0.3 <= d <= 0.7):
+            return False
+        if f["daypos"] == "hi" and not d > 0.7:
+            return False
+        if f["daypos"] == "edge" and not (d < 0.25 or d > 0.75):
+            return False
+    if s["body_ratio"] < f["body"]:
+        return False
+    if s["wick_ratio"] < f["wick"]:
+        return False
+    if not is_b and f["brkbars"] is not None:
+        bb = s["brk_bars"]
+        if f["brkbars"] == 4:
+            if bb < 4:
+                return False
+        elif f["brkbars"] == 1:
+            if bb != 1:
+                return False
+        elif bb > f["brkbars"]:
+            return False
+    if not is_b and s["vol_ret_brk"] < f["volret"]:
+        return False
+    if f["dow"]:
+        d = s["dow"]
+        if f["dow"] == "work" and d in (0, 6):
+            return False
+        if f["dow"] == "mid" and not (2 <= d <= 4):
+            return False
+        if f["dow"] == "weekend" and d not in (0, 6):
+            return False
+    if f["ema"] is not None and s["ema_ok"] != f["ema"]:
+        return False
+    if f["appr"] and not _sfx(f["appr"], s["approach_atr"], "appr"):
+        return False
+    if f["atrr"] and not _sfx(f["atrr"], s["atr_ratio"], "atrr"):
+        return False
+    if s["lvl_density"] > f["dens"]:
+        return False
+    if f["round"]:
+        if f["round"] == "far":
+            if s["round_dist"] <= 0.20:
+                return False
+        else:
+            try:
+                if s["round_dist"] > float(f["round"]):
+                    return False
+            except ValueError:
+                pass
+    if f["green"]:
+        g = s["green_ratio"]
+        with_side = g > 0.55 if s["d"] == 1 else g < 0.45
+        if f["green"] == "with" and not with_side:
+            return False
+        if f["green"] == "against" and with_side:
+            return False
+        if f["green"] == "flat" and not (0.4 <= g <= 0.6):
+            return False
+    if f["streakd"] and abs(s["d1_streak"]) < f["streakd"]:
+        return False
+    if not is_b:
+        if f["cov"] is not None and s["v6_covers"] != f["cov"]:
+            return False
+        if f["preacc"] is not None and s["v6_preAcc"] != f["preacc"]:
+            return False
+        if f["smooth"] is not None and s["v6_smooth"] != f["smooth"]:
+            return False
+        if f["d1ag"] is not None and s["v6_d1Against"] != f["d1ag"]:
+            return False
+        if f["poke"] and (s.get("v6_poke") or 0) < f["poke"]:
+            return False
+    if f["atrd"]:
+        a = s["atrD_pct"]
+        if f["atrd"] == "m" and not (0.04 <= a <= 0.08):
+            return False
+        if f["atrd"][0] == "s" and not a < float(f["atrd"][1:]):
+            return False
+        if f["atrd"][0] == "f" and not a > float(f["atrd"][1:]):
+            return False
+    return True
+
+
+def template_risk(card: dict, f: dict) -> tuple[float, float, float] | None:
+    """recompute() из HTML: риск = max(stop% * ATR_D, 2% цены); тейк = tgt*R. → (stop, take, risk)."""
+    e = float(card["last"])
+    atr_d = float(card.get("atr_d") or 0)
+    risk = max((f["stop"] / 100.0) * atr_d, 0.02 * e)
+    if risk <= 0 or risk / e > MAXRISK:
+        return None
+    long_ = card["side"] == "LONG"
+    stop = e - risk if long_ else e + risk
+    take = e + f["tgt"] * risk if long_ else e - f["tgt"] * risk
+    return stop, take, risk
+
+
+def retarget_card(card: dict, raw_filters: dict) -> dict:
+    """Пересчитать стоп/тейк карточки под настройки «Стоп % ATR» шаблона."""
+    f = _f_from_template(raw_filters)
+    r = template_risk(card, f)
+    if r is None:
+        return card
+    stop, take, risk = r
+    return {**card, "stop": stop, "take": take, "risk": risk}
+
+
 def _matches_single(card: dict, f: dict) -> bool:
     """
     Проверить карточку против одного набора фильтров.
@@ -308,6 +519,17 @@ def _matches_single(card: dict, f: dict) -> bool:
             return False
         if card["side"] == "SHORT" and bias != "down":
             return False
+
+    # ── точный порт passes() из HTML, если у карточки есть сырые признаки ──
+    _legacy = any(k in f for k in ("sides", "strength_min", "dist_atr_max", "bias_filter"))
+    if card.get("feat") is not None and not _legacy:
+        f2 = _f_from_template(f)
+        rr = template_risk(card, f2)
+        if rr is None:
+            return False
+        if (rr[2] / float(card["last"])) * 100 > f2["maxrisk"]:
+            return False
+        return passes_html(card["feat"], f2)
 
     # ── реальные ключи шаблона HTML (FIDS) ──
     # FBO thr: как HTML passes()+DEF — если thr отсутствует / auto / None → 0.20 (DEF.thr),
@@ -431,6 +653,7 @@ def _template_conc_limit(f: dict, tpl_name: str) -> int:
 
 def concurrency_allows(chat_id: int, tpl_name: str, f: dict) -> bool:
     """True если можно слать новый сигнал по этому шаблону (лимит «Одновременно в рынке» не превышен)."""
+    _remember_templates(chat_id, f)
     limit = _template_conc_limit(f, tpl_name)
     if limit <= 0:
         return True
@@ -463,9 +686,10 @@ def _apply_coin_limit(pending: list[dict], win_h: int = COIN_WINDOW_H) -> list[d
             best[key] = item
             continue
         p_ts = int(prev["card"].get("signal_ts") or 0)
-        p_prob = prev["card"].get("prob") or 0
-        c_prob = card.get("prob") or 0
-        # первый по времени; при равном ts — выше prob, затем base
+        # приоритет как prioOf() в HTML — оценка 0–10, затем вероятность модели
+        p_prob = (prev["card"].get("score") or 0, prev["card"].get("prob") or 0)
+        c_prob = (card.get("score") or 0, card.get("prob") or 0)
+        # первый по времени; при равном ts — выше оценка, затем base
         if ts < p_ts or (ts == p_ts and (c_prob > p_prob or (c_prob == p_prob and base < _card_base(prev["card"])))):
             best[key] = item
     keep = set(id(v) for v in best.values())
@@ -487,6 +711,7 @@ def _cap_cluster(pending: list[dict], cap: int = CAP_CLUSTER) -> list[dict]:
     for group in by.values():
         group.sort(
             key=lambda it: (
+                -(it["card"].get("score") or 0),
                 -(it["card"].get("prob") or 0),
                 _card_base(it["card"]),
             )
@@ -511,6 +736,7 @@ def _best_only_rank(card: dict) -> tuple:
     if dist is None:
         dist = 1e9
     return (
+        float(card.get("score") or 0),
         float(card.get("prob") or 0),
         int(card.get("strength") or 0),
         -float(dist),
@@ -587,6 +813,82 @@ def _apply_best_only(
             "best_only: pending %d → %d (правил чат+рынок: %d)",
             len(pending), len(out), len(keep_for),
         )
+    return out
+
+
+def _week_start_ms(ts_ms: int) -> int:
+    """Понедельник 00:00 UTC недели, в которую попал сигнал."""
+    d = ts_ms // 86_400_000
+    wd = (d + 3) % 7          # 1970-01-01 — четверг → понедельник = 0
+    return (d - wd) * 86_400_000
+
+
+def _apply_week_cap(pending: list[dict]) -> list[dict]:
+    """«N лучших за неделю» (как sc_weekmax в HTML): для каждой пары чат+рынок+неделя
+    отправляем не больше N сигналов, лучшие по оценке; уже отправленные за неделю
+    уменьшают остаток. N задаётся на чат (/weekcap), 0 = без лимита."""
+    if not pending:
+        return pending
+    chats: set[int] = set()
+    for item in pending:
+        for cl in (item.get("by_template") or {}).values():
+            chats.update(cl)
+    caps = {cid: storage.get_week_cap(cid) for cid in chats}
+    groups: dict[tuple[int, str, int], list[int]] = {}
+    for idx, item in enumerate(pending):
+        card = item["card"]
+        market = card.get("market", "crypto")
+        ws = _week_start_ms(int(card.get("signal_ts") or 0))
+        cin: set[int] = set()
+        for cl in (item.get("by_template") or {}).values():
+            cin.update(cl)
+        for cid in cin:
+            if caps.get(cid, 0) > 0:
+                groups.setdefault((cid, market, ws), []).append(idx)
+    keep: dict[tuple[int, str, int], set[int]] = {}
+    for (cid, market, ws), idxs in groups.items():
+        remaining = caps[cid] - storage.count_signals_in_week(cid, market, ws)
+        if remaining <= 0:
+            keep[(cid, market, ws)] = set()
+        else:
+            best = sorted(idxs, key=lambda i: _best_only_rank(pending[i]["card"]), reverse=True)[:remaining]
+            keep[(cid, market, ws)] = set(best)
+    if not keep:
+        return pending
+    out: list[dict] = []
+    for idx, item in enumerate(pending):
+        card = item["card"]
+        market = card.get("market", "crypto")
+        ws = _week_start_ms(int(card.get("signal_ts") or 0))
+        new_by: dict = {}
+        for tpl, cl in (item.get("by_template") or {}).items():
+            kept = [cid for cid in cl
+                    if (cid, market, ws) not in keep or idx in keep[(cid, market, ws)]]
+            if kept:
+                new_by[tpl] = kept
+        if new_by:
+            out.append({"card": card, "by_template": new_by})
+    if len(out) != len(pending):
+        logger.info("week_cap: pending %d → %d", len(pending), len(out))
+    return out
+
+
+_TPL_FILTERS: dict[tuple[int, str], dict] = {}
+
+
+def _remember_templates(chat_id: int, f: dict):
+    for tpl in f.get("_multi", []):
+        _TPL_FILTERS[(chat_id, tpl.get("_name", ""))] = tpl.get("filters", {})
+
+
+def _card_for_template(card: dict, tpl_name: str, chat_ids: list[int]) -> dict:
+    """Карточка с матч-шаблоном и стопом/тейком, пересчитанными под «Стоп % ATR» шаблона."""
+    out = {**card, "matched_template": tpl_name}
+    for cid in chat_ids:
+        raw = _TPL_FILTERS.get((cid, tpl_name))
+        if raw is not None:
+            out = {**retarget_card(out, raw), "matched_template": tpl_name}
+            break
     return out
 
 
@@ -742,6 +1044,7 @@ async def run_scan(
 
     if chat_best_only is not None:
         pending = _apply_best_only(pending, chat_best_only)
+    pending = _apply_week_cap(pending)
 
     logger.info(
         "Скан фильтры: age=%d wm=%d dup=%d → pending=%d",
@@ -769,7 +1072,7 @@ async def run_scan(
             continue
         sent_any = False
         for tpl_name, chat_ids in by_template.items():
-            card_out = {**card, "matched_template": tpl_name}
+            card_out = _card_for_template(card, tpl_name, chat_ids)
             await on_signal(card_out, chat_ids)
             sent_any = True
             sent_count += 1
@@ -986,6 +1289,7 @@ async def run_manual_scan(
 
     if chat_best_only is not None:
         pending = _apply_best_only(pending, chat_best_only)
+    pending = _apply_week_cap(pending)
 
     logger.info(
         "Manual scan filters: age=%d dup=%d → pending=%d",
@@ -1010,7 +1314,7 @@ async def run_manual_scan(
             continue
         sent_any = False
         for name, chat_ids in by_template.items():
-            card_out = {**card, "matched_template": name}
+            card_out = _card_for_template(card, name, chat_ids)
             await on_signal(card_out, chat_ids)
             sent_any = True
             sent_count += 1

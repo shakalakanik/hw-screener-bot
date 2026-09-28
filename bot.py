@@ -83,11 +83,17 @@ def _sync_endpoint(chat_id: int) -> str | None:
     return f"{PUBLIC_URL}/sync/{token}"
 
 
-def _app_url_with_sync(chat_id: int) -> str | None:
+def _app_url_with_sync(chat_id: int, focus: tuple | None = None) -> str | None:
+    """URL Mini App; focus=(ticker, signal_ts_ms, market) — открыть «Отслеживаю» на этой записи."""
     sync = _sync_endpoint(chat_id)
     if not sync:
         return None
-    return f"{PUBLIC_URL}/app?sync={quote(sync, safe='')}&autosync=1"
+    url = f"{PUBLIC_URL}/app?sync={quote(sync, safe='')}&autosync=1"
+    if focus:
+        ticker, ts, mkt = focus
+        base = ticker[:-4] if str(ticker).endswith("USDT") else ticker
+        url += f"&tab=watch&focus={quote(str(base), safe='')}&ft={int(ts)}&fm={quote(str(mkt), safe='')}"
+    return url
 
 
 def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
@@ -162,7 +168,8 @@ def _format_card(card: dict) -> str:
         f"📥 Вход: <code>{entry:.4f}</code>  (расст. {dist_pct:.0f}% ATR)",
         f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
         f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
-        f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
+        f"⭐ Оценка: <b>{card['score']:.1f}</b> / 10" if card.get("score") is not None
+        else f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
         f"📊 Тренд D1: {bias}",
         f"🕐 Сигнал: {time_str}",
     ])
@@ -228,6 +235,13 @@ def _parse_card_from_message(msg) -> dict | None:
     if mk:
         kind = mk.group(1).strip()
 
+    score = None
+    msc = re.search(r"Оценка:\s*(\d+(?:\.\d+)?)\s*/\s*10", plain)
+    if msc:
+        try:
+            score = float(msc.group(1))
+        except ValueError:
+            score = None
     strength = plain.count("★")
     if strength <= 0:
         strength = 3
@@ -278,6 +292,7 @@ def _parse_card_from_message(msg) -> dict | None:
         "stop": stop,
         "take": take,
         "kind": kind,
+        "score": score,
         "strength": min(5, max(1, strength)),
         "prob": prob,
         "signal_ts": signal_ts,
@@ -426,6 +441,29 @@ async def cmd_refresh_tpl(msg: Message):
 
 
 # ── /status ───────────────────────────────────────────────────────────────────
+@dp.message(Command("weekcap"))
+async def cmd_weekcap(msg: Message):
+    """/weekcap 30 — максимум сигналов за неделю (лучшие по оценке). 0 = без лимита."""
+    parts = (msg.text or "").split()
+    if len(parts) < 2:
+        await msg.answer(
+            f"Сейчас лимит: <b>{storage.get_week_cap(msg.chat.id)}</b> сигналов за неделю "
+            f"(лучшие по оценке 0–10).\nИзменить: <code>/weekcap 30</code>, без лимита: <code>/weekcap 0</code>",
+            parse_mode="HTML",
+        )
+        return
+    try:
+        n = int(parts[1])
+    except ValueError:
+        await msg.answer("Нужно число, например: /weekcap 30")
+        return
+    n = max(0, min(500, n))
+    storage.set_week_cap(msg.chat.id, n)
+    await msg.answer(
+        f"✅ Лимит: {n} за неделю (лучшие по оценке)." if n else "✅ Недельный лимит выключен."
+    )
+
+
 @dp.message(Command("status"))
 @dp.message(F.text == "📊 Статус")
 async def cmd_status(msg: Message):
@@ -1329,6 +1367,8 @@ async def cb_watch(call: CallbackQuery):
         "take":      card.get("take", 0),
         "kind":      card.get("kind", ""),
         "prob":      card.get("prob", 0) or 0,
+        "score":     card.get("score"),
+        "strength":  card.get("strength"),
         "risk_pct":  risk_pct,
         "signal_ts": int(card.get("signal_ts") or time.time() * 1000),
     }
@@ -1343,12 +1383,11 @@ async def cb_watch(call: CallbackQuery):
         logger.warning("miniapp_watch append failed: %s", e)
 
     # Обновляем кнопку → ✅ Отслеживается (с id для удаления)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text="✅ Отслеживается — убрать",
-            callback_data=f"unwatch:{watch_id}",
-        )
-    ]])
+    row = [InlineKeyboardButton(text="🗑 Удалить из отслеживаемого", callback_data=f"unwatch:{watch_id}")]
+    view_url = _app_url_with_sync(chat_id, focus=(item["ticker"], item["signal_ts"], item.get("market", "crypto")))
+    if view_url:
+        row.append(InlineKeyboardButton(text="🔎 Посмотреть в отслеживаемом", web_app=WebAppInfo(url=view_url)))
+    kb = InlineKeyboardMarkup(inline_keyboard=[row])
     try:
         await call.message.edit_reply_markup(reply_markup=kb)
     except Exception:
@@ -1360,6 +1399,15 @@ async def cb_watch(call: CallbackQuery):
 async def cb_unwatch(call: CallbackQuery):
     chat_id  = call.message.chat.id
     watch_id = int(call.data.split(":", 1)[1])
+    try:
+        wr = storage.get_watchlist_row(chat_id, watch_id)
+        if wr:
+            tk = wr["ticker"]
+            mk = wr.get("market") or "crypto"
+            base = tk if mk == "ru" else (tk[:-4] if tk.endswith("USDT") else tk)
+            storage.remove_miniapp_watch_item(chat_id, base, int(wr["signal_ts"]), mk)
+    except Exception as e:
+        logger.warning("miniapp_watch remove failed: %s", e)
     storage.remove_from_watchlist(chat_id, watch_id)
 
     # Восстанавливаем 👁 — cb_watch снова разберёт текст сообщения при необходимости

@@ -557,9 +557,10 @@ def watchlist_item_html_shape(item: dict) -> dict:
         "st": item.get("stop", 0),
         "tk": item.get("take", 0),
         "rp": item.get("risk_pct", 0),
-        "strength": 3,
+        "strength": item.get("strength") if item.get("strength") is not None else 3,
         "crosses": 0,
         "vol_mult": 1.0,
+        "score": item.get("score"),
         "added": int(time.time() * 1000),
     }
 
@@ -635,6 +636,40 @@ def append_miniapp_watch_item(user_id: int, item_html: dict) -> None:
                 0,
             ),
         )
+
+
+def remove_miniapp_watch_item(user_id: int, base: str, t: int, mkt: str = "crypto") -> bool:
+    """Убрать запись из miniapp_watch (base+t+mkt). True если что-то удалено."""
+    with _conn() as c:
+        _ensure_miniapp_state(c)
+        row = c.execute(
+            "SELECT data_json FROM miniapp_watch WHERE user_id=?", (int(user_id),)
+        ).fetchone()
+        if not row:
+            return False
+        watch = _json_loads(row["data_json"], [])
+        if not isinstance(watch, list):
+            return False
+        keep = []
+        for x in watch:
+            xm = (x.get("mkt") or x.get("market") or "crypto") if isinstance(x, dict) else ""
+            if isinstance(x, dict) and x.get("base") == base and x.get("t") == t and xm == mkt:
+                continue
+            keep.append(x)
+        if len(keep) == len(watch):
+            return False
+        c.execute(
+            "INSERT OR REPLACE INTO miniapp_watch(user_id, data_json, updated_at, cleared) VALUES(?,?,?,?)",
+            (int(user_id), json.dumps(keep, ensure_ascii=False), int(time.time()), 0),
+        )
+        return True
+
+
+def get_watchlist_row(chat_id: int, watch_id: int) -> dict | None:
+    with _conn() as c:
+        _ensure_watchlist(c)
+        r = c.execute("SELECT * FROM watchlist WHERE id=? AND chat_id=?", (watch_id, chat_id)).fetchone()
+    return dict(r) if r else None
 
 
 def _ensure_html_templates(c: sqlite3.Connection):
@@ -1761,3 +1796,55 @@ def get_signal_history_stats(chat_id: int) -> dict:
         })
         out[key][r["status"]] = r["n"]
     return list(out.values())
+
+
+# ── Настройки чата (ключ-значение) и недельный лимит «N лучших за неделю» ───────
+
+DEFAULT_WEEK_CAP = 30
+
+
+def _ensure_chat_settings(c: sqlite3.Connection):
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS chat_settings (
+            chat_id INTEGER NOT NULL,
+            key     TEXT NOT NULL,
+            value   TEXT NOT NULL,
+            PRIMARY KEY (chat_id, key)
+        )
+    """)
+
+
+def get_week_cap(chat_id: int) -> int:
+    """Сколько сигналов максимум за ISO-неделю (лучшие по оценке). 0 = без лимита."""
+    with _conn() as c:
+        _ensure_chat_settings(c)
+        row = c.execute(
+            "SELECT value FROM chat_settings WHERE chat_id=? AND key='week_cap'", (chat_id,)
+        ).fetchone()
+    if not row:
+        return DEFAULT_WEEK_CAP
+    try:
+        return max(0, int(row["value"]))
+    except (TypeError, ValueError):
+        return DEFAULT_WEEK_CAP
+
+
+def set_week_cap(chat_id: int, n: int):
+    with _conn() as c:
+        _ensure_chat_settings(c)
+        c.execute(
+            "INSERT OR REPLACE INTO chat_settings(chat_id,key,value) VALUES(?,?,?)",
+            (chat_id, "week_cap", str(max(0, int(n)))),
+        )
+
+
+def count_signals_in_week(chat_id: int, market: str, week_start_ms: int) -> int:
+    """Сколько сигналов этого рынка уже отправлено чату за неделю, начавшуюся в week_start_ms."""
+    with _conn() as c:
+        _ensure_signal_history(c)
+        row = c.execute(
+            "SELECT COUNT(*) AS n FROM signal_history "
+            "WHERE chat_id=? AND market=? AND signal_ts>=? AND signal_ts<?",
+            (chat_id, market, week_start_ms, week_start_ms + 7 * 86_400_000),
+        ).fetchone()
+    return int(row["n"]) if row else 0
