@@ -1117,6 +1117,7 @@ async def _deliver_html(
     win_h: int,
     on_signal: Callable[[dict, list[int]], Awaitable[None]],
     chat_best_only: Callable[[int], dict] | None = None,
+    stats: dict | None = None,
 ) -> int:
     """Для каждого чата и каждого его активного шаблона — ровно тот список, что показал бы
     раздел «Сигналы» в HTML за последние win_h часов (html_pipeline.apply_all).
@@ -1150,7 +1151,9 @@ async def _deliver_html(
         markets = f.get("markets") or ["crypto"]
         multi = f.get("_multi") or [{"_name": "", "_market": m, "_strategy": "both", "filters": {}}
                                     for m in markets]
-        week_max = storage.get_week_cap(chat_id)
+        # Недельный лимит в боте УБРАН (решение пользователя): «макс. сделок в неделю» — только
+        # фильтр бэктеста HTML. Количество сигналов бота ограничивают только шаблоны/сценарии.
+        week_max = 0
         chosen: dict[tuple, dict] = {}
         for tpl in multi:
             mkt = tpl.get("_market", "crypto")
@@ -1169,12 +1172,24 @@ async def _deliver_html(
                 if key not in chosen:
                     chosen[key] = {**c, "matched_template": name, "template_thr": thr}
 
-        fresh = [c for c in chosen.values()
-                 if now_ms - int(c["signal_ts"]) <= MAX_SIGNAL_AGE_MS
-                 and not _is_dup(c)
-                 and not storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
-                                                  c.get("strategy", "brk"), c["side"])]
+        # Счётчики для прозрачности (ручной «Скан» пишет итог: найдено как в HTML → отправлено).
+        st = {"found": len(chosen), "too_old": 0, "already": 0, "level_dup": 0,
+              "conc": 0, "best_only": 0, "sent": 0,
+              "exchange": ("OKX" if _active_exchange == "okx" else "Bybit")}
+        fresh = []
+        for c in chosen.values():
+            if now_ms - int(c["signal_ts"]) > MAX_SIGNAL_AGE_MS:
+                st["too_old"] += 1
+            elif storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
+                                          c.get("strategy", "brk"), c["side"]):
+                st["already"] += 1
+            elif _is_dup(c):
+                st["level_dup"] += 1
+            else:
+                fresh.append(c)
+        n0 = len(fresh)
         fresh = [c for c in fresh if concurrency_allows(chat_id, c["matched_template"], f)]
+        st["conc"] = n0 - len(fresh)
 
         # «Только лучший» (настройка бота, в HTML её нет) — по оценке, отдельно для рынка
         if chat_best_only is not None and fresh:
@@ -1183,15 +1198,20 @@ async def _deliver_html(
             for mkt in {c.get("market", "crypto") for c in fresh}:
                 grp = [c for c in fresh if c.get("market", "crypto") == mkt]
                 keep.extend([max(grp, key=_best_only_rank)] if bo.get(mkt) else grp)
+            st["best_only"] = len(fresh) - len(keep)
             fresh = keep
 
-        fresh = _week_quota_filter(chat_id, fresh, week_max)
 
         fresh.sort(key=lambda c: c["signal_ts"])
         for c in fresh:
             await on_signal(c, [chat_id])
             storage.mark_sent(c["ticker"], c["side"], c["level"], c.get("strategy", "brk"))
             sent += 1
+            st["sent"] += 1
+        if any(st[k] for k in ("too_old", "level_dup", "conc", "best_only")):
+            logger.info("deliver chat=%s: %s", chat_id, st)
+        if stats is not None:
+            stats[chat_id] = st
     return sent
 
 
@@ -1201,6 +1221,7 @@ async def run_scan(
     chat_filters: Callable[[int], dict],
     incremental: bool = True,
     chat_best_only: Callable[[int], dict] | None = None,
+    stats: dict | None = None,
 ) -> int:
     """Автоскан: как кнопка «Сканировать» в HTML с окном MAX_SIGNAL_AGE_H (12 ч),
     TOP_N инструментов, от MIN_VOL_USD_24H.
@@ -1243,7 +1264,7 @@ async def run_scan(
             all_cards += cc
 
     sent = await _deliver_html(all_cards, subscribers, chat_filters, now_ms, win_h,
-                               on_signal, chat_best_only)
+                               on_signal, chat_best_only, stats)
     logger.info("Скан: карточек %d → отправлено %d", len(all_cards), sent)
     return sent
 

@@ -445,24 +445,10 @@ async def cmd_refresh_tpl(msg: Message):
 # ── /status ───────────────────────────────────────────────────────────────────
 @dp.message(Command("weekcap"))
 async def cmd_weekcap(msg: Message):
-    """/weekcap 30 — максимум сигналов за неделю (лучшие по оценке). 0 = без лимита."""
-    parts = (msg.text or "").split()
-    if len(parts) < 2:
-        await msg.answer(
-            f"Сейчас лимит: <b>{storage.get_week_cap(msg.chat.id)}</b> сигналов за неделю "
-            f"(лучшие по оценке 0–10).\nИзменить: <code>/weekcap 30</code>, без лимита: <code>/weekcap 0</code>",
-            parse_mode="HTML",
-        )
-        return
-    try:
-        n = int(parts[1])
-    except ValueError:
-        await msg.answer("Нужно число, например: /weekcap 30")
-        return
-    n = max(0, min(500, n))
-    storage.set_week_cap(msg.chat.id, n)
+    """Недельный лимит в боте отключён: «макс. сделок в неделю» — только фильтр бэктеста HTML."""
     await msg.answer(
-        f"✅ Лимит: {n} за неделю (лучшие по оценке)." if n else "✅ Недельный лимит выключен."
+        "Недельный лимит в боте отключён: «макс. сделок в неделю» — фильтр бэктеста в HTML. "
+        "Количество сигналов бота ограничивают только шаблоны/сценарии."
     )
 
 
@@ -1293,17 +1279,45 @@ async def cmd_scan(msg: Message):
         reply_markup=main_keyboard(msg.chat.id),
     )
     try:
+        stats: dict = {}
         n = await run_scan(
             on_signal=send_signal,
             subscribers=[msg.chat.id],
             chat_filters=_build_filter_for_chat,
             incremental=True,
             chat_best_only=_best_only_for_chat,
+            stats=stats,
         )
-        await msg.answer(f"✅ Скан завершён. Новых карточек: <b>{n}</b>.", parse_mode="HTML")
+        await msg.answer(
+            f"✅ Скан завершён. Новых карточек: <b>{n}</b>.\n{_scan_summary(msg.chat.id, stats.get(msg.chat.id))}",
+            parse_mode="HTML",
+        )
     except Exception as e:
         logger.exception("Ошибка скана")
         await msg.answer(f"❌ Ошибка: {e}")
+
+
+def _scan_summary(chat_id: int, st: dict | None) -> str:
+    """Итог ручного скана: сколько нашёл бы HTML за то же окно и куда делась разница."""
+    if not st:
+        return "Найдено за 12ч: 0 (нет активных шаблонов/рынков)."
+    parts = [f"Найдено за 12ч: <b>{st['found']}</b>", f"отправлено: <b>{st['sent']}</b>"]
+    for key, label in (("already", "уже были"), ("level_dup", "повтор уровня 36ч"),
+                       ("conc", "лимит «одновременно»"), ("best_only", "«только лучший»"),
+                       ("too_old", "старше 12ч")):
+        if st.get(key):
+            parts.append(f"{label}: {st[key]}")
+    cfg = storage.get_active_config(chat_id)
+    auto = [m for m, on in (cfg.get("auto") or {}).items() if on]
+    tail = ""
+    if auto:
+        names = {"fbo": "FBO", "brk": "Пробой", "both": "Оба"}
+        tail = "\n🤖 Авто, стратегия: " + ", ".join(
+            f"{'крипта' if m == 'crypto' else 'MOEX'} — {names.get(storage.get_auto_strategy(chat_id, m), '?')}"
+            for m in auto)
+    if st.get("exchange") == "OKX" and ("crypto" in (cfg.get("markets") or [])):
+        tail += "\n⚠️ Источник данных бота: OKX (Bybit недоступен или выключен), а HTML на Bybit — список монет и свечи отличаются."
+    return " · ".join(parts) + tail
 
 
 # ── best_only per chat (для screener._apply_best_only) ───────────────────────

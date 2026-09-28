@@ -1802,7 +1802,11 @@ def get_signal_history_stats(chat_id: int) -> dict:
 
 # ── Настройки чата (ключ-значение) и недельный лимит «N лучших за неделю» ───────
 
-DEFAULT_WEEK_CAP = 30
+# 0 = без лимита. Раньше было 30 и молча резало ручной/авто-скан (в HTML недельный лимит
+# действует только на видимое окно, а бот считал уже отправленное с начала «недели» HTML —
+# в 2026 isoWeekKey начинается в субботу 00:00 UTC). Теперь недельный лимит в боте не
+# применяется вообще (screener._deliver_html: week_max = 0), /weekcap только поясняет это.
+DEFAULT_WEEK_CAP = 0
 
 
 def _ensure_chat_settings(c: sqlite3.Connection):
