@@ -958,6 +958,18 @@ def _apply_week_cap(pending: list[dict]) -> list[dict]:
     return out
 
 
+# «🤖 Авто» = встроенный шаблон HTML «Авто — все фильтры сброшены» (BUILTIN_TPL = {}):
+# все фильтры в «auto» → html_pipeline.apply_all берёт значения DEF, ровно как HTML.
+AUTO_TEMPLATE_NAME = storage.AUTO_TEMPLATE_NAME
+AUTO_FILTERS: dict = {}
+
+
+def auto_template_entry(market: str, strategy: str = "fbo") -> dict:
+    """Элемент _multi для рынка в режиме «Авто» (crypto | ru)."""
+    return {"_name": AUTO_TEMPLATE_NAME, "_market": market, "_strategy": strategy,
+            "filters": dict(AUTO_FILTERS), "_auto": True}
+
+
 _TPL_FILTERS: dict[tuple[int, str], dict] = {}
 
 

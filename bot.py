@@ -25,7 +25,9 @@ from urllib.parse import quote
 
 import storage
 import ai_chat
-from screener import run_scan, run_manual_scan, check_signal_outcomes
+from screener import run_scan, run_manual_scan, check_signal_outcomes, auto_template_entry
+
+AUTO_NAME = storage.AUTO_TEMPLATE_NAME
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -480,9 +482,10 @@ async def cmd_status(msg: Message):
         for m in active_markets
     ) or "нет (включи шаблоны в /filter)"
 
-    if not tpls:
+    auto = cfg.get("auto") or {}
+    if not tpls and not any(auto.values()):
         tpl_str = "Шаблоны не синхронизированы.\nИспользуй /syncurl → кнопку 📬 в HTML."
-    elif not any(by_mkt.get(m) for m in ("crypto", "ru")):
+    elif not any(by_mkt.get(m) or auto.get(m) for m in ("crypto", "ru")):
         tpl_str = f"Шаблонов загружено: {len(tpls)}\nАктивных: нет — выбери через /filter"
     else:
         overrides = storage.get_template_strategy_overrides(chat_id)
@@ -490,6 +493,10 @@ async def cmd_status(msg: Message):
         blocks = []
         for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 Мосбиржа")):
             names = by_mkt.get(m) or []
+            if auto.get(m):
+                a_strat = storage.get_auto_strategy(chat_id, m)
+                blocks.append(f"{mlabel}:\n  ✅ {label.get(a_strat, '')} {AUTO_NAME} (все фильтры авто)")
+                continue
             if not names:
                 blocks.append(f"{mlabel}: —")
                 continue
@@ -534,9 +541,9 @@ async def cmd_filter(msg: Message):
             "1. Открой HTML-скринер\n"
             "2. Сохрани шаблоны кнопкой «Сохранить как шаблон»\n"
             "3. Один раз: /syncurl или «🔄 Обновить шаблоны»\n"
-            "4. В Mini App нажми 📬 (URL сохранится сам)"
+            "4. В Mini App нажми 📬 (URL сохранится сам)\n\n"
+            f"Пока можно включить встроенный {AUTO_NAME} — все фильтры авто."
         )
-        return
     await _send_filter_menu(chat_id)
 
 
@@ -577,6 +584,8 @@ async def _send_filter_root(chat_id: int, edit_msg=None):
         on = mkt in enabled
         n = len(by.get(mkt) or [])
         state = "🟢 вкл" if on else "⚪ выкл"
+        if (cfg.get("auto") or {}).get(mkt):
+            return f"{label}: {state}, активный: {AUTO_NAME}"
         return f"{label}: {state}, шаблонов: {n}"
 
     txt = (
@@ -608,11 +617,22 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
     active = set(by_mkt.get(market) or [])
     enabled = market in (cfg.get("markets") or [])
     overrides = storage.get_template_strategy_overrides(chat_id)
+    auto_on = bool((cfg.get("auto") or {}).get(market))
+    auto_strat = storage.get_auto_strategy(chat_id, market)
 
     # Общий список HTML-шаблонов на обоих рынках (не режем по market тегу)
     shared_names = list(tpls.keys())
 
     buttons = []
+    # 🤖 Авто — встроенный шаблон HTML «Авто — все фильтры сброшены», отдельной строкой сверху
+    buttons.append([
+        InlineKeyboardButton(
+            text=("✅ 🤖 АВТО · все фильтры авто ✅" if auto_on else "🤖 АВТО · все фильтры авто"),
+            callback_data=f"auto_on:{market}",
+        ),
+        InlineKeyboardButton(text=_STRAT_ICON.get(auto_strat, "🔻ЛП"),
+                             callback_data=f"auto_strat:{market}"),
+    ])
     on_off = "🟢 Рынок ВКЛ" if enabled else "⚪ Рынок ВЫКЛ"
     buttons.append([InlineKeyboardButton(
         text=on_off,
@@ -632,8 +652,12 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
             callback_data="noop",
         )])
     else:
+        buttons.append([InlineKeyboardButton(
+            text="── 📋 Мои шаблоны ──" + (" (выкл, пока Авто)" if auto_on else ""),
+            callback_data="noop",
+        )])
         for name in shared_names:
-            check = "✅" if name in active else "⬜"
+            check = "✅" if (name in active and not auto_on) else "⬜"
             strat = _effective_strategy(
                 chat_id, name, (tpls[name].get("filters") or {}), overrides
             )
@@ -658,11 +682,16 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     n_on = len(active)
     bo_state = "вкл" if bo else "выкл"
+    if auto_on:
+        act_line = f"активный: <b>{AUTO_NAME}</b> ({_STRAT_ICON.get(auto_strat, '')})"
+    else:
+        act_line = f"активных шаблонов: <b>{n_on}</b>"
     txt = (
         f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
-        f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · "
-        f"активных шаблонов: <b>{n_on}</b>\n"
+        f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n"
         f"Только лучший: <b>{bo_state}</b>\n\n"
+        f"• {AUTO_NAME} — как шаблон «Авто» в HTML: все фильтры сброшены в авто; "
+        "выбор своего шаблона выключает Авто\n"
         "• Вкл/выкл рынок — получать сигналы по нему\n"
         "• ⭐ Только лучший — если в одном скане несколько сигналов "
         "по этому рынку, отправить только лучший\n"
@@ -754,6 +783,38 @@ async def cb_best_only(call: CallbackQuery):
     await call.answer("только лучший: вкл" if not cur else "только лучший: выкл")
 
 
+@dp.callback_query(F.data.startswith("auto_on:"))
+async def cb_auto_on(call: CallbackQuery):
+    """Вкл/выкл встроенный «🤖 Авто» для рынка. Шаблоны пользователя не трогаются."""
+    chat_id = call.message.chat.id
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    turn_on = not storage.get_auto_mode(chat_id).get(mkt, False)
+    storage.set_auto_mode(chat_id, mkt, turn_on)
+    enabled = mkt in (storage.get_active_config(chat_id).get("markets") or [])
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    if turn_on:
+        await call.answer(f"{AUTO_NAME}: вкл" + ("" if enabled else " (рынок выкл — включи 🟢)"))
+    else:
+        await call.answer(f"{AUTO_NAME}: выкл → мои шаблоны")
+
+
+@dp.callback_query(F.data.startswith("auto_strat:"))
+async def cb_auto_strat(call: CallbackQuery):
+    chat_id = call.message.chat.id
+    mkt = call.data.split(":", 1)[1]
+    if mkt not in ("crypto", "ru"):
+        await call.answer()
+        return
+    new_strat = _STRAT_CYCLE.get(storage.get_auto_strategy(chat_id, mkt), "fbo")
+    storage.set_auto_strategy(chat_id, mkt, new_strat)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
+    label = {"fbo": "Ложный пробой", "brk": "Пробой", "both": "Оба"}[new_strat]
+    await call.answer(f"{AUTO_NAME}: {label}")
+
+
 @dp.callback_query(F.data.startswith("tpl:"))
 async def cb_tpl(call: CallbackQuery):
     chat_id = call.message.chat.id
@@ -768,7 +829,12 @@ async def cb_tpl(call: CallbackQuery):
         market = "crypto"
     cfg = storage.get_active_config(chat_id)
     active = list((cfg.get("names_by_market") or {}).get(market) or [])
-    if full_name in active:
+    if (cfg.get("auto") or {}).get(market):
+        # Выбор своего шаблона выключает Авто; выбранный шаблон — точно активен
+        storage.set_auto_mode(chat_id, market, False)
+        if full_name not in active:
+            active.append(full_name)
+    elif full_name in active:
         active = [n for n in active if n != full_name]
     else:
         active.append(full_name)
@@ -929,6 +995,8 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
             drop = set(resolved)
             new_names = [n for n in current if n not in drop]
         storage.set_active_templates_for_market(chat_id, market, new_names)
+        if market in ("crypto", "ru"):
+            storage.set_auto_mode(chat_id, market, False)
         return f"Шаблоны ({market}) обновлены: {len(new_names)} шт."
     if action == "subscribe":
         _subscribers.add(chat_id)
@@ -1156,6 +1224,7 @@ async def cb_tpl_all(call: CallbackQuery):
     storage.set_active_templates_for_market(
         chat_id, market, all_names if enable else []
     )
+    storage.set_auto_mode(chat_id, market, False)
     await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
     await call.answer(
         f"{_MKT_TAB[market]}: все включены" if enable else f"{_MKT_TAB[market]}: сброс"
@@ -1197,6 +1266,9 @@ async def cb_filter_done(call: CallbackQuery):
     parts = []
     for m, label in (("crypto", "крипта"), ("ru", "мосбиржа")):
         if m not in enabled:
+            continue
+        if (cfg.get("auto") or {}).get(m):
+            parts.append(f"{label}: {AUTO_NAME}")
             continue
         n = len(by.get(m) or [])
         parts.append(f"{label}: {n}")
@@ -1257,6 +1329,11 @@ def _build_filter_for_chat(chat_id: int) -> dict:
 
     for mkt in ("crypto", "ru"):
         if mkt not in enabled:
+            continue
+        if (cfg.get("auto") or {}).get(mkt):
+            # 🤖 Авто: только встроенный шаблон HTML «Авто» (все фильтры = DEF)
+            multi.append(auto_template_entry(mkt, storage.get_auto_strategy(chat_id, mkt)))
+            markets.append(mkt)
             continue
         names = by.get(mkt) or []
         if not names:

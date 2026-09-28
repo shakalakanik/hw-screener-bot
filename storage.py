@@ -1109,6 +1109,7 @@ def get_active_config(chat_id: int) -> dict:
             "names": [],
             "markets": [],
             "best_only": {"crypto": False, "ru": False},
+            "auto": get_auto_mode(chat_id),
         }
 
     # Подтянуть market шаблонов для миграции плоского списка
@@ -1156,6 +1157,7 @@ def get_active_config(chat_id: int) -> dict:
         "names": names,
         "markets": markets,
         "best_only": _parse_best_only(row["best_only"] if row is not None else None),
+        "auto": get_auto_mode(chat_id),
     }
 
 
@@ -1871,3 +1873,63 @@ def list_sent_signal_ts(chat_id: int, market: str, since_ms: int) -> list[int]:
             (chat_id, market, int(since_ms)),
         ).fetchall()
     return [int(r["signal_ts"]) for r in rows if r["signal_ts"] is not None]
+
+
+# ── «🤖 Авто» — встроенный шаблон HTML «Авто — все фильтры сброшены» (per-market) ──
+# Хранится в chat_settings (том /data), НЕ в html_templates: sync из HTML его не
+# перезапишет и не удалит, а включение/выключение Авто не трогает шаблоны пользователя
+# и список names_by_market (при выключении Авто прежний набор шаблонов возвращается).
+
+AUTO_TEMPLATE_NAME = "🤖 Авто"
+_AUTO_STRATS = ("fbo", "brk", "both")
+
+
+def get_auto_mode(chat_id: int) -> dict:
+    """{"crypto": bool, "ru": bool} — рынки, где активен встроенный шаблон «Авто»."""
+    out = {"crypto": False, "ru": False}
+    try:
+        with _conn() as c:
+            _ensure_chat_settings(c)
+            rows = c.execute(
+                "SELECT key, value FROM chat_settings WHERE chat_id=? AND key IN ('auto_crypto','auto_ru')",
+                (chat_id,),
+            ).fetchall()
+        for r in rows:
+            out[r["key"][5:]] = r["value"] == "1"
+    except Exception:
+        pass
+    return out
+
+
+def set_auto_mode(chat_id: int, market: str, enabled: bool):
+    if market not in ("crypto", "ru"):
+        return
+    with _conn() as c:
+        _ensure_chat_settings(c)
+        c.execute(
+            "INSERT OR REPLACE INTO chat_settings(chat_id,key,value) VALUES(?,?,?)",
+            (chat_id, f"auto_{market}", "1" if enabled else "0"),
+        )
+
+
+def get_auto_strategy(chat_id: int, market: str) -> str:
+    """Стратегия для «Авто» на рынке. По умолчанию fbo — как первый пункт «Стратегия» в HTML."""
+    with _conn() as c:
+        _ensure_chat_settings(c)
+        row = c.execute(
+            "SELECT value FROM chat_settings WHERE chat_id=? AND key=?",
+            (chat_id, f"auto_strat_{market}"),
+        ).fetchone()
+    v = row["value"] if row else "fbo"
+    return v if v in _AUTO_STRATS else "fbo"
+
+
+def set_auto_strategy(chat_id: int, market: str, strategy: str):
+    if market not in ("crypto", "ru") or strategy not in _AUTO_STRATS:
+        return
+    with _conn() as c:
+        _ensure_chat_settings(c)
+        c.execute(
+            "INSERT OR REPLACE INTO chat_settings(chat_id,key,value) VALUES(?,?,?)",
+            (chat_id, f"auto_strat_{market}", strategy),
+        )
