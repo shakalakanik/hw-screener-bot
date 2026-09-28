@@ -13,17 +13,23 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 
 import storage
+import watch_tomb
 
 logger = logging.getLogger(__name__)
+
+try:  # additive tables + trigger for watch tombstones (same DB_PATH)
+    watch_tomb.install()
+except Exception as _e:  # never block startup
+    logger.warning("watch_tomb install failed: %s", _e)
 
 WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
 SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20260928b">
-<script src="/bridge.js?v=20260928b"></script>
-<script src="/lean.js?v=20260928b"></script>
+<link rel="stylesheet" href="/mobile.css?v=20260928c">
+<script src="/bridge.js?v=20260928c"></script>
+<script src="/lean.js?v=20260928c"></script>
 """
 
 
@@ -177,7 +183,9 @@ async def handle_app(request: web.Request) -> web.Response:
         raise web.HTTPNotFound(text="screener.html not found")
     html = SCREENER_HTML.read_text(encoding="utf-8")
     html = _inject_html(html)
-    return web.Response(text=html, content_type="text/html", charset="utf-8")
+    # no-cache: WebView must re-fetch HTML so the ?v= asset bump takes effect
+    return web.Response(text=html, content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -409,7 +417,7 @@ async def api_signal_filter_put(request: web.Request) -> web.Response:
 async def api_miniapp_state_get(request: web.Request) -> web.Response:
     """Hydrate Mini App watch / backtest / signals for Telegram user."""
     uid = require_user(request)
-    state = storage.get_miniapp_state(uid)
+    state = watch_tomb.get_state(uid)
     return web.json_response({"ok": True, **state})
 
 
@@ -439,7 +447,8 @@ async def api_signal_stats_get(request: web.Request) -> web.Response:
 
 
 async def api_miniapp_state_put(request: web.Request) -> web.Response:
-    """Persist Mini App state. Empty overwrite guarded in storage.put_miniapp_state.
+    """Persist Mini App state. Empty overwrite guarded in storage.put_miniapp_state;
+    watch tombstones applied in watch_tomb.put_state.
 
     Body (all keys optional):
       watch: list
@@ -448,6 +457,9 @@ async def api_miniapp_state_put(request: web.Request) -> web.Response:
       clear_watch / clear_backtest / clear_signals: bool  # explicit UI reset
       updated_at: {watch, backtest, signals}  # last known server stamps (for in-sync empty)
       force: bool  # alias: sets all clear_* true
+      watch_deleted: {"base|t|mkt": deletedAt_ms}  # tombstones
+      watch_cleared_at: int ms  # «Очистить всё» — drops rows added at/before it
+      watch_merge: bool  # union(server, watch) minus tombstones (never loses bot adds)
     """
     uid = require_user(request)
     try:
@@ -481,14 +493,20 @@ async def api_miniapp_state_put(request: web.Request) -> web.Response:
         kwargs["backtest"] = body.get("backtest")
     if "signals" in body:
         kwargs["signals"] = body.get("signals")
+    # Tombstones (bridge.js >= 20260928c): deletions/clears survive union-merge
+    if isinstance(body.get("watch_deleted"), dict):
+        kwargs["watch_deleted"] = body.get("watch_deleted")
+    if body.get("watch_cleared_at"):
+        kwargs["watch_cleared_at"] = body.get("watch_cleared_at")
+    kwargs["watch_merge"] = bool(body.get("watch_merge"))
 
-    if not any(k in kwargs for k in ("watch", "backtest", "signals")):
+    if not any(k in kwargs for k in ("watch", "backtest", "signals", "watch_deleted", "watch_cleared_at")):
         raise web.HTTPBadRequest(
             text=json.dumps({"error": "provide watch, backtest, and/or signals"}),
             content_type="application/json",
         )
 
-    result = storage.put_miniapp_state(uid, **kwargs)
+    result = watch_tomb.put_state(uid, **kwargs)
     status = 200
     if result.get("rejected"):
         # Partial apply: 409 if ALL provided keys were rejected, else 200 with rejected list
