@@ -85,17 +85,37 @@ def _sync_endpoint(chat_id: int) -> str | None:
     return f"{PUBLIC_URL}/sync/{token}"
 
 
-def _app_url_with_sync(chat_id: int, focus: tuple | None = None) -> str | None:
-    """URL Mini App; focus=(ticker, signal_ts_ms, market) — открыть «Отслеживаю» на этой записи."""
+def _app_url_with_sync(chat_id: int, focus: tuple | None = None, watch: bool = False) -> str | None:
+    """URL Mini App. watch=True или focus открывает вкладку «Отслеживаемые».
+
+    Путь /app/watch, а не только ?tab=: Telegram иногда отбрасывает query у web_app,
+    путь остаётся. focus=(ticker, signal_ts_ms, market) подсвечивает запись.
+    """
     sync = _sync_endpoint(chat_id)
     if not sync:
         return None
-    url = f"{PUBLIC_URL}/app?sync={quote(sync, safe='')}&autosync=1"
-    if focus:
-        ticker, ts, mkt = focus
-        base = ticker[:-4] if str(ticker).endswith("USDT") else ticker
-        url += f"&tab=watch&focus={quote(str(base), safe='')}&ft={int(ts)}&fm={quote(str(mkt), safe='')}"
+    path = "/app/watch" if (watch or focus) else "/app"
+    # tab=watch первым, чтобы не отрезался, если URL упрётся в лимит
+    if watch or focus:
+        url = f"{PUBLIC_URL}{path}?tab=watch"
+        if focus:
+            ticker, ts, mkt = focus
+            base = ticker[:-4] if str(ticker).endswith("USDT") else ticker
+            url += f"&focus={quote(str(base), safe='')}&ft={int(ts)}&fm={quote(str(mkt), safe='')}"
+        url += f"&sync={quote(sync, safe='')}&autosync=1"
+    else:
+        url = f"{PUBLIC_URL}{path}?sync={quote(sync, safe='')}&autosync=1"
     return url
+
+
+def _view_signal_button(chat_id: int, ticker: str, signal_ts: int, market: str) -> InlineKeyboardButton | None:
+    """Кнопка Mini App сразу на вкладке «Отслеживаемые»."""
+    view_url = _app_url_with_sync(
+        chat_id, focus=(ticker, signal_ts, market or "crypto"), watch=True,
+    )
+    if not view_url:
+        return None
+    return InlineKeyboardButton(text="🔎 Посмотреть сигнал", web_app=WebAppInfo(url=view_url))
 
 
 def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
@@ -330,9 +350,17 @@ async def send_signal(card: dict, chat_ids: list[int]):
             except Exception as e:
                 logger.warning("signal_history record failed %s: %s", card_id, e)
             # watch:{16-hex} fits Telegram 64-byte callback_data limit
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_id}"),
-            ]])
+            row = [InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_id}")]
+            view_btn = _view_signal_button(
+                chat_id,
+                card.get("ticker") or "",
+                signal_ts,
+                card.get("market") or "crypto",
+            )
+            rows = [row]
+            if view_btn:
+                rows.append([view_btn])
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
             logger.warning("Не удалось отправить %s: %s", chat_id, e)
@@ -1475,10 +1503,13 @@ async def cb_watch(call: CallbackQuery):
 
     # Обновляем кнопку → ✅ Отслеживается (с id для удаления)
     row = [InlineKeyboardButton(text="🗑 Удалить из отслеживаемого", callback_data=f"unwatch:{watch_id}")]
-    view_url = _app_url_with_sync(chat_id, focus=(item["ticker"], item["signal_ts"], item.get("market", "crypto")))
-    if view_url:
-        row.append(InlineKeyboardButton(text="🔎 Посмотреть в отслеживаемом", web_app=WebAppInfo(url=view_url)))
-    kb = InlineKeyboardMarkup(inline_keyboard=[row])
+    view_btn = _view_signal_button(
+        chat_id, item["ticker"], int(item["signal_ts"]), item.get("market") or "crypto",
+    )
+    rows = [row]
+    if view_btn:
+        rows.append([view_btn])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     try:
         await call.message.edit_reply_markup(reply_markup=kb)
     except Exception:
@@ -1503,6 +1534,7 @@ async def cb_unwatch(call: CallbackQuery):
 
     # Восстанавливаем 👁 — cb_watch снова разберёт текст сообщения при необходимости
     re_id = "msg"
+    parsed = None
     try:
         parsed = _parse_card_from_message(call.message)
         if parsed:
@@ -1520,9 +1552,18 @@ async def cb_unwatch(call: CallbackQuery):
             _pending_cards[re_id] = {**parsed, "chat_id": chat_id}
     except Exception as e:
         logger.warning("unwatch re-bind failed: %s", e)
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{re_id}")
-    ]])
+    row = [InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{re_id}")]
+    rows = [row]
+    if parsed:
+        view_btn = _view_signal_button(
+            chat_id,
+            parsed.get("ticker") or "",
+            int(parsed.get("signal_ts") or 0),
+            parsed.get("market") or "crypto",
+        )
+        if view_btn:
+            rows.append([view_btn])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
     try:
         await call.message.edit_reply_markup(reply_markup=kb)
     except Exception:
@@ -1849,6 +1890,7 @@ def _mount_miniapp_routes(app: web.Application) -> None:
     import webapp_server as wa
     app.middlewares.append(wa.cors_middleware)
     app.router.add_get("/bridge.js", wa.handle_bridge_js)
+    app.router.add_get("/lean.js", wa.handle_lean_js)
     app.router.add_get("/mobile.css", wa.handle_mobile_css)
     app.router.add_get("/api/me", wa.api_me)
     app.router.add_get("/api/templates", wa.api_templates_get)
@@ -1934,6 +1976,7 @@ async def main():
     app.router.add_get("/health", handle_health)
     app.router.add_get("/", handle_index)
     app.router.add_get("/app", handle_index)
+    app.router.add_get("/app/watch", handle_index)
     _mount_miniapp_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()

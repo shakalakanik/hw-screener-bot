@@ -27,9 +27,9 @@ SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20260928c">
-<script src="/bridge.js?v=20260928c"></script>
-<script src="/lean.js?v=20260928c"></script>
+<link rel="stylesheet" href="/mobile.css?v=20260929a">
+<script src="/bridge.js?v=20260929a"></script>
+<script src="/lean.js?v=20260929a"></script>
 """
 
 
@@ -204,7 +204,7 @@ async def handle_bridge_js(request: web.Request) -> web.Response:
 
 async def handle_lean_js(request: web.Request) -> web.Response:
     path = WEBAPP_DIR / "lean.js"
-    return web.FileResponse(path)
+    return web.FileResponse(path, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 async def api_me(request: web.Request) -> web.Response:
@@ -521,6 +521,7 @@ def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/", handle_app)
     app.router.add_get("/app", handle_app)
+    app.router.add_get("/app/watch", handle_app)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/mobile.css", handle_mobile_css)
     app.router.add_get("/bridge.js", handle_bridge_js)
