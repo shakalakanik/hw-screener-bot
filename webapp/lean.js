@@ -120,8 +120,31 @@
        Telegram start_param / ?tgWebAppStartParam=:  watch | w_BASE_TS_MKT | watch-BASE-TS-MKT
      Строки рендерятся асинхронно (облачный hydrate + refreshWatch перерисовывают tbody),
      поэтому ждём строку до ~20 с и повторно подсвечиваем её после каждой перерисовки. */
+  function pathWantsWatch() {
+    return /\/watch\/?$/.test(location.pathname || '') || /\/app\/watch\b/.test(location.pathname || '');
+  }
+
+  function showWatchPane() {
+    var panes = ['paneScan', 'paneWatch', 'paneBt', 'paneRegime'];
+    var tabs = ['tabScan', 'tabWatch', 'tabBt', 'tabRegime'];
+    var pane = document.getElementById('paneWatch');
+    var tab = document.getElementById('tabWatch');
+    if (!pane || !tab) return false;
+    panes.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.style.display = id === 'paneWatch' ? '' : 'none';
+    });
+    tabs.forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.classList.toggle('on', id === 'tabWatch');
+    });
+    try { if (window.renderWatch) window.renderWatch(); } catch (e) {}
+    return true;
+  }
+
   function parseDeepLink() {
     var out = { tab: '', base: '', ft: 0, fm: '' };
+    if (pathWantsWatch()) out.tab = 'watch';
     function take(q) {
       if (!q) return;
       if (!out.tab && q.get('tab')) out.tab = q.get('tab');
@@ -174,7 +197,11 @@
     });
     function ensureWatchTab() {
       if (userLeft || !tabWatch || !paneWatch) return;
-      if (paneWatch.style.display === 'none' || !tabWatch.classList.contains('on')) tabWatch.click();
+      // click может не сработать, если слушатель ещё не повешен — ставим вкладку напрямую
+      if (paneWatch.style.display === 'none' || !tabWatch.classList.contains('on')) {
+        showWatchPane();
+        try { tabWatch.click(); } catch (e) {}
+      }
     }
     ensureWatchTab();
     if (!L.base) return;
@@ -226,7 +253,11 @@
   }
 
   function selectDefaultTab() {
-    // По умолчанию открываем «Отслеживаю» — это то, что смотрят чаще всего.
+    // С кнопки «Посмотреть сигнал» путь /app/watch — всегда эта вкладка.
+    if (pathWantsWatch() || (parseDeepLink() && parseDeepLink().tab === 'watch')) {
+      showWatchPane();
+      return;
+    }
     var tabWatch = document.getElementById('tabWatch');
     if (tabWatch) tabWatch.click();
   }
