@@ -512,11 +512,51 @@ def _extra_feats(h1c, h1_upto, i, bar, lv, levels, wall_side, wall_risk, ema_sid
     }
 
 
+def _score_feat_num(feat: dict, key: str) -> float:
+    try:
+        v = float(feat.get(key) or 0)
+    except (TypeError, ValueError):
+        v = 0.0
+    return v if math.isfinite(v) else 0.0
+
+
+def _false_break_extra(feat: dict) -> list[float]:
+    """Шесть признаков только для ложного пробоя — 1:1 с smExtra() в HTML.
+
+    Сторона из side_long: signal_score вызывается до записи поля d в карточку.
+    Если side_long ещё нет (повторный скоринг карточки), берётся d === 1, как в JS.
+    """
+    if "side_long" in feat:
+        side = 1.0 if feat.get("side_long") else -1.0
+    else:
+        side = 1.0 if feat.get("d") == 1 else -1.0
+    p_clip = min(_score_feat_num(feat, "p"), 0.6)
+    return [
+        1.0 if _score_feat_num(feat, "brk_bars") >= 3 else 0.0,
+        1.0 if min(_score_feat_num(feat, "dist_atr"), 2.0) > 0.6 else 0.0,
+        1.0 if (
+            _score_feat_num(feat, "vol_mult") > 8
+            or _score_feat_num(feat, "atr_ratio") > 0.45
+            or _score_feat_num(feat, "overshoot_atr") > 2.5
+        ) else 0.0,
+        1.0 if (
+            _score_feat_num(feat, "v6_d1Against") > 0
+            or _score_feat_num(feat, "d1_streak") * side <= -3
+        ) else 0.0,
+        1.0 if (
+            _score_feat_num(feat, "strength") >= 4
+            and _score_feat_num(feat, "crosses") <= 1
+        ) else 0.0,
+        p_clip * p_clip * 10.0,
+    ]
+
+
 def signal_score(feat: dict, strategy: str) -> float:
     """Оценка сигнала 0–10 — 1:1 с signalScore() в HW_FBO_scanner_6.html.
 
-    Логистическая регрессия по 32 признакам + флаг типа (отдельная для ЛП и для пробоя),
-    затем интерполяция по ступеням PAV (реальный винрейт ступени) и нормировка на 0–10.
+    Логистическая регрессия по 32 признакам + флаг типа (отдельная для ЛП и для пробоя).
+    У ложного пробоя (модель с ext) к ним добавляются 6 признаков smExtra.
+    Затем интерполяция по ступеням PAV и нормировка на 0–10.
     """
     sm = _load_score_model()
     m = sm["B"] if strategy == "brk" else sm["F"]
@@ -528,6 +568,8 @@ def signal_score(feat: dict, strategy: str) -> float:
             v = 0.0
         x.append(v if math.isfinite(v) else 0.0)
     x.append(1.0 if strategy == "brk" else 0.0)
+    if m.get("ext"):
+        x.extend(_false_break_extra(feat))
     z = m["b0"]
     for j in range(len(x)):
         sd = m["sd"][j] or 1
