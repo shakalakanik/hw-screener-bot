@@ -167,6 +167,19 @@ async def _fill_journal_charts(journal_id: int) -> None:
         logger.warning("journal charts %s: %s", journal_id, e)
 
 
+def _journal_startapp_url(market: str | None, journal_id: int | None) -> str:
+    """Прямая ссылка Mini App. startapp доходит даже когда web_app открывает только /app.
+
+    Допустимые символы startapp: A-Z a-z 0-9 _ -
+    j_c / j_c_<id> — крипта, j_m / j_m_<id> — Мосбиржа.
+    """
+    code = "m" if storage.normalize_journal_market(market) == "ru" else "c"
+    param = f"j_{code}"
+    if journal_id:
+        param += f"_{int(journal_id)}"
+    return f"https://t.me/HWtradingscreener_bot?startapp={param}"
+
+
 def _view_signal_button(
     chat_id: int,
     ticker: str,
@@ -174,7 +187,7 @@ def _view_signal_button(
     market: str,
     journal_id: int | None = None,
 ) -> InlineKeyboardButton | None:
-    """Mini App сразу на «Журнал сигналов» и на рынке этой карточки."""
+    """Открывает Mini App сразу на «Журнал сигналов» нужного рынка."""
     if not journal_id:
         try:
             journal_id = storage.find_signal_journal_id(
@@ -183,12 +196,10 @@ def _view_signal_button(
         except Exception as e:
             logger.warning("journal lookup failed: %s", e)
             journal_id = None
-    view_url = _app_url_with_sync(
-        chat_id, journal=(market or "crypto", journal_id),
+    return InlineKeyboardButton(
+        text="🔎 Посмотреть сигнал",
+        url=_journal_startapp_url(market or "crypto", journal_id),
     )
-    if not view_url:
-        return None
-    return InlineKeyboardButton(text="🔎 Посмотреть сигнал", web_app=WebAppInfo(url=view_url))
 
 
 def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:

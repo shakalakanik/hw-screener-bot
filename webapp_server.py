@@ -30,7 +30,7 @@ INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/mobile.css?v=20260929a">
 <script src="/bridge.js?v=20260929a"></script>
-<script src="/lean.js?v=20261001a"></script>
+<script src="/lean.js?v=20261001b"></script>
 """
 
 
@@ -186,7 +186,7 @@ async def handle_app(request: web.Request) -> web.Response:
     html = _inject_html(html)
     # no-cache: WebView must re-fetch HTML so the ?v= asset bump takes effect
     return web.Response(text=html, content_type="text/html", charset="utf-8",
-                        headers={"Cache-Control": "no-cache, must-revalidate"})
+                        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -205,7 +205,7 @@ async def handle_bridge_js(request: web.Request) -> web.Response:
 
 async def handle_lean_js(request: web.Request) -> web.Response:
     path = WEBAPP_DIR / "lean.js"
-    return web.FileResponse(path, headers={"Cache-Control": "no-cache, must-revalidate"})
+    return web.FileResponse(path, headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"})
 
 
 async def api_me(request: web.Request) -> web.Response:
