@@ -255,6 +255,31 @@
 
 
   /* Журнал сигналов. Путь /app/journal/crypto|moex[/id] — query Telegram может выкинуть. */
+  function startParamRaw() {
+    var sp = '';
+    try {
+      sp = (window.Telegram && Telegram.WebApp && Telegram.WebApp.initDataUnsafe
+        && Telegram.WebApp.initDataUnsafe.start_param) || '';
+    } catch (e0) {}
+    if (!sp) {
+      try { sp = new URLSearchParams(location.search || '').get('tgWebAppStartParam') || ''; } catch (e1) {}
+    }
+    if (!sp) {
+      try { sp = new URLSearchParams((location.hash || '').replace(/^#/, '')).get('tgWebAppStartParam') || ''; } catch (e2) {}
+    }
+    return String(sp || '');
+  }
+
+  function journalFromStartParam(sp) {
+    // j_c / j_c_12 — крипта, j_m / j_m_12 — Мосбиржа. Так открывает кнопка t.me?startapp=
+    var m = String(sp || '').match(/^j_(c|m)(?:_(\d+))?$/i);
+    if (!m) return null;
+    return {
+      market: m[1].toLowerCase() === 'm' ? 'ru' : 'crypto',
+      id: m[2] ? (parseInt(m[2], 10) || 0) : 0
+    };
+  }
+
   function parseJournalTarget() {
     var market = '', id = 0, fromPath = false;
     var m = (location.pathname || '').match(/\/journal\/(crypto|moex|ru)(?:\/(\d+))?/i);
@@ -264,6 +289,8 @@
       id = m[2] ? (parseInt(m[2], 10) || 0) : 0;
     }
     if (!fromPath) {
+      var fromStart = journalFromStartParam(startParamRaw());
+      if (fromStart) return fromStart;
       try {
         var q = new URLSearchParams(location.search || '');
         if ((q.get('tab') || '') === 'journal') {
@@ -285,7 +312,8 @@
     st.textContent = '#paneJournal .hw-jchart{width:100%;height:auto;display:block;background:#12131a;border-radius:4px;min-height:72px}' +
       '#paneJournal .hw-journal-card.hw-focus{outline:2px solid #4c9aff;outline-offset:-2px;background:rgba(76,154,255,.10)}' +
       '#paneJournal .hw-j-title{font-size:16px;font-weight:700;margin:0 0 6px}' +
-      '#tabJournal{white-space:nowrap}';
+      '#tabJournal{white-space:nowrap;flex:1 0 100% !important;order:5}' +
+      '.tabs{flex-wrap:wrap !important;overflow:visible !important}';
     document.head.appendChild(st);
   }
 
@@ -496,6 +524,8 @@
       });
   }
 
+  var journalUserLeft = false;
+
   function hideJournalChrome() {
     var pane = document.getElementById('paneJournal');
     var tab = document.getElementById('tabJournal');
@@ -537,13 +567,22 @@
     var anchor = document.getElementById('paneWatch');
     if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(pane, anchor.nextSibling);
     else (document.querySelector('.wrap') || document.body).appendChild(pane);
-    btn.addEventListener('click', function (ev) {
+    document.addEventListener('click', function (ev) {
+      var node = ev.target;
+      if (!node || !node.closest) return;
+      if (!node.closest('#tabJournal')) return;
       ev.preventDefault();
+      ev.stopPropagation();
+      journalUserLeft = false;
       showJournalPane();
-    });
+    }, true);
     ['tabScan', 'tabWatch', 'tabBt', 'tabRegime'].forEach(function (id) {
       var b = document.getElementById(id);
-      if (b) b.addEventListener('click', hideJournalChrome);
+      if (!b) return;
+      b.addEventListener('click', function (ev) {
+        if (ev.isTrusted) journalUserLeft = true;
+        hideJournalChrome();
+      });
     });
   }
 
@@ -562,6 +601,20 @@
     if (tabWatch) tabWatch.click();
   }
 
+  function enforceJournalOpen() {
+    // start_param иногда появляется на кадр позже, а «Отслеживаю» успевает перебить вкладку.
+    var t0 = Date.now();
+    var timer = setInterval(function () {
+      if (journalUserLeft || Date.now() - t0 > 4000) { clearInterval(timer); return; }
+      if (!parseJournalTarget()) return;
+      var pane = document.getElementById('paneJournal');
+      var tab = document.getElementById('tabJournal');
+      if (!pane || !tab || pane.style.display === 'none' || !tab.classList.contains('on')) {
+        showJournalPane();
+      }
+    }, 200);
+  }
+
   function start() {
     var n = 0;
     var t = setInterval(function () {
@@ -576,6 +629,7 @@
         installJournalUI();
         selectDefaultTab();
         focusFromLink();
+        enforceJournalOpen();
         try { if (window.Telegram && Telegram.WebApp && Telegram.WebApp.expand) Telegram.WebApp.expand(); } catch (e) {}
       }
     }, 50);
