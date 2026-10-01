@@ -149,6 +149,7 @@ def init():
             ON pending_signal_cards(created_at);
         """)
         _migrate(c)
+        _ensure_signal_journal(c)
         cleanup_pending_signal_cards()
 
 
@@ -1937,3 +1938,172 @@ def set_auto_strategy(chat_id: int, market: str, strategy: str):
             "INSERT OR REPLACE INTO chat_settings(chat_id,key,value) VALUES(?,?,?)",
             (chat_id, f"auto_strat_{market}", strategy),
         )
+
+
+
+# ── Журнал сигналов Mini App (только то, что реально ушло в Telegram) ────────
+# Отдельно от signal_history: сюда пишем в send_signal и удаляем строку, если
+# send_message не удался. Ручной скан Mini App, который карточку в чат не шлёт,
+# этот код не вызывает. Лимит — последние JOURNAL_CAP на чат и рынок.
+# Скриншоты лежат рядом с БД: journal_charts/{id}_d1|h1|m5.png
+
+JOURNAL_CAP = 200
+
+_JOURNAL_FIELDS = (
+    "ticker", "side", "market", "strategy", "matched_template", "level", "kind",
+    "last", "stop", "take", "score", "strength", "prob", "dist_atr", "d1_bias",
+    "signal_ts", "crosses", "vol_mult", "level_age_h", "atr_d", "atr_h1", "risk",
+)
+
+
+def normalize_journal_market(market: str | None) -> str:
+    m = (market or "crypto").strip().lower()
+    if m in ("ru", "moex", "мосбиржа"):
+        return "ru"
+    return "crypto"
+
+
+def journal_charts_dir() -> Path:
+    """PNG directory on the same volume as DB_PATH (e.g. /data/journal_charts)."""
+    base = _ensure_db_path().parent / "journal_charts"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _ensure_signal_journal(c: sqlite3.Connection) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS signal_journal (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id   INTEGER NOT NULL,
+            market    TEXT NOT NULL,
+            ticker    TEXT NOT NULL,
+            signal_ts INTEGER NOT NULL,
+            sent_ts   INTEGER NOT NULL,
+            card_json TEXT NOT NULL
+        )
+    """)
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_journal_chat_mkt "
+        "ON signal_journal(chat_id, market, sent_ts)"
+    )
+
+
+def _journal_snapshot(card: dict) -> dict:
+    out: dict = {}
+    for k in _JOURNAL_FIELDS:
+        if k not in card or card[k] is None:
+            continue
+        v = card[k]
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, (int, float, str)):
+            out[k] = v
+    if "entry" not in out and out.get("last") is not None:
+        out["entry"] = out["last"]
+    out["market"] = normalize_journal_market(card.get("market"))
+    return out
+
+
+def _journal_row_to_dict(row: sqlite3.Row) -> dict:
+    try:
+        card = json.loads(row["card_json"] or "{}")
+    except json.JSONDecodeError:
+        card = {}
+    if not isinstance(card, dict):
+        card = {}
+    return {
+        "id": int(row["id"]),
+        "chat_id": int(row["chat_id"]),
+        "market": row["market"],
+        "ticker": row["ticker"],
+        "signal_ts": int(row["signal_ts"] or 0),
+        "sent_ts": int(row["sent_ts"] or 0),
+        "card": card,
+    }
+
+
+def add_signal_journal(chat_id: int, card: dict) -> tuple[int, list[int]]:
+    """Insert a delivered signal. Returns (new id, dropped ids over the cap)."""
+    snap = _journal_snapshot(card)
+    market = snap["market"]
+    ticker = str(snap.get("ticker") or card.get("ticker") or "")
+    signal_ts = int(snap.get("signal_ts") or card.get("signal_ts") or int(time.time() * 1000))
+    sent_ts = int(time.time() * 1000)
+    dropped: list[int] = []
+    with _conn() as c:
+        _ensure_signal_journal(c)
+        cur = c.execute(
+            """INSERT INTO signal_journal
+               (chat_id, market, ticker, signal_ts, sent_ts, card_json)
+               VALUES (?,?,?,?,?,?)""",
+            (int(chat_id), market, ticker, signal_ts, sent_ts,
+             json.dumps(snap, ensure_ascii=False)),
+        )
+        new_id = int(cur.lastrowid)
+        rows = c.execute(
+            """SELECT id FROM signal_journal
+               WHERE chat_id=? AND market=?
+               ORDER BY sent_ts DESC, id DESC""",
+            (int(chat_id), market),
+        ).fetchall()
+        for r in rows[JOURNAL_CAP:]:
+            rid = int(r["id"])
+            dropped.append(rid)
+            c.execute("DELETE FROM signal_journal WHERE id=?", (rid,))
+    return new_id, dropped
+
+
+def delete_signal_journal(row_id: int) -> None:
+    with _conn() as c:
+        _ensure_signal_journal(c)
+        c.execute("DELETE FROM signal_journal WHERE id=?", (int(row_id),))
+
+
+def get_signal_journal(row_id: int) -> dict | None:
+    with _conn() as c:
+        _ensure_signal_journal(c)
+        row = c.execute(
+            "SELECT * FROM signal_journal WHERE id=?", (int(row_id),)
+        ).fetchone()
+    return _journal_row_to_dict(row) if row else None
+
+
+def find_signal_journal_id(
+    chat_id: int, ticker: str, signal_ts: int, market: str | None,
+) -> int | None:
+    """Row written when this chat card was sent (±2 min on signal_ts)."""
+    if not signal_ts:
+        return None
+    mkt = normalize_journal_market(market)
+    with _conn() as c:
+        _ensure_signal_journal(c)
+        row = c.execute(
+            """SELECT id FROM signal_journal
+               WHERE chat_id=? AND ticker=? AND market=?
+                 AND ABS(signal_ts - ?) <= 120000
+               ORDER BY sent_ts DESC LIMIT 1""",
+            (int(chat_id), str(ticker or ""), mkt, int(signal_ts)),
+        ).fetchone()
+    return int(row["id"]) if row else None
+
+
+def list_signal_journal(chat_id: int, market: str | None = None, limit: int = JOURNAL_CAP) -> list[dict]:
+    """Newest first. market None → both markets (still capped per query)."""
+    limit = max(1, min(int(limit or JOURNAL_CAP), JOURNAL_CAP))
+    with _conn() as c:
+        _ensure_signal_journal(c)
+        if market:
+            rows = c.execute(
+                """SELECT * FROM signal_journal
+                   WHERE chat_id=? AND market=?
+                   ORDER BY sent_ts DESC, id DESC LIMIT ?""",
+                (int(chat_id), normalize_journal_market(market), limit),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                """SELECT * FROM signal_journal
+                   WHERE chat_id=?
+                   ORDER BY sent_ts DESC, id DESC LIMIT ?""",
+                (int(chat_id), limit * 2),
+            ).fetchall()
+    return [_journal_row_to_dict(r) for r in rows]

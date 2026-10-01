@@ -1,6 +1,7 @@
 """webapp_server.py — aiohttp HTTP for Telegram Mini App + templates API."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -29,7 +30,7 @@ INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <link rel="stylesheet" href="/mobile.css?v=20260929a">
 <script src="/bridge.js?v=20260929a"></script>
-<script src="/lean.js?v=20260929a"></script>
+<script src="/lean.js?v=20261001a"></script>
 """
 
 
@@ -517,11 +518,65 @@ async def api_miniapp_state_put(request: web.Request) -> web.Response:
 
 
 
+
+async def api_journal_get(request: web.Request) -> web.Response:
+    """Журнал сигналов, ушедших в Telegram. Новые первыми, оба рынка."""
+    uid = require_user(request)
+    rows = storage.list_signal_journal(uid)
+    crypto, ru = [], []
+    for row in rows:
+        item = {
+            "id": row["id"],
+            "market": row["market"],
+            "ticker": row["ticker"],
+            "signal_ts": row["signal_ts"],
+            "sent_ts": row["sent_ts"],
+            "card": row["card"],
+            "charts": {
+                tf: f"/api/journal/chart/{row['id']}/{tf}"
+                for tf in ("d1", "h1", "m5")
+            },
+        }
+        (ru if row["market"] == "ru" else crypto).append(item)
+    return web.json_response({"crypto": crypto, "ru": ru})
+
+
+async def api_journal_chart(request: web.Request) -> web.Response:
+    """PNG свечей D1/H1/5m. Только владелец строки. Файл создаётся при первом запросе, если фон ещё не успел."""
+    uid = require_user(request)
+    try:
+        row_id = int(request.match_info["row_id"])
+    except (KeyError, ValueError):
+        raise web.HTTPNotFound(text="not found")
+    tf = request.match_info.get("tf") or ""
+    if tf not in ("d1", "h1", "m5"):
+        raise web.HTTPNotFound(text="not found")
+    row = storage.get_signal_journal(row_id)
+    if not row or int(row["chat_id"]) != int(uid):
+        raise web.HTTPNotFound(text="not found")
+    import journal_charts
+    path = journal_charts.path_for(row_id, tf)
+    if path is None:
+        try:
+            await asyncio.wait_for(journal_charts.ensure(row_id), timeout=25)
+        except Exception as e:
+            logger.warning("journal chart ensure %s: %s", row_id, e)
+        path = journal_charts.path_for(row_id, tf)
+    if path is None:
+        raise web.HTTPNotFound(text="chart not ready")
+    return web.FileResponse(
+        path,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
 def create_app() -> web.Application:
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/", handle_app)
     app.router.add_get("/app", handle_app)
     app.router.add_get("/app/watch", handle_app)
+    app.router.add_get("/app/journal/{market}", handle_app)
+    app.router.add_get("/app/journal/{market}/{sig_id}", handle_app)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/mobile.css", handle_mobile_css)
     app.router.add_get("/bridge.js", handle_bridge_js)
@@ -538,6 +593,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/miniapp/state", api_miniapp_state_get)
     app.router.add_put("/api/miniapp/state", api_miniapp_state_put)
     app.router.add_get("/api/miniapp/stats", api_signal_stats_get)
+    app.router.add_get("/api/journal", api_journal_get)
+    app.router.add_get("/api/journal/chart/{row_id}/{tf}", api_journal_chart)
 
     # CORS preflight
     async def _options(request: web.Request) -> web.Response:

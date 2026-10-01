@@ -25,6 +25,7 @@ from urllib.parse import quote
 
 import storage
 import ai_chat
+import journal_charts
 from screener import run_scan, run_manual_scan, check_signal_outcomes, auto_template_entry
 
 AUTO_NAME = storage.AUTO_TEMPLATE_NAME
@@ -85,17 +86,40 @@ def _sync_endpoint(chat_id: int) -> str | None:
     return f"{PUBLIC_URL}/sync/{token}"
 
 
-def _app_url_with_sync(chat_id: int, focus: tuple | None = None, watch: bool = False) -> str | None:
-    """URL Mini App. watch=True или focus открывает вкладку «Отслеживаемые».
+def _journal_slug(market: str | None) -> str:
+    """Path segment. Мосбиржа → moex (query string Telegram может выкинуть)."""
+    return "moex" if storage.normalize_journal_market(market) == "ru" else "crypto"
 
-    Путь /app/watch, а не только ?tab=: Telegram иногда отбрасывает query у web_app,
-    путь остаётся. focus=(ticker, signal_ts_ms, market) подсвечивает запись.
+
+def _app_url_with_sync(
+    chat_id: int,
+    focus: tuple | None = None,
+    watch: bool = False,
+    journal: tuple | None = None,
+) -> str | None:
+    """URL Mini App.
+
+    journal=(market, journal_id|None) → путь /app/journal/crypto[/id] или
+    /app/journal/moex[/id]. Путь, а не только ?tab=: Telegram иногда отбрасывает
+    query у web_app. watch/focus оставлен для старых ссылок на «Отслеживаемые».
     """
     sync = _sync_endpoint(chat_id)
     if not sync:
         return None
+    if journal is not None:
+        market, journal_id = journal[0], (journal[1] if len(journal) > 1 else None)
+        slug = _journal_slug(market)
+        path = f"/app/journal/{slug}"
+        if journal_id:
+            path += f"/{int(journal_id)}"
+        fm = "ru" if slug == "moex" else "crypto"
+        # tab=journal первым в query — запасной канал, если query всё же доедет
+        url = f"{PUBLIC_URL}{path}?tab=journal&fm={fm}"
+        if journal_id:
+            url += f"&jid={int(journal_id)}"
+        url += f"&sync={quote(sync, safe='')}&autosync=1"
+        return url
     path = "/app/watch" if (watch or focus) else "/app"
-    # tab=watch первым, чтобы не отрезался, если URL упрётся в лимит
     if watch or focus:
         url = f"{PUBLIC_URL}{path}?tab=watch"
         if focus:
@@ -108,10 +132,59 @@ def _app_url_with_sync(chat_id: int, focus: tuple | None = None, watch: bool = F
     return url
 
 
-def _view_signal_button(chat_id: int, ticker: str, signal_ts: int, market: str) -> InlineKeyboardButton | None:
-    """Кнопка Mini App сразу на вкладке «Отслеживаемые»."""
+def _remember_journal(chat_id: int, card: dict) -> int | None:
+    """Строка журнала до отправки. Если Telegram не примет сообщение — удалить."""
+    try:
+        jid, dropped = storage.add_signal_journal(chat_id, card)
+    except Exception as e:
+        logger.warning("journal save failed chat=%s: %s", chat_id, e)
+        return None
+    if dropped:
+        try:
+            journal_charts.unlink_ids(dropped)
+        except Exception as e:
+            logger.warning("journal prune files: %s", e)
+    return jid
+
+
+def _drop_journal(journal_id: int | None) -> None:
+    if not journal_id:
+        return
+    try:
+        storage.delete_signal_journal(journal_id)
+    except Exception as e:
+        logger.warning("journal delete %s: %s", journal_id, e)
+    try:
+        journal_charts.unlink_ids([journal_id])
+    except Exception:
+        pass
+
+
+async def _fill_journal_charts(journal_id: int) -> None:
+    try:
+        await journal_charts.ensure(journal_id)
+    except Exception as e:
+        logger.warning("journal charts %s: %s", journal_id, e)
+
+
+def _view_signal_button(
+    chat_id: int,
+    ticker: str,
+    signal_ts: int,
+    market: str,
+    journal_id: int | None = None,
+) -> InlineKeyboardButton | None:
+    """Mini App сразу на «Журнал сигналов» и на рынке этой карточки."""
+    if not journal_id:
+        try:
+            journal_id = storage.find_signal_journal_id(
+                chat_id, ticker, int(signal_ts or 0), market or "crypto",
+            )
+        except Exception as e:
+            logger.warning("journal lookup failed: %s", e)
+            journal_id = None
     view_url = _app_url_with_sync(
-        chat_id, focus=(ticker, signal_ts, market or "crypto"), watch=True,
+        chat_id, journal=(market or "crypto", journal_id),
     )
     if not view_url:
         return None
@@ -334,6 +407,8 @@ async def send_signal(card: dict, chat_ids: list[int]):
         return
     text = _format_card(card)
     for chat_id in chat_ids:
+        journal_id = None
+        sent_ok = False
         try:
             card_key = f"{card['ticker']}:{card['side']}:{card.get('strategy','brk')}:{int(card['level']*1e6)}"
             card_id = storage.make_pending_card_id(card_key, chat_id)
@@ -349,6 +424,8 @@ async def send_signal(card: dict, chat_ids: list[int]):
                 storage.record_signal_delivery(chat_id, card)
             except Exception as e:
                 logger.warning("signal_history record failed %s: %s", card_id, e)
+            # Журнал — только если карточка реально ушла в чат (см. except ниже).
+            journal_id = _remember_journal(chat_id, card)
             # watch:{16-hex} fits Telegram 64-byte callback_data limit
             row = [InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_id}")]
             view_btn = _view_signal_button(
@@ -356,14 +433,21 @@ async def send_signal(card: dict, chat_ids: list[int]):
                 card.get("ticker") or "",
                 signal_ts,
                 card.get("market") or "crypto",
+                journal_id=journal_id,
             )
             rows = [row]
             if view_btn:
                 rows.append([view_btn])
             kb = InlineKeyboardMarkup(inline_keyboard=rows)
             await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
+            sent_ok = True
         except Exception as e:
+            if journal_id and not sent_ok:
+                _drop_journal(journal_id)
             logger.warning("Не удалось отправить %s: %s", chat_id, e)
+            continue
+        if journal_id:
+            asyncio.create_task(_fill_journal_charts(journal_id))
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -1902,6 +1986,8 @@ def _mount_miniapp_routes(app: web.Application) -> None:
     app.router.add_put("/api/signal-filter", wa.api_signal_filter_put)
     app.router.add_get("/api/miniapp/state", wa.api_miniapp_state_get)
     app.router.add_put("/api/miniapp/state", wa.api_miniapp_state_put)
+    app.router.add_get("/api/journal", wa.api_journal_get)
+    app.router.add_get("/api/journal/chart/{row_id}/{tf}", wa.api_journal_chart)
 
     async def _options(request: web.Request) -> web.Response:
         return web.Response(status=204, headers=wa._cors_headers(request))
@@ -1977,6 +2063,9 @@ async def main():
     app.router.add_get("/", handle_index)
     app.router.add_get("/app", handle_index)
     app.router.add_get("/app/watch", handle_index)
+    # Журнал: путь, не query — Telegram иногда отбрасывает query у web_app.
+    app.router.add_get("/app/journal/{market}", handle_index)
+    app.router.add_get("/app/journal/{market}/{sig_id}", handle_index)
     _mount_miniapp_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
