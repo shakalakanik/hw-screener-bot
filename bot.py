@@ -205,22 +205,12 @@ def _view_signal_button(
 
 
 def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
-    """Клавиатура; «Обновить шаблоны» — WebApp с sync URL, если PUBLIC_URL задан."""
-    ai_on = bool(chat_id) and storage.get_ai_enabled(chat_id)
-    ai_btn = "🤖 ИИ ✓" if ai_on else "🤖 ИИ"
+    """Клавиатура. Шаблоны обновляются только синхронизацией («🔗 Синхронизация шаблонов» / /syncurl).
+    ИИ всегда включён — отдельной кнопки нет."""
     rows = [
         [KeyboardButton(text="📡 Скан"), KeyboardButton(text="⚙️ Фильтр")],
-        [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔗 Sync")],
-        [KeyboardButton(text=ai_btn)],
+        [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔗 Синхронизация шаблонов")],
     ]
-    app_url = _app_url_with_sync(chat_id) if chat_id else None
-    if app_url:
-        rows.append([KeyboardButton(
-            text="🔄 Обновить шаблоны",
-            web_app=WebAppInfo(url=app_url),
-        )])
-    else:
-        rows.append([KeyboardButton(text="🔄 Обновить шаблоны")])
     rows.append([KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⛔ Стоп")])
     return ReplyKeyboardMarkup(
         keyboard=rows,
@@ -492,12 +482,12 @@ async def cmd_start(msg: Message):
         "👋 <b>HW Screener Bot</b>\n\n"
         "Команды:\n"
         "/filter — выбрать шаблоны и рынки\n"
-        "/syncurl — постоянная ссылка синхронизации (один раз)\n"
-        "🔄 Обновить шаблоны — Mini App без повторного URL\n"
+        "/syncurl или «🔗 Синхронизация шаблонов» — синхронизировать шаблоны из Mini App\n"
         "/scan — запустить скан сейчас\n"
         "/status — текущие настройки\n"
         "/ai — ИИ-помощник (настройки и сигналы)\n"
-        "/stop — остановить сигналы",
+        "/stop — остановить сигналы\n\n"
+        "🤖 ИИ всегда включён: просто пиши свободным текстом по-русски.",
         parse_mode="HTML",
         reply_markup=main_keyboard(msg.chat.id),
     )
@@ -516,7 +506,8 @@ async def cmd_stop(msg: Message):
 
 # ── /syncurl — выдать стабильную ссылку для HTML ─────────────────────────────
 @dp.message(Command("syncurl"))
-@dp.message(F.text == "🔗 Sync")
+@dp.message(Command("refresh_tpl"))   # старая команда → тот же sync
+@dp.message(F.text.in_({"🔗 Синхронизация шаблонов", "🔗 Sync", "🔄 Обновить шаблоны"}))   # старые клавиатуры
 async def cmd_syncurl(msg: Message):
     chat_id = msg.chat.id
     if not PUBLIC_URL:
@@ -534,7 +525,7 @@ async def cmd_syncurl(msg: Message):
     if app:
         kb_extra = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(
-                text="📱 Открыть Mini App (авто-sync)",
+                text="📱 Открыть Mini App → синхронизация",
                 web_app=WebAppInfo(url=app),
             )
         ]])
@@ -542,7 +533,7 @@ async def cmd_syncurl(msg: Message):
         f"🔗 <b>URL синхронизации</b> (постоянный)\n\n"
         f"<code>{url}</code>\n\n"
         f"Вставь <b>один раз</b> в HTML (📬) — сохранится в браузере.\n"
-        f"Дальше жми «🔄 Обновить шаблоны» или 📬 — без новой ссылки.\n\n"
+        f"Дальше просто открывай Mini App кнопкой ниже («🔗 Синхронизация шаблонов») — шаблоны синхронизируются сами.\n\n"
         f"Ссылка не протухает после деплоя (пока не сменится токен бота).",
         parse_mode="HTML",
         reply_markup=kb_extra or main_keyboard(chat_id),
@@ -554,10 +545,7 @@ async def cmd_syncurl(msg: Message):
         )
 
 
-# ── 🔄 Обновить шаблоны — Mini App с pre-injected sync URL ───────────────────
-@dp.message(Command("refresh_tpl"))
-@dp.message(F.text == "🔄 Обновить шаблоны")
-async def cmd_refresh_tpl(msg: Message):
+async def cmd_refresh_tpl(msg: Message):   # не зарегистрирован: «Обновить шаблоны» убрано, всё через /syncurl
     chat_id = msg.chat.id
     if not PUBLIC_URL:
         await msg.answer(
@@ -674,7 +662,7 @@ async def cmd_filter(msg: Message):
             "📭 Шаблоны ещё не синхронизированы.\n\n"
             "1. Открой HTML-скринер\n"
             "2. Сохрани шаблоны кнопкой «Сохранить как шаблон»\n"
-            "3. Один раз: /syncurl или «🔄 Обновить шаблоны»\n"
+            "3. /syncurl или «🔗 Синхронизация шаблонов»\n"
             "4. В Mini App нажми 📬 (URL сохранится сам)\n\n"
             f"Пока можно включить встроенный {AUTO_NAME} — все фильтры авто."
         )
@@ -1197,12 +1185,10 @@ async def _send_ai_proposal_confirm(chat_id: int, proposal: dict, base_text: str
 
 @dp.message(Command("ai_on"))
 async def cmd_ai_on(msg: Message):
-    storage.set_ai_enabled(msg.chat.id, True)
     hint = (
-        "🤖 ИИ-режим <b>включён</b>. Пиши свободно по-русски "
-        "(«включи мосбиржу», вопросы про сигналы/шаблоны) — свободный текст поддерживается.\n"
-        "Команды с / по-прежнему работают.\n"
-        "Выключить: /ai_off или кнопка «🤖 ИИ ✓»."
+        "🤖 ИИ всегда включён. Пиши свободно по-русски "
+        "(«включи мосбиржу», вопросы про сигналы/шаблоны).\n"
+        "Команды с / по-прежнему работают."
     )
     if not ai_chat.is_configured():
         hint += (
@@ -1214,32 +1200,18 @@ async def cmd_ai_on(msg: Message):
 
 @dp.message(Command("ai_off"))
 async def cmd_ai_off(msg: Message):
-    storage.set_ai_enabled(msg.chat.id, False)
-    storage.clear_ai_pending(msg.chat.id)
     await msg.answer(
-        "🤖 ИИ-режим выключен. Включить: /ai_on или кнопка «🤖 ИИ».",
+        "🤖 ИИ всегда включён — выключать не нужно. Просто пиши текстом или /ai.",
         reply_markup=main_keyboard(msg.chat.id),
     )
 
 
 @dp.message(Command("ai"))
-@dp.message(F.text.in_({"🤖 ИИ", "🤖 ИИ ✓"}))
+@dp.message(F.text.in_({"🤖 ИИ", "🤖 ИИ ✓"}))   # старые клавиатуры → справка
 async def cmd_ai(msg: Message):
     chat_id = msg.chat.id
-    # Кнопка без аргументов — toggle; /ai с текстом — один вопрос
     raw = (msg.text or "").strip()
-    if raw in ("🤖 ИИ", "🤖 ИИ ✓") or raw == "/ai":
-        enabled = storage.get_ai_enabled(chat_id)
-        if raw in ("🤖 ИИ", "🤖 ИИ ✓"):
-            storage.set_ai_enabled(chat_id, not enabled)
-            enabled = not enabled
-            if enabled:
-                await cmd_ai_on(msg)
-            else:
-                await cmd_ai_off(msg)
-            return
-        # bare /ai — help + enable
-        storage.set_ai_enabled(chat_id, True)
+    if raw in ("🤖 ИИ", "🤖 ИИ ✓") or raw.split("@")[0] == "/ai":
         await msg.answer(
             "🤖 <b>ИИ-помощник HW Screener</b>\n\n"
             "Свободный текст на русском <b>поддерживается</b> — пиши как удобно.\n"
@@ -1250,7 +1222,7 @@ async def cmd_ai(msg: Message):
             "• чем fbo отличается от brk\n"
             "• поставь шаблону X стратегию both\n\n"
             "Любое изменение настроек сначала покажу и применю только после «да».\n"
-            "/ai_off — выключить режим.",
+            "ИИ всегда включён — отдельно включать не нужно.",
             parse_mode="HTML",
             reply_markup=main_keyboard(chat_id),
         )
@@ -1321,7 +1293,7 @@ async def on_free_text(msg: Message):
     chat_id = msg.chat.id
     text_raw = (msg.text or "").strip()
     menu_labels = {
-        "📡 Скан", "⚙️ Фильтр", "📊 Статус", "🔗 Sync",
+        "📡 Скан", "⚙️ Фильтр", "📊 Статус", "🔗 Sync", "🔗 Синхронизация шаблонов",
         "🔄 Обновить шаблоны", "▶️ Старт", "⛔ Стоп",
         "🤖 ИИ", "🤖 ИИ ✓",
     }
@@ -2116,10 +2088,7 @@ async def main():
         BotCommand(command="filter", description="Шаблоны и рынки"),
         BotCommand(command="status", description="Текущие настройки"),
         BotCommand(command="ai", description="ИИ-помощник (Gemini)"),
-        BotCommand(command="ai_on", description="Включить ИИ-режим"),
-        BotCommand(command="ai_off", description="Выключить ИИ-режим"),
-        BotCommand(command="syncurl", description="Ссылка синхронизации HTML"),
-        BotCommand(command="refresh_tpl", description="Обновить шаблоны из Mini App"),
+        BotCommand(command="syncurl", description="Синхронизация шаблонов (Mini App)"),
         BotCommand(command="start", description="Подписаться на сигналы"),
         BotCommand(command="stop", description="Остановить сигналы"),
     ])

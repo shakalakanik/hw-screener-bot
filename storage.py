@@ -1411,12 +1411,8 @@ def _ensure_ai_tables(c: sqlite3.Connection):
 
 
 def get_ai_enabled(chat_id: int) -> bool:
-    with _conn() as c:
-        _ensure_ai_tables(c)
-        row = c.execute(
-            "SELECT enabled FROM ai_state WHERE chat_id=?", (chat_id,)
-        ).fetchone()
-    return bool(row["enabled"]) if row else False
+    """ИИ-режим всегда включён для всех (старое сохранённое «выкл» игнорируется)."""
+    return True
 
 
 def set_ai_enabled(chat_id: int, enabled: bool) -> None:
