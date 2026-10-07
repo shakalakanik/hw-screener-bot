@@ -428,7 +428,8 @@
         '<div><span>тейк-профит</span> <b class="take">' + jFmt(take) + '  (+' + tp.toFixed(1) + '%)</b></div>' +
         '<div><span>оценка</span> ' + score + '</div>' +
         '<div><span>тренд D1</span> <b>' + jEsc(bias) + '</b></div>' +
-        '<div><span>сигнал</span> <b>' + jEsc(jMsk(c.signal_ts || row.signal_ts)) + '</b></div>' +
+        // signal_ts = открытие H1-бара; показываем закрытие (+1ч), как HTML new Date(t+3600000)
+        '<div><span>сигнал</span> <b>' + jEsc(jMsk((Number(c.signal_ts || row.signal_ts) || 0) && (Number(c.signal_ts || row.signal_ts) + 3600000))) + '</b></div>' +
       '</div>' +
       '<div class="charts">' +
         box('Дневной (1D)', charts.d1) +
