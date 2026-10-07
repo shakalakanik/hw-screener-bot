@@ -480,16 +480,41 @@
     }
   }
 
+  // Прокрутка к сделке: ждём, пока вкладка журнала видима и #jcard-<id> отрисован,
+  // центрируем, подсвечиваем и докручиваем, пока грузятся графики (они сдвигают layout).
+  var focusTimer = null, focusDone = '';
   function focusJournalCard() {
     var t = parseJournalTarget();
     if (!t) return;
-    var card = t.id ? document.getElementById('jcard-' + t.id) : null;
-    if (card) card.classList.add('hw-focus');
-    var el = card || document.getElementById('journalSec-' + t.market);
-    if (el && el.scrollIntoView) {
-      try { el.scrollIntoView({ block: 'start', behavior: 'smooth' }); }
-      catch (e) { try { el.scrollIntoView(); } catch (e2) {} }
+    var key = t.market + ':' + t.id;
+    if (focusDone === key) {   // перерисовка журнала: только вернуть подсветку
+      var c0 = t.id ? document.getElementById('jcard-' + t.id) : null;
+      if (c0) c0.classList.add('hw-focus');
+      return;
     }
+    if (focusTimer) clearInterval(focusTimer);
+    var t0 = Date.now(), hits = 0, userMoved = false;
+    var stop = function () { userMoved = true; };
+    ['touchstart', 'wheel'].forEach(function (ev) { window.addEventListener(ev, stop, { once: true, passive: true }); });
+    focusTimer = setInterval(function () {
+      var pane = document.getElementById('paneJournal');
+      var visible = pane && pane.style.display !== 'none' && pane.offsetParent !== null;
+      var card = t.id ? document.getElementById('jcard-' + t.id) : null;
+      var el = card || document.getElementById('journalSec-' + t.market);
+      if (userMoved || Date.now() - t0 > 8000 || (el && visible && hits >= 6)) {
+        clearInterval(focusTimer); focusTimer = null;
+        if (el) focusDone = key;
+        return;
+      }
+      if (!el || !visible) return;
+      if (card && !card.classList.contains('hw-focus')) {
+        document.querySelectorAll('#paneJournal .hw-journal-card.hw-focus').forEach(function (c) { c.classList.remove('hw-focus'); });
+        card.classList.add('hw-focus');
+      }
+      try { el.scrollIntoView({ block: card ? 'center' : 'start', behavior: hits ? 'auto' : 'smooth' }); }
+      catch (e) { try { el.scrollIntoView(); } catch (e2) {} }
+      hits++;
+    }, 250);
   }
 
   var journalSeq = 0;
