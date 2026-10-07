@@ -47,9 +47,8 @@ table {
 
 /* Telegram sticky bar injected by bridge.js */
 #tg-bridge-bar {
-  position: sticky;
-  top: 0;
-  z-index: 9999;
+  /* только строка статуса sync; липкий вверху — переключатель рынка #hwMktBar */
+  position: static;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;

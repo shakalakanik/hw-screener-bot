@@ -2342,7 +2342,7 @@ function watchKey(){ return 'hw_fbo_watch_all'; }
 })();
 function ensureWatchSym(t){
   if(!t||typeof t!=='object') return t;
-  const m=t.mkt||t.market||'crypto';
+  let m=t.mkt||t.market||((t.ex==='MOEX'||t.src==='moex')?'ru':'crypto'); if(m==='moex') m='ru'; if(m!=='ru'&&m!=='algo') m='crypto';
   let base=t.base, sym=t.sym; const tick=t.ticker||t.symbol||'';
   if(!base&&sym){ base=m==='ru'?sym:/-USDT-SWAP$/i.test(String(sym))?String(sym).split('-')[0]:String(sym).replace(/USDT$/i,''); }
   if(!base&&tick){ base=m==='ru'?tick:String(tick).replace(/USDT$/i,''); }

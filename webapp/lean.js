@@ -518,6 +518,80 @@
   }
 
   var journalSeq = 0;
+  var lastJournalData = null;
+
+  /* ---- Переключатель рынка вверху: Крипта | Мосбиржа | Крипта (Алго) ----
+   * Использует штатный #mkt / applyMarket() скринера (per-market state: шаблоны, бэктест,
+   * тестер, скан, «Отслеживаю»). Журнал фильтруется здесь. */
+  var MKT_LABELS = [['crypto', 'Крипта'], ['ru', 'Мосбиржа'], ['algo', 'Крипта (Алго)']];
+  function curMarket() {
+    var mk = document.getElementById('mkt');
+    var v = mk && mk.value;
+    return (v === 'ru' || v === 'algo') ? v : 'crypto';
+  }
+  function setMarket(m) {
+    m = (m === 'moex' || m === 'ru') ? 'ru' : (m === 'algo' ? 'algo' : 'crypto');
+    var mk = document.getElementById('mkt');
+    if (mk && mk.value !== m) {
+      mk.value = m;
+      try { mk.dispatchEvent(new Event('change')); } catch (e) {}
+    }
+    syncMarketBar();
+  }
+  function syncMarketBar() {
+    var cur = curMarket();
+    var bs = document.querySelectorAll('#hwMktBar button');
+    for (var i = 0; i < bs.length; i++) bs[i].classList.toggle('on', bs[i].getAttribute('data-m') === cur);
+  }
+  function onMarketChanged() {
+    syncMarketBar();
+    var pane = document.getElementById('paneJournal');
+    if (pane && pane.style.display !== 'none' && lastJournalData) renderJournal(lastJournalData);
+  }
+  function installMarketBar() {
+    if (document.getElementById('hwMktBar')) return;
+    var wrap = document.querySelector('.wrap') || document.body;
+    var st = document.createElement('style');
+    st.id = 'hw-mktbar-css';
+    st.textContent =
+      '#hwMktBar{position:sticky;top:0;z-index:10000;box-shadow:0 2px 6px rgba(0,0,0,.18);display:flex;gap:4px;padding:6px 0;margin:0 0 8px;' +
+      'background:var(--bg,#0f1115)}' +
+      '#hwMktBar button{flex:1 1 0;min-width:0;padding:9px 4px;font-size:14px;font-weight:600;white-space:nowrap;' +
+      'overflow:hidden;text-overflow:ellipsis;border-radius:8px;border:1px solid rgba(127,127,127,.35);' +
+      'background:transparent;color:inherit;cursor:pointer}' +
+      '#hwMktBar button.on{background:#4c9aff;border-color:#4c9aff;color:#fff}' +
+      '@media (max-width:380px){#hwMktBar button{font-size:12.5px;padding:8px 2px}}';
+    document.head.appendChild(st);
+    var bar = document.createElement('div');
+    bar.id = 'hwMktBar';
+    bar.setAttribute('role', 'tablist');
+    bar.innerHTML = MKT_LABELS.map(function (x) {
+      return '<button type="button" data-m="' + x[0] + '">' + x[1] + '</button>';
+    }).join('');
+    wrap.insertBefore(bar, wrap.firstChild);
+    bar.addEventListener('click', function (ev) {
+      var b = ev.target && ev.target.closest ? ev.target.closest('button[data-m]') : null;
+      if (b) setMarket(b.getAttribute('data-m'));
+    });
+    // старый селектор «Рынок» в панели скана — скрыт, остаётся источником правды
+    var mk = document.getElementById('mkt');
+    if (mk) {
+      var f = mk.closest ? mk.closest('.field') : null;
+      if (f) f.style.display = 'none';
+      mk.addEventListener('change', onMarketChanged);
+    }
+    syncMarketBar();
+  }
+  // Deep link (журнал / «Отслеживаю») переключает рынок ПЕРВЫМ — поверх запомненного
+  var targetMarketDone = false;
+  function applyTargetMarket() {
+    if (targetMarketDone) return;
+    var t = parseJournalTarget();
+    if (t && t.market) { targetMarketDone = true; setMarket(t.market); return; }
+    var L = null;
+    try { L = parseDeepLink(); } catch (e) {}
+    if (L && L.fm) { targetMarketDone = true; setMarket(L.fm); }
+  }
   function renderJournal(data) {
     var body = document.getElementById('journalBody');
     if (!body) return;
@@ -526,10 +600,11 @@
     var crypto = (data && data.crypto) || [];
     var ru = (data && data.ru) || [];
     var algo = (data && data.algo) || [];
+    lastJournalData = data || {};
     var secs = { crypto: ['Крипта', crypto], ru: ['Мосбиржа', ru], algo: ['Крипта (Алго)', algo] };
-    var order = ['crypto', 'ru', 'algo'];
-    if (t && secs[t.market]) order = [t.market].concat(order.filter(function (x) { return x !== t.market; }));
-    var html = order.map(function (k) { return journalSectionHtml(k, secs[k][0], secs[k][1]); }).join('');
+    // Только раздел выбранного вверху рынка (deep link уже переключил рынок на свой)
+    var cur = curMarket();
+    var html = journalSectionHtml(cur, secs[cur][0], secs[cur][1]);
     body.innerHTML = html;
     armJournalCharts(body);
     focusJournalCard();
@@ -637,6 +712,7 @@
     var timer = setInterval(function () {
       if (journalUserLeft || Date.now() - t0 > 4000) { clearInterval(timer); return; }
       if (!parseJournalTarget()) return;
+      applyTargetMarket();
       var pane = document.getElementById('paneJournal');
       var tab = document.getElementById('tabJournal');
       if (!pane || !tab || pane.style.display === 'none' || !tab.classList.contains('on')) {
@@ -657,6 +733,8 @@
         hideOtherTabs();
         renameTemplatesTab();
         installJournalUI();
+        installMarketBar();
+        applyTargetMarket();
         selectDefaultTab();
         focusFromLink();
         enforceJournalOpen();

@@ -584,11 +584,11 @@
       try { snap = window.__hwSnapshotMiniappState && window.__hwSnapshotMiniappState(); } catch (e0) {}
       var bt = (data.backtest && typeof data.backtest === 'object') ? data.backtest : { crypto: [], ru: [] };
       var sig = (data.signals && typeof data.signals === 'object') ? data.signals : { crypto: [], ru: [] };
-      var btEmpty = !(bt.crypto && bt.crypto.length) && !(bt.ru && bt.ru.length);
-      var sigEmpty = !(sig.crypto && sig.crypto.length) && !(sig.ru && sig.ru.length);
+      var btEmpty = !(bt.crypto && bt.crypto.length) && !(bt.ru && bt.ru.length) && !(bt.algo && bt.algo.length);
+      var sigEmpty = !(sig.crypto && sig.crypto.length) && !(sig.ru && sig.ru.length) && !(sig.algo && sig.algo.length);
       if (snap) {
-        var locBtEmpty = !(snap.backtest.crypto && snap.backtest.crypto.length) && !(snap.backtest.ru && snap.backtest.ru.length);
-        var locSigEmpty = !(snap.signals.crypto && snap.signals.crypto.length) && !(snap.signals.ru && snap.signals.ru.length);
+        var locBtEmpty = !(snap.backtest.crypto && snap.backtest.crypto.length) && !(snap.backtest.ru && snap.backtest.ru.length) && !(snap.backtest.algo && snap.backtest.algo.length);
+        var locSigEmpty = !(snap.signals.crypto && snap.signals.crypto.length) && !(snap.signals.ru && snap.signals.ru.length) && !(snap.signals.algo && snap.signals.algo.length);
         if (btEmpty && !locBtEmpty && !cleared.backtest) {
           data = Object.assign({}, data, { backtest: snap.backtest });
           needSeed = true;
