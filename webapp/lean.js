@@ -277,20 +277,21 @@
 
   function journalFromStartParam(sp) {
     // j_c / j_c_12 — крипта, j_m / j_m_12 — Мосбиржа. Так открывает кнопка t.me?startapp=
-    var m = String(sp || '').match(/^j_(c|m)(?:_(\d+))?$/i);
+    var m = String(sp || '').match(/^j_(c|m|a)(?:_(\d+))?$/i);
     if (!m) return null;
+    var c = m[1].toLowerCase();
     return {
-      market: m[1].toLowerCase() === 'm' ? 'ru' : 'crypto',
+      market: c === 'm' ? 'ru' : c === 'a' ? 'algo' : 'crypto',
       id: m[2] ? (parseInt(m[2], 10) || 0) : 0
     };
   }
 
   function parseJournalTarget() {
     var market = '', id = 0, fromPath = false;
-    var m = (location.pathname || '').match(/\/journal\/(crypto|moex|ru)(?:\/(\d+))?/i);
+    var m = (location.pathname || '').match(/\/journal\/(crypto|moex|ru|algo)(?:\/(\d+))?/i);
     if (m) {
       fromPath = true;
-      market = /^(moex|ru)$/i.test(m[1]) ? 'ru' : 'crypto';
+      market = /^(moex|ru)$/i.test(m[1]) ? 'ru' : /^algo$/i.test(m[1]) ? 'algo' : 'crypto';
       id = m[2] ? (parseInt(m[2], 10) || 0) : 0;
     }
     if (!fromPath) {
@@ -300,7 +301,7 @@
         var q = new URLSearchParams(location.search || '');
         if ((q.get('tab') || '') === 'journal') {
           var fm = (q.get('fm') || '').toLowerCase();
-          market = (fm === 'ru' || fm === 'moex') ? 'ru' : 'crypto';
+          market = (fm === 'ru' || fm === 'moex') ? 'ru' : fm === 'algo' ? 'algo' : 'crypto';
           id = parseInt(q.get('jid') || '0', 10) || 0;
         }
       } catch (e) {}
@@ -399,10 +400,10 @@
     var risk = (eN && !isNaN(eN) && !isNaN(sN)) ? Math.abs(eN - sN) / Math.abs(eN) * 100 : 0;
     var tp = (eN && !isNaN(eN) && !isNaN(tN)) ? Math.abs(tN - eN) / Math.abs(eN) * 100 : 0;
     var dist = (c.dist_atr != null && !isNaN(Number(c.dist_atr))) ? Number(c.dist_atr) * 100 : null;
-    var strat = c.strategy === 'brk' ? '📈 Пробой' : '🔻 Ложный пробой';
-    var prob = (c.strategy !== 'brk' && c.prob != null && c.prob !== '')
+    var strat = c.strategy === 'brk' ? '📈 Пробой' : c.strategy === 'algo' ? ('⚡ Алго' + (c.algo_combo ? ': ' + jEsc(c.algo_combo) : '')) : '🔻 Ложный пробой';
+    var prob = (c.strategy === 'fbo' && c.prob != null && c.prob !== '')
       ? '  (модель p=' + Number(c.prob).toFixed(2) + ')' : '';
-    var mkt = row.market === 'ru' ? '🇷🇺 Мосбиржа' : '🌐 Крипта';
+    var mkt = row.market === 'ru' ? '🇷🇺 Мосбиржа' : row.market === 'algo' ? '⚡ Крипта (Алго)' : '🌐 Крипта';
     var tpl = c.matched_template ? '<div><span>шаблон</span> <b>' + jEsc(c.matched_template) + '</b></div>' : '';
     var score = (c.score != null && c.score !== '')
       ? ('⭐ Оценка: <b>' + Number(c.score).toFixed(1) + '</b> / 10')
@@ -499,12 +500,11 @@
     var t = parseJournalTarget();
     var crypto = (data && data.crypto) || [];
     var ru = (data && data.ru) || [];
-    var html;
-    if (t && t.market === 'ru') {
-      html = journalSectionHtml('ru', 'Мосбиржа', ru) + journalSectionHtml('crypto', 'Крипта', crypto);
-    } else {
-      html = journalSectionHtml('crypto', 'Крипта', crypto) + journalSectionHtml('ru', 'Мосбиржа', ru);
-    }
+    var algo = (data && data.algo) || [];
+    var secs = { crypto: ['Крипта', crypto], ru: ['Мосбиржа', ru], algo: ['Крипта (Алго)', algo] };
+    var order = ['crypto', 'ru', 'algo'];
+    if (t && secs[t.market]) order = [t.market].concat(order.filter(function (x) { return x !== t.market; }));
+    var html = order.map(function (k) { return journalSectionHtml(k, secs[k][0], secs[k][1]); }).join('');
     body.innerHTML = html;
     armJournalCharts(body);
     focusJournalCard();
