@@ -9,7 +9,9 @@ import httpx
 
 from hwv1 import Bar, evaluate
 import storage
+import algo as algo_mod
 from moex import (
+    fetch_imoex_ctx,
     fetch_tickers_moex,
     fetch_klines_moex_h1,
     moex_client,
@@ -376,16 +378,20 @@ _F_DEF = {
     "brkbars": None, "volret": 0.0, "dow": None, "ema": None, "appr": None, "atrr": None,
     "dens": 99.0, "round": None, "green": None, "streakd": 0.0, "atrd": None, "minn": 8,
     "cov": None, "preacc": None, "smooth": None, "d1ag": None, "poke": 0.0, "msc": 0.0,
+    "rusqueeze": None, "ruclose": None, "ruimoex": None, "rurelstr": None,
 }
 _F_STR = ("kind", "hours", "daypos", "dow", "appr", "atrr", "round", "green", "atrd")
 _F_INT = ("touch", "acc", "bias", "side", "ema", "brkbars", "cov", "preacc", "smooth", "d1ag")
 MAXRISK = 0.20  # как MAXRISK в HTML: риск > 20% цены — сделка отбрасывается
 
 
-def _f_from_template(raw: dict) -> dict:
-    """Как readF() в HTML: отсутствующее/«auto» значение → DEF."""
+def _f_from_template(raw: dict, market: str | None = None) -> dict:
+    """Как readF() в HTML: отсутствующее/«auto» значение → DEF.
+    applyMarket(): для акций РФ DEF.hours = '0-24' (все часы торгов), для крипты '9-23'."""
     f = {}
     for k, dv in _F_DEF.items():
+        if k == "hours" and market == "ru":
+            dv = "0-24"
         v = raw.get(k, "auto") if isinstance(raw, dict) else "auto"
         if v is None or v == "auto":
             f[k] = dv
@@ -552,6 +558,15 @@ def passes_html(s: dict, f: dict) -> bool:
             return False
         if f["atrd"][0] == "f" and not a > float(f["atrd"][1:]):
             return False
+    # РУ-фильтры нового HTML — только для акций Мосбиржи (s.mkt==='ru').
+    # 1:1 с HTML: readF() делает parseFloat('1') → 1, а passes() сравнивает f.rusqueeze==='1',
+    # поэтому в текущем HTML эти фильтры фактически НЕ срабатывают. Здесь то же самое
+    # (f[...] — float, сравнение со строкой "1" ложно), чтобы бот = HTML.
+    if s.get("mkt") == "ru":
+        for fk, sk in (("rusqueeze", "ru_squeeze"), ("ruclose", "ru_close_pos"),
+                       ("ruimoex", "ru_imoex_ok"), ("rurelstr", "ru_rel_str")):
+            if f.get(fk) == "1" and not s.get(sk):
+                return False
     return True
 
 
@@ -559,7 +574,8 @@ def template_risk(card: dict, f: dict) -> tuple[float, float, float] | None:
     """recompute() из HTML: риск = max(stop% * ATR_D, 2% цены); тейк = tgt*R. → (stop, take, risk)."""
     e = float(card["last"])
     atr_d = float(card.get("atr_d") or 0)
-    risk = max((f["stop"] / 100.0) * atr_d, 0.02 * e)
+    min_pct = 0.01 if card.get("market") == "ru" else 0.02   # новый HTML: 1% РФ / 2% крипта
+    risk = max((f["stop"] / 100.0) * atr_d, min_pct * e)
     if risk <= 0 or risk / e > MAXRISK:
         return None
     long_ = card["side"] == "LONG"
@@ -1118,6 +1134,7 @@ async def _deliver_html(
     on_signal: Callable[[dict, list[int]], Awaitable[None]],
     chat_best_only: Callable[[int], dict] | None = None,
     stats: dict | None = None,
+    algo_ctx: dict | None = None,
 ) -> int:
     """Для каждого чата и каждого его активного шаблона — ровно тот список, что показал бы
     раздел «Сигналы» в HTML за последние win_h часов (html_pipeline.apply_all).
@@ -1161,7 +1178,16 @@ async def _deliver_html(
                 continue
             name = tpl.get("_name", "")
             raw = tpl.get("filters") or {}
-            rows = apply_all(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), cutoff, week_max)
+            if mkt == "algo":
+                # «Крипта (Алго)»: HTML applyAll для algo отдаёт все сигналы шаблона без лимитов
+                rows = [c for c in algo_mod.cards_for(algo_ctx, raw, name) if c["signal_ts"] >= cutoff]
+                for c in rows:
+                    key = (c["ticker"], "algo", c["signal_ts"], c["side"], round(c["level"], 10))
+                    if key not in chosen:
+                        chosen[key] = {**c, "matched_template": name, "template_thr": None}
+                continue
+            rows = apply_all(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), cutoff, week_max,
+                             win_h=win_h, market=mkt)
             thr = raw.get("thr")
             try:
                 thr = float(thr) if thr not in (None, "auto") else None
@@ -1250,10 +1276,11 @@ async def run_scan(
             except Exception as e:
                 logger.warning("MOEX tickers failed: %s", e)
                 tickers_ru = []
+            imoex_ctx = await fetch_imoex_ctx(client)
             results = []
             for i in range(0, len(tickers_ru), 6):
                 results += await asyncio.gather(
-                    *[scan_one_moex(client, t, lookback_hours=win_h, no_night=False)
+                    *[scan_one_moex(client, t, lookback_hours=win_h, no_night=False, imoex_ctx=imoex_ctx)
                       for t in tickers_ru[i:i + 6]],
                     return_exceptions=True,
                 )
@@ -1263,8 +1290,16 @@ async def run_scan(
                 c["market"] = "ru"
             all_cards += cc
 
+    algo_ctx = None
+    if "algo" in needed:
+        try:
+            async with httpx.AsyncClient() as client:
+                algo_ctx = await algo_mod.prepare(client, top_n=TOP_N, min_vol=MIN_VOL_USD_24H, win_h=win_h)
+        except Exception as e:
+            logger.warning("algo scan failed: %s", e)
+
     sent = await _deliver_html(all_cards, subscribers, chat_filters, now_ms, win_h,
-                               on_signal, chat_best_only, stats)
+                               on_signal, chat_best_only, stats, algo_ctx=algo_ctx)
     logger.info("Скан: карточек %d → отправлено %d", len(all_cards), sent)
     return sent
 
@@ -1339,6 +1374,7 @@ async def run_manual_scan(
             except Exception as e:
                 logger.warning("MOEX tickers failed (manual): %s", e)
                 tickers_ru = []
+            imoex_ctx = await fetch_imoex_ctx(client)
             # как HTML: turn ≥ minVol×0.5, топ nInst по обороту
             tickers_ru = [t for t in tickers_ru if float(t.get("turnover24h") or 0) >= min_vol * 0.5]
             tickers_ru.sort(key=lambda t: -float(t.get("turnover24h") or 0))
@@ -1347,7 +1383,8 @@ async def run_manual_scan(
             results = []
             for i in range(0, len(tickers_ru), 6):
                 results += await asyncio.gather(
-                    *[scan_one_moex(client, t, lookback_hours=lookback, no_night=use_no_night)
+                    *[scan_one_moex(client, t, lookback_hours=lookback, no_night=use_no_night,
+                                    imoex_ctx=imoex_ctx)
                       for t in tickers_ru[i:i + 6]],
                     return_exceptions=True,
                 )

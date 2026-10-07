@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from screener import _f_from_template, passes_html
 
 HOLD = 168
+HOLD_RU = 48
+SHORT_WINDOW_H = 168   # окно скана < недели → «не более 10 сигналов в час» без недельного/score-капа
 MAXRISK = 0.20
 BE_TRIGGER_R = 1.5
 COIN_WINDOW_H = 12
@@ -65,7 +67,10 @@ def recompute(card: dict, f: dict) -> dict | None:
     """recompute(): стоп = max(stop% ATR, 2%), тейк = tgt·R, исход по часовикам с безубытком."""
     e = card["last"]
     atr_d = card.get("atr_d") or 0
-    risk = max((f["stop"] / 100.0) * atr_d, 0.02 * e)
+    is_ru = card.get("market") == "ru"
+    # новый HTML: стоп не меньше 1% для акций РФ (2% крипта), удержание 48ч РФ / 168ч крипта
+    risk = max((f["stop"] / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e)
+    hold = HOLD_RU if is_ru else HOLD
     if risk <= 0 or risk / e > MAXRISK:
         return None
     long_ = _d(card) == 1
@@ -75,7 +80,7 @@ def recompute(card: dict, f: dict) -> dict | None:
     cur_stop, moved = stop, False
     outcome, exit_t, last_ts = "open", card["signal_ts"], card["signal_ts"]
     for (ts, o, h, l, c) in card.get("fwd") or []:
-        if (ts - card["signal_ts"]) / 3_600_000 > HOLD:
+        if (ts - card["signal_ts"]) / 3_600_000 > hold:
             outcome, exit_t = "expired", last_ts
             break
         exit_t = ts
@@ -181,9 +186,10 @@ def _weekly_best_cap(rows, week_max):
 
 
 def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
-              cutoff_ms: int, week_max: int | None) -> list[dict]:
+              cutoff_ms: int, week_max: int | None, win_h: int | None = None,
+              market: str | None = None) -> list[dict]:
     """renderScan(): окно → стратегия → фильтры шаблона → лимиты → недельный лимит."""
-    f = _f_from_template(raw_filters or {})
+    f = _f_from_template(raw_filters or {}, market)
     rows = [c for c in cards if c["signal_ts"] >= cutoff_ms]
     if strategy != "both":
         rows = [c for c in rows if c.get("strategy", "fbo") == strategy]
@@ -195,6 +201,12 @@ def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
         if r is None or r["rp"] * 100 > f["maxrisk"]:
             continue
         ok.append(r)
-    seq = _apply_sequential(_cap_cluster(_apply_coin_limit(ok), f["cap"]), f)
+    # Новый HTML applyAll(scanMode): окно скана < 168ч → capH = min(cap||10, 10), недельный
+    # лимит и score-ранжирование пропускаются; окно ≥ 168ч → cap||3 и недельный топ-N.
+    short = win_h is not None and win_h < SHORT_WINDOW_H
+    cap_h = min(f["cap"] or 10, 10) if short else (f["cap"] or 3)
+    seq = _apply_sequential(_cap_cluster(_apply_coin_limit(ok), cap_h), f)
+    if short:
+        return seq
     wm = week_max if week_max else 999
     return _weekly_best_cap(seq, wm) if wm < 999 else seq

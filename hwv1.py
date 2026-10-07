@@ -338,6 +338,60 @@ def _risk_stop_take(entry: float, atr_d: float, side: str, stop_atr_frac: float,
 
 # ═══════════════════════════ стратегия «Пробой» (strategy="brk") ═════════════
 
+
+# ── Мосбиржа: правила нового HTML (scanSymbol, MKT==='ru') ──────────────────
+HOLD_CRYPTO, HOLD_RU = 168, 48
+
+
+def hold_h(market: str) -> int:
+    """getHold(): удержание 48ч для акций РФ, 168ч для крипты."""
+    return HOLD_RU if market == "ru" else HOLD_CRYPTO
+
+
+def _ru_friday_late(ts_ms: int) -> bool:
+    """Пятница ≥13:00 МСК — сигнал не берём (уйдёт на выходные). JS: getUTCDay()==5 && hl>=13."""
+    import time as _t
+    g = _t.gmtime(ts_ms / 1000)
+    hl = (g.tm_hour + 3) % 24
+    return ((g.tm_wday + 1) % 7) == 5 and hl >= 13
+
+
+def _ru_brk_reject(h1cut: list, bar, atr_d: float) -> bool:
+    """Пробой РФ: 10:00 МСК, слабый объём (<0.5 медианы 20), ATR D1 <1%, тело <40%."""
+    import time as _t
+    hl = (_t.gmtime(bar.ts / 1000).tm_hour + 3) % 24
+    if hl == 10:
+        return True
+    vv = sorted((b.vol_quote or 0) for b in h1cut[-21:-1])
+    v_med20 = vv[len(vv) // 2] if vv else 0
+    if v_med20 > 0 and (bar.vol_quote or 0) < 0.5 * v_med20:
+        return True
+    if atr_d > 0 and (atr_d / bar.c) < 0.01:
+        return True
+    rng = bar.h - bar.l
+    if rng > 0 and abs(bar.c - bar.o) / rng < 0.40:
+        return True
+    return False
+
+
+def _ru_feats(h1cut: list, bar, side: str, ctx: dict) -> dict:
+    w = h1cut[-6:-1]
+    sq = 0
+    if len(w) >= 5:
+        r = [b.h - b.l for b in w]
+        sq = 1 if (r[4] < r[0] and r[3] < r[0] and r[4] < r[1]) else 0
+    rng = bar.h - bar.l
+    if rng > 0:
+        cp = (bar.c >= bar.l + rng * 2 / 3) if side == "long" else (bar.c <= bar.l + rng / 3)
+        cp = 1 if cp else 0
+    else:
+        cp = 0
+    ia, ir, sr = ctx.get("imoexAbove"), ctx.get("imoexRet5"), ctx.get("sym5ret")
+    im = (1 if (ia if side == "long" else (not ia)) else 0) if ia is not None else 0
+    rs = (1 if ((sr - ir) > 0 if side == "long" else (sr - ir) < 0) else 0) if ir is not None else 0
+    return {"ru_squeeze": sq, "ru_close_pos": cp, "ru_imoex_ok": im, "ru_rel_str": rs}
+
+
 def _is_night_msk(ts_ms: int) -> bool:
     """1:1 с HTML: hl=(UTCHours+3)%24; ночь — НЕ (9<=hl<23), т.е. час НЕ входит в 09:00–23:00 МСК."""
     from datetime import datetime, timezone
@@ -614,6 +668,8 @@ def evaluate_brk(
     bias: str,
     lookback_hours: int = 24,
     no_night: bool = False,
+    market: str = "crypto",
+    ru_ctx: Optional[dict] = None,
 ) -> list[dict]:
     """
     Сигнал в момент первого закрытия часа за уровнем (текущий час — за уровнем,
@@ -641,6 +697,8 @@ def evaluate_brk(
     for i in range(start_idx, len(h1c)):
         bar = h1c[i]
         if no_night and _is_night_msk(bar.ts):
+            continue
+        if market == "ru" and _ru_friday_late(bar.ts):
             continue
         dk = bar.ts // 86_400_000
         if dk != cache_day:
@@ -683,6 +741,8 @@ def evaluate_brk(
             )
             if not bias_ok:
                 continue
+            if market == "ru" and _ru_brk_reject(h1_upto, bar, pit_atr_d):
+                continue
 
             rst = _risk_stop_take(bar.c, pit_atr_d, side, stop_atr_frac=0.10, target_r=3.0)
             if rst is None:
@@ -710,13 +770,15 @@ def evaluate_brk(
                 h1c, h1_upto, i, bar, lv, pit_levels, side, min_risk_b, side,
                 side == "long", side, [], pit_atr_d, a_h1, d1c,
             ))
+            if market == "ru":
+                sf.update(_ru_feats(h1_upto, bar, side, ru_ctx or {}))
             score = signal_score(sf, "brk")
 
             cards.append({
                 "ticker": ticker,
                 "version": VERSION,
                 "score": score,
-                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[i + 1: i + 1 + 168]],
+                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[i + 1: i + 1 + hold_h(market)]],
                 "_ord": (i, li),
                 "feat": _card_feat(sf, "brk", side, bar.ts, lv.kind, 0, score),
                 "strategy": "brk",
@@ -787,6 +849,7 @@ def evaluate_fbo(
     threshold: Optional[float] = None,
     lookback_hours: int = 24,
     no_night: bool = False,
+    market: str = "crypto",
 ) -> list[dict]:
     """
     Сигнал на первом часе возврата цены за уровень после пробоя (ложный пробой).
@@ -818,6 +881,8 @@ def evaluate_fbo(
     for hi_idx in range(start_idx, len(h1c)):
         bar = h1c[hi_idx]
         if no_night and _is_night_msk(bar.ts):
+            continue
+        if market == "ru" and _ru_friday_late(bar.ts):
             continue
         dk = bar.ts // 86_400_000
         if dk != cache_day:
@@ -954,7 +1019,7 @@ def evaluate_fbo(
                 "ticker": ticker,
                 "version": VERSION,
                 "score": score,
-                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[hi_idx + 1: hi_idx + 1 + 168]],
+                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[hi_idx + 1: hi_idx + 1 + hold_h(market)]],
                 "_ord": (hi_idx, li),
                 "feat": _card_feat(sf, "fbo", side, bar.ts, lv.kind, p, score),
                 "strategy": "fbo",
@@ -1003,6 +1068,8 @@ def evaluate(
     fbo_threshold: Optional[float] = None,
     lookback_hours: int = 24,
     no_night: bool = False,
+    market: str = "crypto",
+    ru_ctx: Optional[dict] = None,
 ) -> dict:
     """
     Точка входа для скринера. Уровни считаются point-in-time по UTC-дню внутри
@@ -1043,12 +1110,12 @@ def evaluate(
     if "brk" in strategies:
         cards.extend(evaluate_brk(
             ticker, d1c, h4c, h1c, atr_d, [], "flat",
-            lookback_hours=lookback_hours, no_night=no_night,
+            lookback_hours=lookback_hours, no_night=no_night, market=market, ru_ctx=ru_ctx,
         ))
     if "fbo" in strategies:
         cards.extend(evaluate_fbo(
             ticker, d1c, h4c, h1c, atr_d, [], "flat",
-            threshold=fbo_threshold, lookback_hours=lookback_hours, no_night=no_night,
+            threshold=fbo_threshold, lookback_hours=lookback_hours, no_night=no_night, market=market,
         ))
 
     out["cards"] = cards

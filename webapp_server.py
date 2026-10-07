@@ -28,9 +28,9 @@ SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20260929a">
-<script src="/bridge.js?v=20260929a"></script>
-<script src="/lean.js?v=20261001b"></script>
+<link rel="stylesheet" href="/mobile.css?v=20261007a">
+<script src="/bridge.js?v=20261007a"></script>
+<script src="/lean.js?v=20261007a"></script>
 """
 
 
@@ -224,7 +224,7 @@ def _templates_for_client(tpls: dict | None) -> dict:
         if isinstance(entry, dict) and isinstance(entry.get("filters"), dict):
             flat = dict(entry["filters"])
             m = entry.get("market")
-            if m and flat.get("_market") not in ("crypto", "ru"):
+            if m and flat.get("_market") not in storage.MARKETS:
                 flat["_market"] = m
             out[name] = flat
         elif isinstance(entry, dict):
@@ -238,7 +238,10 @@ async def api_templates_get(request: web.Request) -> web.Response:
     uid = require_user(request)
     templates = _templates_for_client(storage.get_html_templates(uid))
     active = storage.get_active_config(uid)
-    return web.json_response({"templates": templates, "active": active})
+    # by_market: отдельный набор шаблонов на каждый рынок (crypto / ru / algo) —
+    # bridge.js раскладывает их по ключам hw_fbo_tpl / hw_fbo_tpl_ru / hw_fbo_tpl_algo.
+    return web.json_response({"templates": templates, "active": active,
+                              "by_market": storage.get_html_templates_by_market(uid)})
 
 
 async def api_templates_put(request: web.Request) -> web.Response:
@@ -262,11 +265,16 @@ async def api_templates_put(request: web.Request) -> web.Response:
             "templates": existing_tpl,
             "active": active,
         })
-    # Merge-only upsert (never delete missing names)
-    storage.save_html_templates(uid, templates, remove_missing=False)
+    # Merge-only upsert (never delete missing names). market — рынок, из которого сохраняли
+    # (новый HTML хранит шаблоны отдельно по рынкам); _market внутри шаблона имеет приоритет.
+    market = body.get("market") if isinstance(body, dict) and "templates" in body else None
+    if market not in storage.MARKETS:
+        market = "crypto"
+    storage.save_html_templates(uid, templates, market, remove_missing=False)
     templates = _templates_for_client(storage.get_html_templates(uid))
     active = storage.get_active_config(uid)
-    return web.json_response({"ok": True, "templates": templates, "active": active})
+    return web.json_response({"ok": True, "templates": templates, "active": active,
+                              "by_market": storage.get_html_templates_by_market(uid)})
 
 
 async def api_template_one_put(request: web.Request) -> web.Response:
@@ -288,7 +296,8 @@ async def api_template_one_put(request: web.Request) -> web.Response:
 async def api_template_one_delete(request: web.Request) -> web.Response:
     uid = require_user(request)
     name = request.match_info["name"]
-    ok = storage.delete_html_template(uid, name)
+    mk = request.rel_url.query.get("market")
+    ok = storage.delete_html_template(uid, name, mk if mk in storage.MARKETS else None)
     if not ok:
         raise web.HTTPNotFound(text=json.dumps({"error": "not found"}),
                                content_type="application/json")

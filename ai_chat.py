@@ -118,11 +118,11 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
 {"action":"<код>","params":{...},"summary":"<одна строка что изменится>"}
 
 Допустимые action:
-- set_market: params {"market":"crypto"|"ru","enabled":true|false}
+- set_market: params {"market":"crypto"|"ru"|"algo","enabled":true|false}  (algo = «Крипта (Алго)», скан по индикаторам)
 - set_strategy: params {"template":"<имя>","strategy":"fbo"|"brk"|"both"}
-- set_templates: params {"market":"crypto"|"ru","names":["..."]}  (полная замена активных для рынка)
-- add_templates: params {"market":"crypto"|"ru","names":["..."]}
-- remove_templates: params {"market":"crypto"|"ru","names":["..."]}
+- set_templates: params {"market":"crypto"|"ru"|"algo","names":["..."]}  (полная замена активных для рынка)
+- add_templates: params {"market":"crypto"|"ru"|"algo","names":["..."]}
+- remove_templates: params {"market":"crypto"|"ru"|"algo","names":["..."]}
 - subscribe: params {}
 - unsubscribe: params {}
 
@@ -201,7 +201,7 @@ def sanitize_proposal(proposal: dict | None) -> dict | None:
 
     if action == "set_market":
         market = params.get("market")
-        if market not in ("crypto", "ru"):
+        if market not in ("crypto", "ru", "algo"):
             return None
         clean["params"] = {"market": market, "enabled": bool(params.get("enabled"))}
     elif action == "set_strategy":
@@ -213,7 +213,7 @@ def sanitize_proposal(proposal: dict | None) -> dict | None:
     elif action in ("set_templates", "add_templates", "remove_templates"):
         market = params.get("market")
         names = params.get("names")
-        if market not in ("crypto", "ru") or not isinstance(names, list):
+        if market not in ("crypto", "ru", "algo") or not isinstance(names, list):
             return None
         clean_names = [str(n).strip() for n in names if str(n).strip()]
         clean["params"] = {"market": market, "names": clean_names}
@@ -234,9 +234,13 @@ def format_user_context(ctx: dict) -> str:
         f"Рынки включены: {', '.join(ctx.get('markets') or []) or 'нет'}",
     ]
     by = ctx.get("names_by_market") or {}
-    for m, label in (("crypto", "Крипта"), ("ru", "MOEX")):
+    for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
         names = by.get(m) or []
         lines.append(f"Активные шаблоны {label}: {', '.join(names) if names else '—'}")
+    tbm = ctx.get("templates_by_market") or {}
+    for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
+        if tbm.get(m) is not None:
+            lines.append(f"Шаблоны рынка {label} (у каждого рынка свои): {', '.join(tbm[m][:30]) or '—'}")
     tpls = ctx.get("templates") or {}
     if tpls:
         overrides = ctx.get("strategy_overrides") or {}
@@ -260,6 +264,7 @@ _RE_MOEX = re.compile(
     r")"
 )
 _RE_CRYPTO = re.compile(r"(?i)(?:крипт\w*|crypto|биткоин|bitcoin|bybit|okx)")
+_RE_ALGO = re.compile(r"(?i)(?:алго\w*|algo\w*|индикатор\w*)")
 _RE_ON = re.compile(r"(?i)(?:включи|включить|добавь|добавить|вруби|включить|enable|on\b)")
 _RE_OFF = re.compile(r"(?i)(?:выключи|выключить|отключи|отключить|убери|убрать|disable|off\b)")
 _RE_SUB = re.compile(
@@ -314,14 +319,17 @@ def try_local_intent(user_text: str) -> AiReply | None:
         return None  # ambiguous — let Gemini decide
     if wants_on and wants_off:
         return None
-    if not (has_moex or has_crypto):
+    if not (has_moex or has_crypto or _RE_ALGO.search(text)):
         return None
     if not (wants_on or wants_off):
         return None
 
-    market = "ru" if has_moex else "crypto"
+    has_algo = bool(_RE_ALGO.search(text))
+    if has_algo and has_moex:
+        return None
+    market = "ru" if has_moex else ("algo" if has_algo else "crypto")
     enabled = wants_on
-    label = "мосбиржу" if market == "ru" else "крипту"
+    label = {"ru": "мосбиржу", "algo": "крипту (алго)"}.get(market, "крипту")
     verb = "Включить" if enabled else "Выключить"
     return AiReply(
         text=f"{verb} рынок <b>{label}</b>? Подтверди ниже — без «да» ничего не меняю.",

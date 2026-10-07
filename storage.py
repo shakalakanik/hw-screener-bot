@@ -673,22 +673,48 @@ def get_watchlist_row(chat_id: int, watch_id: int) -> dict | None:
     return dict(r) if r else None
 
 
+MARKETS = ("crypto", "ru", "algo")   # «Крипта», «Акции РФ (MOEX)», «Крипта (Алго)» — как MKT в HTML
+
+
 def _ensure_html_templates(c: sqlite3.Connection):
+    """Шаблоны хранятся ОТДЕЛЬНО по рынкам: PK (chat_id, market, name).
+
+    Миграция со старой схемы PK (chat_id, name): строки копируются как есть (market уже
+    был в таблице — crypto/ru сохраняются), ничего не удаляется.
+    """
+    row = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='html_templates'"
+    ).fetchone()
+    if row and row[0] and "PRIMARY KEY (chat_id, market, name)" not in row[0]:
+        c.execute("ALTER TABLE html_templates RENAME TO html_templates_v1")
+        row = None
+        _migrated = True
+    else:
+        _migrated = False
     c.execute("""
         CREATE TABLE IF NOT EXISTS html_templates (
             chat_id  INTEGER NOT NULL,
             name     TEXT NOT NULL,
             filters  TEXT NOT NULL,
             market   TEXT NOT NULL DEFAULT 'crypto',
-            PRIMARY KEY (chat_id, name)
+            PRIMARY KEY (chat_id, market, name)
         )
     """)
+    if _migrated:
+        c.execute(
+            "INSERT OR IGNORE INTO html_templates(chat_id, name, filters, market) "
+            "SELECT chat_id, name, filters, COALESCE(NULLIF(market,''),'crypto') FROM html_templates_v1"
+        )
+        n_old = c.execute("SELECT COUNT(*) FROM html_templates_v1").fetchone()[0]
+        n_new = c.execute("SELECT COUNT(*) FROM html_templates").fetchone()[0]
+        if n_new >= n_old:
+            c.execute("DROP TABLE html_templates_v1")
 
 
 def _normalize_incoming_template(filters, default_market: str) -> tuple[dict, str]:
     """Accept flat HTML filters or nested {filters, market} from get_html_templates."""
     if not isinstance(filters, dict):
-        m = default_market if default_market in ("crypto", "ru") else "crypto"
+        m = default_market if default_market in MARKETS else "crypto"
         return {}, m
     # Nested API/DB shape → flatten for storage + Mini App
     if "filters" in filters and isinstance(filters.get("filters"), dict):
@@ -697,8 +723,8 @@ def _normalize_incoming_template(filters, default_market: str) -> tuple[dict, st
     else:
         flt = dict(filters)
         m = flt.get("_market")
-    if m not in ("crypto", "ru"):
-        m = default_market if default_market in ("crypto", "ru") else "crypto"
+    if m not in MARKETS:
+        m = default_market if default_market in MARKETS else "crypto"
     flt["_market"] = m
     return flt, m
 
@@ -735,7 +761,7 @@ def save_html_templates(
             items.append((name, flt, m))
 
         markets_touched = {m for _, _, m in items} or {
-            market if market in ("crypto", "ru") else "crypto"
+            market if market in MARKETS else "crypto"
         }
         incoming_names = {name for name, _, _ in items}
 
@@ -767,8 +793,8 @@ def save_html_templates(
                 if r["name"] not in incoming_names:
                     removed.add(r["name"])
                     c.execute(
-                        "DELETE FROM html_templates WHERE chat_id=? AND name=?",
-                        (chat_id, r["name"]),
+                        "DELETE FROM html_templates WHERE chat_id=? AND market=? AND name=?",
+                        (chat_id, m, r["name"]),
                     )
 
         added = incoming_names - before_names
@@ -827,21 +853,72 @@ def save_html_templates(
                     )
 
 
-def get_html_templates(chat_id: int) -> dict:
-    """Получить все шаблоны пользователя из HTML."""
+def get_html_templates(chat_id: int, market: str | None = None) -> dict:
+    """Шаблоны пользователя из HTML.
+
+    market задан → только шаблоны этого рынка (имена уникальны внутри рынка).
+    market=None → все рынки одним dict по имени (для статуса/AI); при совпадении имени
+    в разных рынках второй получает ключ «имя [рынок]» — ничего не теряется.
+    """
     with _conn() as c:
         _ensure_html_templates(c)
-        rows = c.execute(
-            "SELECT name, filters, market FROM html_templates WHERE chat_id=?",
-            (chat_id,),
-        ).fetchall()
-    return {
-        r["name"]: {"filters": json.loads(r["filters"]), "market": r["market"]}
-        for r in rows
-    }
+        if market:
+            rows = c.execute(
+                "SELECT name, filters, market FROM html_templates WHERE chat_id=? AND market=?",
+                (chat_id, market),
+            ).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT name, filters, market FROM html_templates WHERE chat_id=?",
+                (chat_id,),
+            ).fetchall()
+    order = {m: i for i, m in enumerate(MARKETS)}
+    rows = sorted(rows, key=lambda r: (order.get(r["market"], 9), r["name"]))
+    out: dict = {}
+    for r in rows:
+        key = r["name"]
+        if key in out:
+            key = f"{r['name']} [{r['market']}]"
+        out[key] = {"filters": json.loads(r["filters"]), "market": r["market"], "name": r["name"]}
+    return out
 
 
-def rename_html_template(chat_id: int, old: str, new: str) -> tuple[bool, str]:
+def get_html_templates_by_market(chat_id: int) -> dict:
+    """{market: {name: filters_flat}} — для Mini App (каждый рынок — свой localStorage-ключ)."""
+    out = {m: {} for m in MARKETS}
+    with _conn() as c:
+        _ensure_html_templates(c)
+        for r in c.execute(
+            "SELECT name, filters, market FROM html_templates WHERE chat_id=?", (chat_id,)
+        ).fetchall():
+            out.setdefault(r["market"], {})[r["name"]] = json.loads(r["filters"])
+    return out
+
+
+def delete_html_template(chat_id: int, name: str, market: str | None = None) -> bool:
+    """Удалить один шаблон (в рынке market, либо во всех рынках с этим именем)."""
+    with _conn() as c:
+        _ensure_html_templates(c)
+        if market:
+            cur = c.execute("DELETE FROM html_templates WHERE chat_id=? AND market=? AND name=?",
+                            (chat_id, market, name))
+        else:
+            cur = c.execute("DELETE FROM html_templates WHERE chat_id=? AND name=?", (chat_id, name))
+        n = cur.rowcount
+        if n:
+            _ensure_active_templates(c)
+            row = c.execute("SELECT names FROM active_templates WHERE chat_id=?", (chat_id,)).fetchone()
+            if row:
+                by = _parse_names_by_market(row["names"], None)
+                for m in list(by):
+                    if market is None or m == market:
+                        by[m] = [x for x in by[m] if x != name]
+                c.execute("UPDATE active_templates SET names=? WHERE chat_id=?",
+                          (json.dumps(by, ensure_ascii=False), chat_id))
+    return bool(n)
+
+
+def rename_html_template(chat_id: int, old: str, new: str, market: str | None = None) -> tuple[bool, str]:
     """Переименовать шаблон: html_templates, template_strategy, active lists.
 
     Возвращает (ok, error_message). error_message пустой при успехе.
@@ -859,15 +936,22 @@ def rename_html_template(chat_id: int, old: str, new: str) -> tuple[bool, str]:
         _ensure_template_strategy(c)
         _ensure_active_templates(c)
 
-        row = c.execute(
-            "SELECT filters, market FROM html_templates WHERE chat_id=? AND name=?",
-            (chat_id, old),
-        ).fetchone()
+        if market:
+            row = c.execute(
+                "SELECT filters, market FROM html_templates WHERE chat_id=? AND market=? AND name=?",
+                (chat_id, market, old),
+            ).fetchone()
+        else:
+            row = c.execute(
+                "SELECT filters, market FROM html_templates WHERE chat_id=? AND name=?",
+                (chat_id, old),
+            ).fetchone()
         if not row:
             return False, "Шаблон не найден"
+        mk = row["market"]
         clash = c.execute(
-            "SELECT 1 FROM html_templates WHERE chat_id=? AND name=?",
-            (chat_id, new),
+            "SELECT 1 FROM html_templates WHERE chat_id=? AND market=? AND name=?",
+            (chat_id, mk, new),
         ).fetchone()
         if clash:
             return False, f"Шаблон «{new}» уже существует"
@@ -877,8 +961,8 @@ def rename_html_template(chat_id: int, old: str, new: str) -> tuple[bool, str]:
             (chat_id, new, row["filters"], row["market"]),
         )
         c.execute(
-            "DELETE FROM html_templates WHERE chat_id=? AND name=?",
-            (chat_id, old),
+            "DELETE FROM html_templates WHERE chat_id=? AND market=? AND name=?",
+            (chat_id, mk, old),
         )
 
         strat = c.execute(
@@ -904,7 +988,7 @@ def rename_html_template(chat_id: int, old: str, new: str) -> tuple[bool, str]:
             by = _parse_names_by_market(active_row["names"], None)
             changed = False
             for mkt, names in by.items():
-                if old in names:
+                if mkt == mk and old in names:
                     by[mkt] = [new if n == old else n for n in names]
                     changed = True
             if changed:
@@ -941,10 +1025,7 @@ def _parse_best_only(raw) -> dict:
         parsed = {}
     if not isinstance(parsed, dict):
         parsed = {}
-    return {
-        "crypto": bool(parsed.get("crypto")),
-        "ru": bool(parsed.get("ru")),
-    }
+    return {m: bool(parsed.get(m)) for m in MARKETS}
 
 
 def _upsert_active_templates(
@@ -987,14 +1068,11 @@ def _parse_names_by_market(names_raw, tpls: dict | None) -> dict:
         parsed = []
 
     if isinstance(parsed, dict):
-        return {
-            "crypto": [n for n in (parsed.get("crypto") or []) if n],
-            "ru": [n for n in (parsed.get("ru") or []) if n],
-        }
+        return {m: [n for n in (parsed.get(m) or []) if n] for m in MARKETS}
 
     flat = [n for n in (parsed or []) if n]
     if tpls:
-        by = {"crypto": [], "ru": []}
+        by = {m: [] for m in MARKETS}
         for n in flat:
             m = (tpls.get(n) or {}).get("market", "crypto")
             if m not in by:
@@ -1003,11 +1081,42 @@ def _parse_names_by_market(names_raw, tpls: dict | None) -> dict:
                 by[m].append(n)
         return by
     # Без метаданных шаблонов — дублируем в оба рынка (безопасная миграция)
-    return {"crypto": list(flat), "ru": list(flat)}
+    return {"crypto": list(flat), "ru": list(flat), "algo": []}
+
+
+def _copy_cross_market_active(chat_id: int, by: dict):
+    """Миграция «общий список → отдельные по рынкам».
+
+    Раньше любой шаблон можно было включить на любом рынке (список был общий). Теперь
+    шаблоны раздельные: если активный в рынке m шаблон хранится только в другом рынке
+    (crypto↔ru), копируем его в m — бот продолжает слать ровно то же, ничего не удаляется.
+    """
+    try:
+        with _conn() as c:
+            _ensure_html_templates(c)
+            for m in ("crypto", "ru"):
+                for n in by.get(m) or []:
+                    if c.execute("SELECT 1 FROM html_templates WHERE chat_id=? AND market=? AND name=?",
+                                 (chat_id, m, n)).fetchone():
+                        continue
+                    src = c.execute(
+                        "SELECT filters FROM html_templates WHERE chat_id=? AND name=? "
+                        "AND market IN ('crypto','ru') LIMIT 1", (chat_id, n)).fetchone()
+                    if not src:
+                        continue
+                    try:
+                        flt = json.loads(src["filters"])
+                    except Exception:
+                        flt = {}
+                    flt["_market"] = m
+                    c.execute("INSERT OR IGNORE INTO html_templates(chat_id, name, filters, market) "
+                              "VALUES(?,?,?,?)", (chat_id, n, json.dumps(flt, ensure_ascii=False), m))
+    except Exception as e:  # миграция не должна ронять бота
+        print(f"[storage] cross-market copy failed: {e}")
 
 
 def _markets_from_names(by: dict) -> list[str]:
-    return [m for m in ("crypto", "ru") if by.get(m)]
+    return [m for m in MARKETS if by.get(m)]
 
 
 def set_active_templates(chat_id: int, names):
@@ -1017,13 +1126,10 @@ def set_active_templates(chat_id: int, names):
     markets = рынки с ≥1 шаблоном (вкл автоматически).
     """
     if isinstance(names, dict):
-        by = {
-            "crypto": list(names.get("crypto") or []),
-            "ru": list(names.get("ru") or []),
-        }
+        by = {m: list(names.get(m) or []) for m in MARKETS}
     else:
         flat = list(names or [])
-        by = {"crypto": list(flat), "ru": list(flat)}
+        by = {"crypto": list(flat), "ru": list(flat), "algo": []}
     markets = _markets_from_names(by)
     with _conn() as c:
         _upsert_active_templates(
@@ -1040,15 +1146,12 @@ def set_active_templates_for_market(chat_id: int, market: str, names: list[str])
     Непустое names → рынок включается. Пустое names → рынок не трогаем
     (явный mkt_on отвечает за выкл).
     """
-    if market not in ("crypto", "ru"):
+    if market not in MARKETS:
         market = "crypto"
     cfg = get_active_config(chat_id)
-    by = {
-        "crypto": list(cfg["names_by_market"].get("crypto") or []),
-        "ru": list(cfg["names_by_market"].get("ru") or []),
-    }
+    by = {m: list(cfg["names_by_market"].get(m) or []) for m in MARKETS}
     by[market] = list(names or [])
-    markets = [m for m in ("crypto", "ru") if m in set(cfg.get("markets") or [])]
+    markets = [m for m in MARKETS if m in set(cfg.get("markets") or [])]
     if by[market] and market not in markets:
         markets.append(market)
     with _conn() as c:
@@ -1063,11 +1166,8 @@ def set_active_templates_for_market(chat_id: int, market: str, names: list[str])
 def set_active_markets(chat_id: int, markets: list[str]):
     """Явно задать включённые рынки (не чистит выбранные шаблоны)."""
     cfg = get_active_config(chat_id)
-    by = {
-        "crypto": list(cfg["names_by_market"].get("crypto") or []),
-        "ru": list(cfg["names_by_market"].get("ru") or []),
-    }
-    wanted = [m for m in ("crypto", "ru") if m in set(markets or [])]
+    by = {m: list(cfg["names_by_market"].get(m) or []) for m in MARKETS}
+    wanted = [m for m in MARKETS if m in set(markets or [])]
     with _conn() as c:
         _upsert_active_templates(
             c,
@@ -1079,10 +1179,10 @@ def set_active_markets(chat_id: int, markets: list[str]):
 
 def set_market_enabled(chat_id: int, market: str, enabled: bool):
     """Вкл/выкл один рынок для сигналов, не трогая names_by_market."""
-    if market not in ("crypto", "ru"):
+    if market not in MARKETS:
         return
     cfg = get_active_config(chat_id)
-    markets = [m for m in ("crypto", "ru") if m in set(cfg.get("markets") or [])]
+    markets = [m for m in MARKETS if m in set(cfg.get("markets") or [])]
     if enabled and market not in markets:
         markets.append(market)
     if not enabled and market in markets:
@@ -1106,16 +1206,17 @@ def get_active_config(chat_id: int) -> dict:
         ).fetchone()
     if not row:
         return {
-            "names_by_market": {"crypto": [], "ru": []},
+            "names_by_market": {m: [] for m in MARKETS},
             "names": [],
             "markets": [],
-            "best_only": {"crypto": False, "ru": False},
+            "best_only": {m: False for m in MARKETS},
             "auto": get_auto_mode(chat_id),
         }
 
     # Подтянуть market шаблонов для миграции плоского списка
     tpls = get_html_templates(chat_id)
     by = _parse_names_by_market(row["names"], tpls)
+    _copy_cross_market_active(chat_id, by)
 
     # Если прочитали старый плоский формат — перезаписать в новом
     try:
@@ -1141,12 +1242,12 @@ def get_active_config(chat_id: int) -> dict:
         stored_markets = []
     if not isinstance(stored_markets, list):
         stored_markets = []
-    markets = [m for m in ("crypto", "ru") if m in stored_markets]
+    markets = [m for m in MARKETS if m in stored_markets]
     if not markets:
         # Миграция: раньше markets выводились из names
         markets = _markets_from_names(by)
 
-    flat = list(by.get("crypto") or []) + list(by.get("ru") or [])
+    flat = [n for m in MARKETS for n in (by.get(m) or [])]
     seen = set()
     names = []
     for n in flat:
@@ -1164,12 +1265,12 @@ def get_active_config(chat_id: int) -> dict:
 
 def get_best_only(chat_id: int) -> dict:
     """Режим «только лучший» per-market: {"crypto": bool, "ru": bool}."""
-    return dict(get_active_config(chat_id).get("best_only") or {"crypto": False, "ru": False})
+    return dict(get_active_config(chat_id).get("best_only") or {m: False for m in MARKETS})
 
 
 def set_best_only(chat_id: int, market: str, enabled: bool):
-    """Вкл/выкл «только лучший» для одного рынка (crypto|ru)."""
-    if market not in ("crypto", "ru"):
+    """Вкл/выкл «только лучший» для одного рынка (crypto|ru|algo)."""
+    if market not in MARKETS:
         return
     with _conn() as c:
         _ensure_active_templates(c)
@@ -1183,7 +1284,7 @@ def set_best_only(chat_id: int, market: str, enabled: bool):
             _upsert_active_templates(
                 c,
                 chat_id,
-                json.dumps({"crypto": [], "ru": []}, ensure_ascii=False),
+                json.dumps({m: [] for m in MARKETS}, ensure_ascii=False),
                 json.dumps([], ensure_ascii=False),
                 best_only=bo,
             )
@@ -1456,7 +1557,7 @@ def _cap_market_lists(obj: dict, cap: int = _MINIAPP_MAX_ITEMS) -> dict:
     out: dict = {}
     if not isinstance(obj, dict):
         return {"crypto": [], "ru": []}
-    for m in ("crypto", "ru"):
+    for m in MARKETS:
         v = obj.get(m, [])
         if not isinstance(v, list):
             v = []
@@ -1594,8 +1695,8 @@ def put_miniapp_state(
         if backtest is not None:
             bt = _cap_market_lists(backtest if isinstance(backtest, dict) else {})
             server_b = current["backtest"]
-            incoming_empty = not bt.get("crypto") and not bt.get("ru")
-            server_nonempty = bool(server_b.get("crypto") or server_b.get("ru"))
+            incoming_empty = not any(bt.get(m) for m in MARKETS)
+            server_nonempty = any(server_b.get(m) for m in MARKETS)
             if _empty_overwrite_blocked(
                 incoming_empty=incoming_empty,
                 server_nonempty=server_nonempty,
@@ -1619,8 +1720,8 @@ def put_miniapp_state(
         if signals is not None:
             sig = _cap_market_lists(signals if isinstance(signals, dict) else {})
             server_s = current["signals"]
-            incoming_empty = not sig.get("crypto") and not sig.get("ru")
-            server_nonempty = bool(server_s.get("crypto") or server_s.get("ru"))
+            incoming_empty = not any(sig.get(m) for m in MARKETS)
+            server_nonempty = any(server_s.get(m) for m in MARKETS)
             if _empty_overwrite_blocked(
                 incoming_empty=incoming_empty,
                 server_nonempty=server_nonempty,

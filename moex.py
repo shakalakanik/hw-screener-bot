@@ -258,11 +258,31 @@ async def fetch_klines_moex_m5(
     return bars[-limit:]
 
 
+async def fetch_imoex_ctx(client: httpx.AsyncClient) -> dict:
+    """HTML: MOEX.bench(30) → IMOEX выше SMA20 и доходность за 5 баров (для РУ-фильтров)."""
+    ctx = {"imoexAbove": None, "imoexRet5": None}
+    try:
+        now = int(time.time() * 1000)
+        rows = await iss_candles(client, "/engines/stock/markets/index/boards/SNDX/securities/IMOEX",
+                                 60, now - int(30 * 3_600_000 * 1.6), None, 4)
+        iml = [b for b in iss_bars(rows, "1h", now) if b.confirmed]
+        if len(iml) >= 2:
+            last20 = iml[-20:]
+            sma20 = sum(b.c for b in last20) / min(len(iml), 20)
+            ctx["imoexAbove"] = iml[-1].c > sma20
+            i5 = iml[-6] if len(iml) >= 6 else iml[0]
+            ctx["imoexRet5"] = (iml[-1].c - i5.c) / i5.c
+    except Exception as e:
+        logger.debug("IMOEX bench failed: %s", e)
+    return ctx
+
+
 async def scan_one_moex(
     client: httpx.AsyncClient,
     ticker: dict,
     lookback_hours: int = 12,
     no_night: bool = True,
+    imoex_ctx: dict | None = None,
 ) -> list[dict]:
     """Скан одной бумаги MOEX → карточки с market=ru."""
     from hwv1 import evaluate
@@ -279,14 +299,20 @@ async def scan_one_moex(
             fetch_klines_moex_d1(client, symbol, -(-lookback_hours // 24) + 60),
             fetch_klines_moex_h1(client, symbol, lookback_hours + 280),
         )
+        d1cl = [b for b in d1 if b.confirmed]
+        d5 = d1cl[-6] if len(d1cl) >= 6 else (d1cl[0] if d1cl else None)
+        ru_ctx = dict(imoex_ctx or {})
+        ru_ctx["sym5ret"] = ((d1cl[-1].c - d5.c) / d5.c) if (len(d1cl) >= 2 and d5) else 0
         result = evaluate(
             symbol, last, bid, ask, d1, [], h1, [], 0,
             fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lookback_hours + 8,
+            market="ru", ru_ctx=ru_ctx,
         )
         from html_pipeline import dedup_list
         cards = dedup_list(result.get("cards", []))
         for c in cards:
             c["market"] = "ru"
+            c.setdefault("feat", {})["mkt"] = "ru"
             c["exchange"] = "moex"
         # Средний дневной оборот за окно (HTML): закрытые D1 в окне, иначе последние 3 закрытых
         closed = [b for b in d1 if b.confirmed]

@@ -232,7 +232,7 @@ MAIN_KEYBOARD = main_keyboard()
 
 
 # ── Форматирование сигнала ────────────────────────────────────────────────────
-_MARKET_LABEL = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа"}
+_MARKET_LABEL = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа", "algo": "⚡ Крипта (Алго)"}
 
 
 def _format_card(card: dict) -> str:
@@ -254,7 +254,8 @@ def _format_card(card: dict) -> str:
     tpl_line = f"📋 Шаблон: <b>{tpl_name}</b>\n" if tpl_name else ""
 
     strategy = card.get("strategy", "brk")
-    strategy_label = "📈 Пробой" if strategy == "brk" else "🔻 Ложный пробой"
+    strategy_label = ("📈 Пробой" if strategy == "brk" else "⚡ Алго" if strategy == "algo"
+                      else "🔻 Ложный пробой")
     prob = card.get("prob")
     prob_line = f"  (модель p={prob:.2f})" if strategy == "fbo" and prob is not None else ""
 
@@ -265,6 +266,18 @@ def _format_card(card: dict) -> str:
         time_str = ts_msk.strftime("%d.%m %H:%M МСК")
     else:
         time_str = datetime.now(MSK).strftime("%d.%m %H:%M МСК") + " (время скана)"
+
+    if strategy == "algo":   # «Крипта (Алго)»: вход на закрытии часа, стоп max(1.5·ATR14 H1, 2%), тейк 3R
+        return "\n".join([
+            f"{side_emoji} <b>{card['ticker']}</b> — {card['side']}",
+            f"{market_label}  ·  {strategy_label}",
+            tpl_line.rstrip("\n"),
+            f"🧩 Условия: {card.get('algo_combo') or '—'}",
+            f"📥 Вход: <code>{entry:.4f}</code>",
+            f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
+            f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
+            f"🕐 Сигнал: {time_str}",
+        ])
 
     return "\n".join([
         f"{side_emoji} <b>{card['ticker']}</b> — {card['side']}",
@@ -302,9 +315,13 @@ def _parse_card_from_message(msg) -> dict | None:
     market = "crypto"
     if "Мосбиржа" in plain or "🇷🇺" in raw:
         market = "ru"
+    elif "Крипта (Алго)" in plain:
+        market = "algo"
     strategy = "brk"
     if "Ложный пробой" in plain:
         strategy = "fbo"
+    elif "⚡ Алго" in plain:
+        strategy = "algo"
 
     def _code_after(label: str) -> float | None:
         mm = re.search(
@@ -333,6 +350,8 @@ def _parse_card_from_message(msg) -> dict | None:
     entry = _code_after("Вход")
     stop = _code_after("Стоп")
     take = _code_after("Тейк")
+    if level is None and strategy == "algo":
+        level = entry   # у алго нет уровня — уровень = цена входа
     if level is None or entry is None or stop is None or take is None:
         return None
 
@@ -583,25 +602,26 @@ async def cmd_status(msg: Message):
     tpls      = storage.get_html_templates(chat_id)
     subscribed = chat_id in _subscribers
 
-    by_mkt         = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    by_mkt         = cfg.get("names_by_market") or {m: [] for m in storage.MARKETS}
     active_markets = cfg["markets"]
 
     mkt_str = " + ".join(
-        {"crypto": "Крипта", "ru": "Мосбиржа"}.get(m, m)
+        {"crypto": "Крипта", "ru": "Мосбиржа", "algo": "Крипта (Алго)"}.get(m, m)
         for m in active_markets
     ) or "нет (включи шаблоны в /filter)"
 
     auto = cfg.get("auto") or {}
     if not tpls and not any(auto.values()):
         tpl_str = "Шаблоны не синхронизированы.\nИспользуй /syncurl → кнопку 📬 в HTML."
-    elif not any(by_mkt.get(m) or auto.get(m) for m in ("crypto", "ru")):
+    elif not any(by_mkt.get(m) or auto.get(m) for m in storage.MARKETS):
         tpl_str = f"Шаблонов загружено: {len(tpls)}\nАктивных: нет — выбери через /filter"
     else:
         overrides = storage.get_template_strategy_overrides(chat_id)
         label = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
         blocks = []
-        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 Мосбиржа")):
+        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 Мосбиржа"), ("algo", "⚡ Крипта (Алго)")):
             names = by_mkt.get(m) or []
+            mtpls = storage.get_html_templates(chat_id, m)
             if auto.get(m):
                 a_strat = storage.get_auto_strategy(chat_id, m)
                 blocks.append(f"{mlabel}:\n  ✅ {label.get(a_strat, '')} {AUTO_NAME} (все фильтры авто)")
@@ -611,8 +631,11 @@ async def cmd_status(msg: Message):
                 continue
             lines = []
             for n in names:
+                if m == "algo":
+                    lines.append(f"  ✅ ⚡ {n}")
+                    continue
                 strat = _effective_strategy(
-                    chat_id, n, tpls.get(n, {}).get("filters", {}), overrides
+                    chat_id, n, mtpls.get(n, {}).get("filters", {}), overrides
                 )
                 lines.append(f"  ✅ {label.get(strat, '')} {n}")
             blocks.append(f"{mlabel}:\n" + "\n".join(lines))
@@ -620,9 +643,9 @@ async def cmd_status(msg: Message):
 
     bo = cfg.get("best_only") or storage.get_best_only(chat_id)
     bo_str = ", ".join(
-        f"{'Крипта' if m == 'crypto' else 'Мосбиржа'}: "
+        f"{ {'crypto': 'Крипта', 'ru': 'Мосбиржа', 'algo': 'Алго'}[m] }: "
         f"{'⭐ лучший' if bo.get(m) else 'все'}"
-        for m in ("crypto", "ru")
+        for m in storage.MARKETS
     )
 
     await msg.answer(
@@ -658,7 +681,9 @@ async def cmd_filter(msg: Message):
 
 _STRAT_CYCLE = {"fbo": "brk", "brk": "both", "both": "fbo"}
 _STRAT_ICON  = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
-_MKT_TAB     = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа"}
+_MKT_TAB     = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа", "algo": "⚡ Крипта (Алго)"}
+_MARKETS     = storage.MARKETS          # crypto | ru | algo
+_AUTO_MARKETS = ("crypto", "ru")        # «🤖 Авто» — только у ЛП/пробоя (в алго нет шаблона «Авто»)
 
 
 def _effective_strategy(chat_id: int, name: str, tpl_filters: dict, overrides: dict) -> str:
@@ -680,12 +705,14 @@ async def _send_filter_root(chat_id: int, edit_msg=None):
     """Корень /filter: только выбор рынка."""
     _filter_tab.pop(chat_id, None)
     cfg = storage.get_active_config(chat_id)
-    by = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    by = cfg.get("names_by_market") or {m: [] for m in storage.MARKETS}
     enabled = set(cfg.get("markets") or [])
 
     buttons = [[
         InlineKeyboardButton(text="🌐 Крипта", callback_data="filter_mkt:crypto"),
         InlineKeyboardButton(text="🇷🇺 Мосбиржа", callback_data="filter_mkt:ru"),
+    ], [
+        InlineKeyboardButton(text="⚡ Крипта (Алго)", callback_data="filter_mkt:algo"),
     ]]
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -701,7 +728,9 @@ async def _send_filter_root(chat_id: int, edit_msg=None):
         "🎛 <b>Фильтр</b>\n\n"
         "Выбери рынок:\n"
         f"• {_mkt_line('crypto', '🌐 Крипта')}\n"
-        f"• {_mkt_line('ru', '🇷🇺 Мосбиржа')}"
+        f"• {_mkt_line('ru', '🇷🇺 Мосбиржа')}\n"
+        f"• {_mkt_line('algo', '⚡ Крипта (Алго)')}\n\n"
+        "Шаблоны у каждого рынка свои (как в HTML)."
     )
 
     if edit_msg:
@@ -715,33 +744,35 @@ async def _send_filter_root(chat_id: int, edit_msg=None):
 
 async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = None):
     """Экран управления одним рынком. market=None → корневой выбор рынка."""
-    if market not in ("crypto", "ru"):
+    if market not in _MARKETS:
         await _send_filter_root(chat_id, edit_msg=edit_msg)
         return
 
     _filter_tab[chat_id] = market
-    tpls = storage.get_html_templates(chat_id)
-    cfg = storage.get_active_config(chat_id)
-    by_mkt = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    cfg = storage.get_active_config(chat_id)   # (миграция копирует активные шаблоны в свой рынок)
+    tpls = storage.get_html_templates(chat_id, market)
+    by_mkt = cfg.get("names_by_market") or {m: [] for m in _MARKETS}
     active = set(by_mkt.get(market) or [])
     enabled = market in (cfg.get("markets") or [])
     overrides = storage.get_template_strategy_overrides(chat_id)
-    auto_on = bool((cfg.get("auto") or {}).get(market))
-    auto_strat = storage.get_auto_strategy(chat_id, market)
+    is_algo = market == "algo"
+    auto_on = (not is_algo) and bool((cfg.get("auto") or {}).get(market))
+    auto_strat = storage.get_auto_strategy(chat_id, market) if not is_algo else "fbo"
 
-    # Общий список HTML-шаблонов на обоих рынках (не режем по market тегу)
-    shared_names = list(tpls.keys())
+    # Шаблоны ТОЛЬКО этого рынка (в новом HTML крипта / РФ / алго хранятся раздельно)
+    shared_names = sorted(tpls.keys())
 
     buttons = []
     # 🤖 Авто — встроенный шаблон HTML «Авто — все фильтры сброшены», отдельной строкой сверху
-    buttons.append([
+    if not is_algo:
+      buttons.append([
         InlineKeyboardButton(
             text=("✅ 🤖 АВТО · все фильтры авто ✅" if auto_on else "🤖 АВТО · все фильтры авто"),
             callback_data=f"auto_on:{market}",
         ),
         InlineKeyboardButton(text=_STRAT_ICON.get(auto_strat, "🔻ЛП"),
                              callback_data=f"auto_strat:{market}"),
-    ])
+      ])
     on_off = "🟢 Рынок ВКЛ" if enabled else "⚪ Рынок ВЫКЛ"
     buttons.append([InlineKeyboardButton(
         text=on_off,
@@ -767,11 +798,14 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         )])
         for name in shared_names:
             check = "✅" if (name in active and not auto_on) else "⬜"
+            key = name[:40]
+            if is_algo:   # у алго нет стратегии ЛП/пробой — только набор индикаторов
+                buttons.append([InlineKeyboardButton(text=f"{check} ⚡ {name}", callback_data=f"tpl:{key}")])
+                continue
             strat = _effective_strategy(
                 chat_id, name, (tpls[name].get("filters") or {}), overrides
             )
             strat_tag = _STRAT_ICON.get(strat, "🔻ЛП")
-            key = name[:40]
             buttons.append([
                 InlineKeyboardButton(text=f"{check} {name}", callback_data=f"tpl:{key}"),
                 InlineKeyboardButton(text=strat_tag, callback_data=f"strat:{key}"),
@@ -795,7 +829,18 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         act_line = f"активный: <b>{AUTO_NAME}</b> ({_STRAT_ICON.get(auto_strat, '')})"
     else:
         act_line = f"активных шаблонов: <b>{n_on}</b>"
-    txt = (
+    if is_algo:
+        txt = (
+            f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
+            f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n"
+            f"Только лучший: <b>{bo_state}</b>\n\n"
+            "• Скан по индикаторам (как «Крипта (Алго)» в HTML): каждый закрытый час, где выполнены "
+            "условия шаблона → сигнал; на монете новый — только после закрытия предыдущего\n"
+            "• Шаблоны алго сохраняются в HTML на рынке «Крипта (Алго)» (кнопка «В шаблон»)\n"
+            "• Вкл/выкл рынок — получать сигналы по нему"
+        )
+    else:
+      txt = (
         f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
         f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n"
         f"Только лучший: <b>{bo_state}</b>\n\n"
@@ -804,7 +849,7 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         "• Вкл/выкл рынок — получать сигналы по нему\n"
         "• ⭐ Только лучший — если в одном скане несколько сигналов "
         "по этому рынку, отправить только лучший\n"
-        "• Слева — шаблон для этого рынка (список общий)\n"
+        "• Слева — шаблоны этого рынка (у каждого рынка свои)\n"
         "• Стратегия: 🔻ЛП → 📈Проб → 📈🔻Оба\n"
         "• Переименовать шаблон — в HTML (✏️ Переименовать)"
     )
@@ -834,7 +879,7 @@ async def cb_filter_back(call: CallbackQuery):
 async def cb_filter_mkt(call: CallbackQuery):
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _MARKETS:
         await call.answer()
         return
     await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
@@ -846,7 +891,7 @@ async def cb_filter_mkt(call: CallbackQuery):
 async def cb_filter_tab(call: CallbackQuery):
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _MARKETS:
         await call.answer()
         return
     await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
@@ -857,7 +902,7 @@ async def cb_filter_tab(call: CallbackQuery):
 async def cb_market(call: CallbackQuery):
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _MARKETS:
         await call.answer()
         return
     await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
@@ -868,7 +913,7 @@ async def cb_market(call: CallbackQuery):
 async def cb_mkt_on(call: CallbackQuery):
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _MARKETS:
         await call.answer()
         return
     cfg = storage.get_active_config(chat_id)
@@ -883,7 +928,7 @@ async def cb_mkt_on(call: CallbackQuery):
 async def cb_best_only(call: CallbackQuery):
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _MARKETS:
         await call.answer()
         return
     cur = storage.get_best_only(chat_id).get(mkt, False)
@@ -897,7 +942,7 @@ async def cb_auto_on(call: CallbackQuery):
     """Вкл/выкл встроенный «🤖 Авто» для рынка. Шаблоны пользователя не трогаются."""
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _AUTO_MARKETS:
         await call.answer()
         return
     turn_on = not storage.get_auto_mode(chat_id).get(mkt, False)
@@ -914,7 +959,7 @@ async def cb_auto_on(call: CallbackQuery):
 async def cb_auto_strat(call: CallbackQuery):
     chat_id = call.message.chat.id
     mkt = call.data.split(":", 1)[1]
-    if mkt not in ("crypto", "ru"):
+    if mkt not in _AUTO_MARKETS:
         await call.answer()
         return
     new_strat = _STRAT_CYCLE.get(storage.get_auto_strategy(chat_id, mkt), "fbo")
@@ -928,14 +973,14 @@ async def cb_auto_strat(call: CallbackQuery):
 async def cb_tpl(call: CallbackQuery):
     chat_id = call.message.chat.id
     key = call.data.split(":", 1)[1]
-    tpls = storage.get_html_templates(chat_id)
+    market = _filter_tab.get(chat_id)
+    if market not in _MARKETS:
+        market = "crypto"
+    tpls = storage.get_html_templates(chat_id, market)
     full_name = _resolve_tpl_name(tpls, key)
     if not full_name:
         await call.answer("Шаблон не найден")
         return
-    market = _filter_tab.get(chat_id)
-    if market not in ("crypto", "ru"):
-        market = "crypto"
     cfg = storage.get_active_config(chat_id)
     active = list((cfg.get("names_by_market") or {}).get(market) or [])
     if (cfg.get("auto") or {}).get(market):
@@ -956,14 +1001,14 @@ async def cb_tpl(call: CallbackQuery):
 async def cb_strat(call: CallbackQuery):
     chat_id = call.message.chat.id
     key = call.data.split(":", 1)[1]
-    tpls = storage.get_html_templates(chat_id)
+    market = _filter_tab.get(chat_id)
+    if market not in _MARKETS:
+        market = "crypto"
+    tpls = storage.get_html_templates(chat_id, market)
     full_name = _resolve_tpl_name(tpls, key)
     if not full_name:
         await call.answer("Шаблон не найден")
         return
-    market = _filter_tab.get(chat_id)
-    if market not in ("crypto", "ru"):
-        market = "crypto"
     overrides = storage.get_template_strategy_overrides(chat_id)
     current = _effective_strategy(chat_id, full_name, tpls[full_name]["filters"], overrides)
     new_strat = _STRAT_CYCLE.get(current, "fbo")
@@ -984,7 +1029,7 @@ async def cb_rename(call: CallbackQuery):
         await call.answer("Шаблон не найден")
         return
     market = _filter_tab.get(chat_id) or tpls[full_name].get("market", "crypto")
-    _filter_tab[chat_id] = market if market in ("crypto", "ru") else "crypto"
+    _filter_tab[chat_id] = market if market in _MARKETS else "crypto"
     _pending_rename[chat_id] = full_name
     await call.answer()
     await bot.send_message(
@@ -1026,10 +1071,14 @@ def _ai_user_context(chat_id: int) -> dict:
         "ai_enabled": storage.get_ai_enabled(chat_id),
         "scan_interval_min": SCAN_INTERVAL // 60,
         "markets": list(cfg.get("markets") or []),
-        "names_by_market": cfg.get("names_by_market") or {"crypto": [], "ru": []},
+        "names_by_market": cfg.get("names_by_market") or {m: [] for m in storage.MARKETS},
         "templates": storage.get_html_templates(chat_id),
+        "templates_by_market": {m: sorted(storage.get_html_templates(chat_id, m)) for m in storage.MARKETS},
         "strategy_overrides": storage.get_template_strategy_overrides(chat_id),
     }
+
+
+_AI_MKT_RU = {"crypto": "крипта", "ru": "мосбиржа", "algo": "крипта (алго)"}
 
 
 def _format_proposal(proposal: dict) -> str:
@@ -1037,22 +1086,22 @@ def _format_proposal(proposal: dict) -> str:
     p = proposal.get("params") or {}
     summary = proposal.get("summary") or action
     if action == "set_market":
-        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
         st = "включить" if p.get("enabled") else "выключить"
         return f"{st} рынок <b>{m}</b>"
     if action == "set_strategy":
         return f"стратегия шаблона <b>{p.get('template')}</b> → <code>{p.get('strategy')}</code>"
     if action == "set_templates":
         names = ", ".join(p.get("names") or []) or "—"
-        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
         return f"активные шаблоны ({m}): <b>{names}</b>"
     if action == "add_templates":
         names = ", ".join(p.get("names") or []) or "—"
-        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
         return f"добавить шаблоны ({m}): <b>{names}</b>"
     if action == "remove_templates":
         names = ", ".join(p.get("names") or []) or "—"
-        m = "крипта" if p.get("market") == "crypto" else "мосбиржа"
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
         return f"убрать шаблоны ({m}): <b>{names}</b>"
     if action == "subscribe":
         return "включить подписку на сигналы (/start)"
@@ -1066,6 +1115,8 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
     action = proposal.get("action")
     p = proposal.get("params") or {}
     if action == "set_market":
+        if p.get("market") not in storage.MARKETS:
+            return "Неизвестный рынок — ничего не менял."
         storage.set_market_enabled(chat_id, p["market"], bool(p.get("enabled")))
         return "Рынок обновлён."
     if action == "set_strategy":
@@ -1081,8 +1132,10 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
         return f"Стратегия «{name}» → {p['strategy']}."
     if action in ("set_templates", "add_templates", "remove_templates"):
         market = p.get("market")
+        if market not in storage.MARKETS:
+            return "Неизвестный рынок — ничего не менял."
         names = list(p.get("names") or [])
-        tpls = storage.get_html_templates(chat_id)
+        tpls = storage.get_html_templates(chat_id, market)   # шаблоны этого рынка
         resolved = []
         for n in names:
             if n in tpls:
@@ -1274,7 +1327,7 @@ async def on_free_text(msg: Message):
             _pending_rename.pop(chat_id, None)
             raise SkipHandler
         _pending_rename.pop(chat_id, None)
-        ok, err = storage.rename_html_template(chat_id, old, text_raw)
+        ok, err = storage.rename_html_template(chat_id, old, text_raw, _filter_tab.get(chat_id))
         if not ok:
             await msg.answer(f"❌ {err}\nПопробуй ещё раз или /cancel")
             _pending_rename[chat_id] = old
@@ -1325,15 +1378,16 @@ async def cb_tpl_all(call: CallbackQuery):
     chat_id = call.message.chat.id
     enable = call.data.endswith(":1")
     market = _filter_tab.get(chat_id, "crypto")
-    if market not in ("crypto", "ru"):
+    if market not in _MARKETS:
         market = "crypto"
-    tpls = storage.get_html_templates(chat_id)
-    # Общий список — все HTML-шаблоны
+    tpls = storage.get_html_templates(chat_id, market)
+    # Шаблоны только этого рынка
     all_names = list(tpls.keys())
     storage.set_active_templates_for_market(
         chat_id, market, all_names if enable else []
     )
-    storage.set_auto_mode(chat_id, market, False)
+    if market in _AUTO_MARKETS:
+        storage.set_auto_mode(chat_id, market, False)
     await _send_filter_menu(chat_id, edit_msg=call.message, market=market)
     await call.answer(
         f"{_MKT_TAB[market]}: все включены" if enable else f"{_MKT_TAB[market]}: сброс"
@@ -1373,7 +1427,7 @@ async def cb_filter_done(call: CallbackQuery):
     by = cfg.get("names_by_market") or {}
     enabled = set(cfg.get("markets") or [])
     parts = []
-    for m, label in (("crypto", "крипта"), ("ru", "мосбиржа")):
+    for m, label in (("crypto", "крипта"), ("ru", "мосбиржа"), ("algo", "алго")):
         if m not in enabled:
             continue
         if (cfg.get("auto") or {}).get(m):
@@ -1452,22 +1506,22 @@ def _best_only_for_chat(chat_id: int) -> dict:
 def _build_filter_for_chat(chat_id: int) -> dict:
     """Фильтр чата: активные шаблоны per-market + явный вкл рынка.
 
-    Список шаблонов общий (HTML); активный набор — names_by_market.
+    Шаблоны раздельные по рынкам (crypto / ru / algo); активный набор — names_by_market.
     Рынок сканируется только если он включён и есть ≥1 активный шаблон.
     """
     cfg  = storage.get_active_config(chat_id)
-    tpls = storage.get_html_templates(chat_id)
-    by   = cfg.get("names_by_market") or {"crypto": [], "ru": []}
+    by   = cfg.get("names_by_market") or {m: [] for m in storage.MARKETS}
     enabled = set(cfg.get("markets") or [])
 
     overrides = storage.get_template_strategy_overrides(chat_id)
     multi = []
     markets = []
 
-    for mkt in ("crypto", "ru"):
+    for mkt in storage.MARKETS:
         if mkt not in enabled:
             continue
-        if (cfg.get("auto") or {}).get(mkt):
+        tpls = storage.get_html_templates(chat_id, mkt)   # шаблоны раздельно по рынкам
+        if mkt in _AUTO_MARKETS and (cfg.get("auto") or {}).get(mkt):
             # 🤖 Авто: только встроенный шаблон HTML «Авто» (все фильтры = DEF)
             multi.append(auto_template_entry(mkt, storage.get_auto_strategy(chat_id, mkt)))
             markets.append(mkt)
@@ -1481,7 +1535,7 @@ def _build_filter_for_chat(chat_id: int) -> dict:
                 continue
             entry = tpls[n]
             tpl_filters = entry.get("filters") or {}
-            strat = _effective_strategy(chat_id, n, tpl_filters, overrides)
+            strat = "algo" if mkt == "algo" else _effective_strategy(chat_id, n, tpl_filters, overrides)
             multi.append({
                 "_name": n,
                 "_market": mkt,
