@@ -318,13 +318,10 @@
     var bar = document.createElement('div');
     bar.id = 'tg-bridge-bar';
     bar.innerHTML =
-      '<button type="button" id="tg-bridge-to-bot">Шаблоны → боту</button>' +
       '<span id="tg-bridge-status"></span>';
     var wrap = document.querySelector('.wrap') || document.body;
     wrap.insertBefore(bar, wrap.firstChild);
-    document.getElementById('tg-bridge-to-bot').addEventListener('click', function () {
-      pushFiltersToBot();
-    });
+    // «Шаблоны → боту» убрана: шаблоны уходят в бота синхронизацией (PUT /api/templates)
   }
 
   function bootTelegram() {
