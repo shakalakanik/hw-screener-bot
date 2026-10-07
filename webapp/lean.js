@@ -168,7 +168,7 @@
         if (!out.fm && parts[3]) out.fm = parts[3];
       }
     }
-    out.fm = (/^(ru|moex|мосбиржа)$/i.test(out.fm)) ? 'ru' : (out.fm ? 'crypto' : '');
+    out.fm = (/^(ru|moex|мосбиржа)$/i.test(out.fm)) ? 'ru' : (/^(algo|a)$/i.test(out.fm) ? 'algo' : (out.fm ? 'crypto' : ''));
     return (out.tab === 'watch' || out.base) ? out : null;
   }
 
@@ -207,7 +207,12 @@
     ensureWatchTab();
     if (!L.base) return;
     var want = String(L.base).toUpperCase().replace(/USDT$/, '');
-    var sels = L.fm === 'ru' ? ['#wtb_ru', '#wtb_crypto'] : (L.fm === 'crypto' ? ['#wtb_crypto', '#wtb_ru'] : ['#wtb_crypto', '#wtb_ru']);
+    // Новый HTML: одна таблица #wtb на текущий рынок (crypto / ru / algo) — переключаем рынок сигнала
+    try {
+      var mk = document.getElementById('mkt');
+      if (L.fm && mk && mk.value !== L.fm) { mk.value = L.fm; mk.dispatchEvent(new Event('change')); }
+    } catch (eM) {}
+    var sels = ['#wtb'].concat(L.fm === 'ru' ? ['#wtb_ru', '#wtb_crypto'] : ['#wtb_crypto', '#wtb_ru']);
     function rowBase(tr) {
       var b = tr.getAttribute('data-base');
       if (!b && tr.children.length > 2) b = (tr.children[2].textContent || '').trim();

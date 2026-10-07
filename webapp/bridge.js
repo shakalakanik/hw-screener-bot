@@ -4,7 +4,14 @@
 (function () {
   'use strict';
 
-  var LS_KEY = 'hw_fbo_tpl';
+  var LS_KEY = 'hw_fbo_tpl';   // crypto; новый HTML: отдельные ключи на рынок (tplKey())
+  var MARKETS = ['crypto', 'ru', 'algo'];
+  function tplKeyFor(m) { return m === 'ru' ? 'hw_fbo_tpl_ru' : m === 'algo' ? 'hw_fbo_tpl_algo' : 'hw_fbo_tpl'; }
+  function curMkt() {
+    try { ensurePageHelpers(); } catch (e0) {}
+    try { var m = window.__hwCurMkt ? window.__hwCurMkt() : 'crypto'; return MARKETS.indexOf(m) >= 0 ? m : 'crypto'; }
+    catch (e) { return 'crypto'; }
+  }
   var TG = (typeof window !== 'undefined' && window.Telegram && window.Telegram.WebApp)
     ? window.Telegram.WebApp
     : null;
@@ -100,12 +107,28 @@
     return data;
   }
 
-  function readLocalTpl() {
-    try { return JSON.parse(localStorage.getItem(LS_KEY) || '{}'); } catch (e) { return {}; }
+  function readLocalTpl(m) {
+    try { return JSON.parse(localStorage.getItem(tplKeyFor(m || curMkt())) || '{}') || {}; } catch (e) { return {}; }
   }
 
-  function writeLocalTpl(obj) {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(obj || {})); } catch (e) {}
+  function writeLocalTpl(obj, m) {
+    try { localStorage.setItem(tplKeyFor(m || curMkt()), JSON.stringify(obj || {})); } catch (e) {}
+  }
+
+  /* Разовая миграция: старый общий hw_fbo_tpl содержал и крипту, и РФ (_market:'ru').
+     Новый HTML хранит рынки раздельно — переносим РФ-шаблоны в hw_fbo_tpl_ru. */
+  function migrateSharedTpl() {
+    try {
+      if (localStorage.getItem('hw_tpl_split_v1')) return;
+      var all = JSON.parse(localStorage.getItem('hw_fbo_tpl') || '{}') || {};
+      var ru = readLocalTpl('ru'), algo = readLocalTpl('algo'), cr = {};
+      Object.keys(all).forEach(function (k) {
+        var m = (all[k] && all[k]._market) || 'crypto';
+        if (m === 'ru') ru[k] = all[k]; else if (m === 'algo') algo[k] = all[k]; else cr[k] = all[k];
+      });
+      writeLocalTpl(cr, 'crypto'); writeLocalTpl(ru, 'ru'); writeLocalTpl(algo, 'algo');
+      localStorage.setItem('hw_tpl_split_v1', '1');
+    } catch (e) {}
   }
 
   function unwrapTplEntry(entry) {
@@ -128,11 +151,20 @@
     return out;
   }
 
-  function mergeTpl(remote) {
-    var local = readLocalTpl();
+  function mergeTpl(remote, m) {
+    var local = readLocalTpl(m);
     var flatRemote = unwrapRemoteTemplates(remote || {});
     var out = Object.assign({}, local, flatRemote);
-    writeLocalTpl(out);
+    writeLocalTpl(out, m);
+    return out;
+  }
+
+  function tagMarket(o, m) {
+    var out = {};
+    Object.keys(o || {}).forEach(function (k) {
+      var v = o[k];
+      out[k] = (v && typeof v === 'object') ? Object.assign({}, v, { _market: m }) : v;
+    });
     return out;
   }
 
@@ -159,8 +191,9 @@
         setStatus('шаблоны: пустой набор не отправляю на сервер');
         return;
       }
-      // Fire-and-forget sync to backend
-      api('PUT', '/api/templates', { templates: o })
+      // Fire-and-forget sync to backend — шаблоны текущего рынка (crypto | ru | algo)
+      var m = curMkt();
+      api('PUT', '/api/templates', { templates: tagMarket(o, m), market: m })
         .then(function () { setStatus('шаблоны сохранены на сервере'); })
         .catch(function (e) {
           setStatus('офлайн: только localStorage (' + (e.message || e) + ')');
@@ -183,40 +216,32 @@
   }
 
   async function syncFromServer() {
+    migrateSharedTpl();
     try {
       var data = await api('GET', '/api/templates');
-      var remoteRaw = (data && data.templates) || {};
-      var remote = unwrapRemoteTemplates(remoteRaw);
-      var local = readLocalTpl();
-      var remoteKeys = Object.keys(remote);
-      var localKeys = Object.keys(local || {});
-
-      // Never wipe local with empty remote; push local up instead
-      if (!remoteKeys.length && localKeys.length) {
-        setStatus('сервер пуст — храню локальные, отправляю на сервер');
-        api('PUT', '/api/templates', { templates: local })
-          .then(function () { setStatus('локальные шаблоны залиты на сервер'); })
-          .catch(function (e) {
-            setStatus('сервер пуст, локальные сохранены (' + (e.message || e) + ')');
-          });
-        if (typeof window.fillTplSelects === 'function') window.fillTplSelects();
-        return;
+      var byM = (data && data.by_market) || null;
+      if (!byM) {   // старый сервер: общий список, раскладываем по _market
+        byM = { crypto: {}, ru: {}, algo: {} };
+        var flat = unwrapRemoteTemplates((data && data.templates) || {});
+        Object.keys(flat).forEach(function (k) {
+          var mm = (flat[k] && flat[k]._market) || 'crypto';
+          (byM[mm] = byM[mm] || {})[k] = flat[k];
+        });
       }
-
-      if (remoteKeys.length) {
-        mergeTpl(remote);
-      }
+      MARKETS.forEach(function (m) {
+        var remote = byM[m] || {};
+        var local = readLocalTpl(m);
+        // Never wipe local with empty remote; push local up instead (per market)
+        if (!Object.keys(remote).length && Object.keys(local).length) {
+          api('PUT', '/api/templates', { templates: tagMarket(local, m), market: m })
+            .catch(function (e) { console.warn('[bridge] push local tpl', m, e); });
+          return;
+        }
+        if (Object.keys(remote).length) mergeTpl(remote, m);
+      });
       // Never call saveTplStore({}) from sync
       if (typeof window.fillTplSelects === 'function') window.fillTplSelects();
-      if (data && data.active) {
-        var act = data.active;
-        var label = Array.isArray(act)
-          ? act.join(', ')
-          : (act.names ? (act.names || []).join(', ') : String(act));
-        setStatus(label ? ('активный для бота: ' + label) : 'шаблоны синхронизированы');
-      } else {
-        setStatus('шаблоны синхронизированы');
-      }
+      setStatus('шаблоны синхронизированы (крипта / РФ / алго — раздельно)');
     } catch (e) {
       setStatus('офлайн / без авторизации — localStorage');
       console.warn('[bridge] templates sync failed', e);
@@ -473,20 +498,20 @@
     // Classic script shares top-level let/const with screener.html
     s.textContent = [
       'window.__hwSnapshotMiniappState = function () {',
-      '  var bt = { crypto: [], ru: [] }, sig = { crypto: [], ru: [] };',
+      '  var bt = { crypto: [], ru: [], algo: [] }, sig = { crypto: [], ru: [], algo: [] };',
       '  try {',
       '    if (typeof MKT_STATE === "object" && MKT_STATE) {',
       '      if (typeof MKT === "string" && MKT_STATE[MKT]) {',
       '        MKT_STATE[MKT].BT = (typeof BT !== "undefined" && Array.isArray(BT)) ? BT : (MKT_STATE[MKT].BT || []);',
       '        MKT_STATE[MKT].LAST = (typeof LAST !== "undefined" && Array.isArray(LAST)) ? LAST : (MKT_STATE[MKT].LAST || []);',
       '      }',
-      '      ["crypto","ru"].forEach(function (m) {',
+      '      ["crypto","ru","algo"].forEach(function (m) {',
       '        var s = MKT_STATE[m] || {};',
       '        bt[m] = Array.isArray(s.BT) ? s.BT.slice() : [];',
       '        sig[m] = Array.isArray(s.LAST) ? s.LAST.slice() : [];',
       '      });',
       '    } else {',
-      '      var m = (typeof MKT === "string" && MKT === "ru") ? "ru" : "crypto";',
+      '      var m = (typeof MKT === "string" && (MKT === "ru" || MKT === "algo")) ? MKT : "crypto";',
       '      if (typeof BT !== "undefined" && Array.isArray(BT)) bt[m] = BT.slice();',
       '      if (typeof LAST !== "undefined" && Array.isArray(LAST)) sig[m] = LAST.slice();',
       '    }',
@@ -501,7 +526,7 @@
       '    }',
       '    var bt = data.backtest || {}, sig = data.signals || {};',
       '    if (typeof MKT_STATE === "object" && MKT_STATE) {',
-      '      ["crypto","ru"].forEach(function (m) {',
+      '      ["crypto","ru","algo"].forEach(function (m) {',
       '        if (!MKT_STATE[m]) return;',
       '        if (Array.isArray(bt[m])) MKT_STATE[m].BT = bt[m];',
       '        if (Array.isArray(sig[m])) MKT_STATE[m].LAST = sig[m];',
