@@ -153,7 +153,12 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
 указания — Авто это или шаблон) — НЕ угадывай и НЕ добавляй ACTION, задай короткий
 уточняющий вопрос.
 Если менять нечего — НЕ добавляй ---ACTION---.
-HTML/Markdown: можно лёгкий Telegram HTML (<b>, <code>), без сложных тегов.
+ФОРМАТ ТЕКСТА: НЕ используй Markdown (никаких **, *, _, #, `). Пиши обычным текстом —
+бот сам оформит ответ. Списки — с «• » в начале строки.
+Когда предлагаешь изменить настройки: формулируй как ПРЕДЛОЖЕНИЕ («Предлагаю: включить
+Мосбиржу с Авто на пробой. Подтверди»). НИКОГДА не пиши «я включил / применил / готово /
+сделал» — до ответа «да» ничего не меняется. Будь краток (1–3 предложения): карточка
+подтверждения сама перечислит все изменения, не дублируй список.
 """
 
 
@@ -171,6 +176,73 @@ def is_configured() -> bool:
 def _client():
     from google import genai
     return genai.Client(api_key=_api_key())
+
+
+_TG_TAGS = ("b", "i", "code", "u", "s")
+
+
+def md_to_tg_html(text: str) -> str:
+    """Markdown ответа Gemini → безопасный Telegram HTML (b/i/code). Неизвестные/непарные
+    маркеры вырезаются; уже имеющиеся простые теги <b>/<i>/<code> сохраняются."""
+    import html as _html
+    if not text:
+        return ""
+    keep: list[str] = []
+
+    def _ph(tag: str) -> str:
+        keep.append(tag)
+        return f"\x00{len(keep) - 1}\x00"
+
+    t = re.sub(r"(?i)</?(?:%s)>" % "|".join(_TG_TAGS), lambda m: _ph(m.group(0).lower()), text)
+    t = _html.escape(t, quote=False)
+    codes: list[str] = []
+
+    def _code(m):
+        codes.append(m.group(1))
+        return f"\x01{len(codes) - 1}\x01"
+
+    t = re.sub(r"```(?:\w+)?\n?(.*?)```", _code, t, flags=re.DOTALL)
+    t = re.sub(r"`([^`\n]+)`", _code, t)
+    t = re.sub(r"(?m)^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", r"**\1**", t)
+    t = re.sub(r"(?m)^(\s*)[*\-+]\s+", r"\1• ", t)
+    t = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*", r"<b>\1</b>", t, flags=re.DOTALL)
+    t = re.sub(r"(?<![\w])__(?=\S)(.+?)(?<=\S)__(?![\w])", r"<b>\1</b>", t, flags=re.DOTALL)
+    t = re.sub(r"(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![\w*])", r"<i>\1</i>", t)
+    t = re.sub(r"(?<![\w])_(?=[^\s_])([^_\n]+?)(?<=[^\s_])_(?![\w])", r"<i>\1</i>", t)
+    # остатки разметки: «**», одиночные * вне чисел (2*3 оставляем), _ вне слов
+    t = t.replace("**", "")
+    t = re.sub(r"(?<!\d)\*|\*(?!\d)", "", t)
+    t = re.sub(r"(?<![\w])_+|_+(?![\w])", "", t)
+    t = re.sub(r"\x01(\d+)\x01", lambda m: "<code>" + codes[int(m.group(1))] + "</code>", t)
+    t = re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], t)
+    if not _html_balanced(t):
+        t = re.sub(r"</?(?:%s)>" % "|".join(_TG_TAGS), "", t)
+    return t
+
+
+def _html_balanced(t: str) -> bool:
+    stack = []
+    for m in re.finditer(r"<(/?)(%s)>" % "|".join(_TG_TAGS), t):
+        if not m.group(1):
+            stack.append(m.group(2))
+        elif not stack or stack.pop() != m.group(2):
+            return False
+    return not stack
+
+
+def strip_markup(text: str) -> str:
+    """Plain-текст запасной вариант: без тегов и markdown-маркеров."""
+    import html as _html
+    t = re.sub(r"</?[a-zA-Z][^>]*>", "", text or "")
+    t = _html.unescape(t)
+    t = re.sub(r"(?m)^(\s*)[*\-+]\s+", r"\1• ", t)
+    t = t.replace("**", "").replace("__", "").replace("`", "")
+    t = re.sub(r"(?<!\d)\*|\*(?!\d)", "", t)
+    t = re.sub(r"(?<![\w])_+|_+(?![\w])", "", t)
+    return re.sub(r"(?m)^\s{0,3}#{1,6}\s+", "", t)
+
+
+_RE_FAKE_DONE = re.compile(r"(?i)\b(?:я\s+)?(?:включил|выключил|отключил|применил|поменял|изменил|установил|переключил)(?:а)?\b")
 
 
 def _parse_action_block(raw: str) -> tuple[str, dict | None]:
@@ -699,6 +771,10 @@ async def chat(
                     break  # next model
                 text, proposal = _parse_action_block(raw)
                 proposal = sanitize_proposal(proposal)
+                text = md_to_tg_html(text)
+                if proposal and _RE_FAKE_DONE.search(text):
+                    # модель написала «я включил» до подтверждения — не вводим в заблуждение
+                    text = "Предлагаю изменить настройки — подтверди ниже."
                 if not text:
                     text = "Готово." if proposal else "Не понял запрос — уточни, пожалуйста."
                 return AiReply(text=text, proposal=proposal)

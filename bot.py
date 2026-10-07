@@ -1317,8 +1317,11 @@ async def _send_ai_proposal_confirm(chat_id: int, proposal: dict, base_text: str
     proposal = _ai_resolve_names(chat_id, proposal)
     if proposal.get("action") == "multi" and not proposal.get("actions"):
         notes = "\n".join(f"ℹ️ {n}" for n in proposal.get("notes") or [])
-        await bot.send_message(chat_id, f"{base_text}\n\n{notes}".strip() or "Нечего менять.",
-                               parse_mode="HTML", reply_markup=main_keyboard(chat_id))
+        txt = f"{base_text}\n\n{notes}".strip() or "Нечего менять."
+        try:
+            await bot.send_message(chat_id, txt, parse_mode="HTML", reply_markup=main_keyboard(chat_id))
+        except Exception:
+            await bot.send_message(chat_id, ai_chat.strip_markup(txt), reply_markup=main_keyboard(chat_id))
         return
     storage.set_ai_pending(chat_id, proposal, proposal.get("summary") or "")
     detail = _format_proposal(proposal)
@@ -1335,8 +1338,8 @@ async def _send_ai_proposal_confirm(chat_id: int, proposal: dict, base_text: str
     )
     try:
         await bot.send_message(chat_id, body, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await bot.send_message(chat_id, body, reply_markup=kb)
+    except Exception:   # Telegram не разобрал HTML → plain без маркеров
+        await bot.send_message(chat_id, ai_chat.strip_markup(body), reply_markup=kb)
 
 
 @dp.message(Command("ai_on"))
@@ -1420,8 +1423,8 @@ async def _handle_ai_question(msg: Message, question: str):
     else:
         try:
             await msg.answer(out, parse_mode="HTML", reply_markup=main_keyboard(chat_id))
-        except Exception:
-            await msg.answer(out, reply_markup=main_keyboard(chat_id))
+        except Exception:   # can't parse entities → plain без маркеров
+            await msg.answer(ai_chat.strip_markup(out), reply_markup=main_keyboard(chat_id))
 
 
 @dp.callback_query(F.data.startswith("ai_confirm:"))
