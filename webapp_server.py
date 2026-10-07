@@ -28,9 +28,9 @@ SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20261007c">
-<script src="/bridge.js?v=20261007c"></script>
-<script src="/lean.js?v=20261007c"></script>
+<link rel="stylesheet" href="/mobile.css?v=20261007d">
+<script src="/bridge.js?v=20261007d"></script>
+<script src="/lean.js?v=20261007d"></script>
 """
 
 

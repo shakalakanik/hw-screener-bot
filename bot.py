@@ -211,6 +211,14 @@ def _view_signal_button(
         except Exception as e:
             logger.warning("journal lookup failed: %s", e)
             journal_id = None
+    # web_app-кнопка (только личные чаты) открывает Mini App всегда заново и сразу по адресу
+    # /app/journal/<рынок>/<id>; не зависит от Main Mini App в BotFather. Ссылка t.me?startapp
+    # при уже открытом/свёрнутом Mini App лишь разворачивает старое окно — она запасной вариант
+    # (группы/нет PUBLIC_URL).
+    if int(chat_id or 0) > 0:
+        app = _app_url_with_sync(chat_id, journal=(market or "crypto", journal_id))
+        if app:
+            return InlineKeyboardButton(text="🔎 Посмотреть сигнал", web_app=WebAppInfo(url=app))
     return InlineKeyboardButton(
         text="🔎 Посмотреть сигнал",
         url=_journal_startapp_url(market or "crypto", journal_id),
