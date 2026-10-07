@@ -1270,14 +1270,19 @@ async def run_scan(
         logger.info("Скан пропущен: нет рынков с активными шаблонами")
         return 0
 
-    all_cards: list[dict] = []
-    if "crypto" in needed:
+    # Рынки сканируются параллельно (час: всё должно уйти к HH:05)
+    async def _crypto():
+        if "crypto" not in needed:
+            return []
         async with httpx.AsyncClient() as client:
-            all_cards += await _scan_crypto_html(
+            return await _scan_crypto_html(
                 client, n_inst=TOP_N, min_vol=MIN_VOL_USD_24H, win_h=win_h,
                 no_night=True, no_stocks=True,
             )
-    if "ru" in needed:
+
+    async def _ru():
+        if "ru" not in needed:
+            return []
         async with moex_client() as client:
             try:
                 tickers_ru = await fetch_tickers_moex(client)
@@ -1296,15 +1301,28 @@ async def run_scan(
             cc = _select_universe(results, 10_000, 0)
             for c in cc:
                 c["market"] = "ru"
-            all_cards += cc
+            return cc
 
-    algo_ctx = None
-    if "algo" in needed:
+    async def _algo():
+        if "algo" not in needed:
+            return None
         try:
             async with httpx.AsyncClient() as client:
-                algo_ctx = await algo_mod.prepare(client, top_n=TOP_N, min_vol=MIN_VOL_USD_24H, win_h=win_h)
+                return await algo_mod.prepare(client, top_n=TOP_N, min_vol=MIN_VOL_USD_24H, win_h=win_h)
         except Exception as e:
             logger.warning("algo scan failed: %s", e)
+            return None
+
+    t0 = time.time()
+    res = await asyncio.gather(_crypto(), _ru(), _algo(), return_exceptions=True)
+    all_cards: list[dict] = []
+    for name, r in zip(("crypto", "ru"), res[:2]):
+        if isinstance(r, BaseException):
+            logger.warning("%s scan failed: %s", name, r)
+        else:
+            all_cards += r
+    algo_ctx = None if isinstance(res[2], BaseException) else res[2]
+    logger.info("Скан рынков %s: %.1f с", ",".join(sorted(needed)), time.time() - t0)
 
     sent = await _deliver_html(all_cards, subscribers, chat_filters, now_ms, win_h,
                                on_signal, chat_best_only, stats, algo_ctx=algo_ctx)

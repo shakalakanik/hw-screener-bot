@@ -23,7 +23,7 @@ webapp/
 | Переменная | Описание |
 |------------|----------|
 | `TG_BOT_TOKEN` | токен от @BotFather (**обязательно**) |
-| `SCAN_INTERVAL_MIN` | интервал авто-скана в минутах (по умолчанию `15`) |
+| `SCAN_HOUR_DELAY_S` | авто-скан раз в час в HH:00 + N с после закрытия H1 (по умолчанию `40`); `SCAN_INTERVAL_MIN` больше не используется |
 | `WEBAPP_URL` | публичный HTTPS URL Mini App, напр. `https://xxx.up.railway.app` |
 | `PORT` | порт HTTP (Railway задаёт сам; по умолчанию `8080`) |
 | `ALLOW_DEBUG_WEBAPP` | `1` — разрешить `?debug_user_id=` без initData (только для отладки) |
@@ -36,7 +36,6 @@ webapp/
 ```bash
 pip install -r requirements.txt
 export TG_BOT_TOKEN=your_token_here
-export SCAN_INTERVAL_MIN=15
 export WEBAPP_URL=https://your-public-https-url   # опционально
 export ALLOW_DEBUG_WEBAPP=1                       # опционально для браузера
 python bot.py
@@ -49,7 +48,6 @@ python bot.py
 2. Создай проект → **Deploy from GitHub repo**
 3. В Variables добавь:
    - `TG_BOT_TOKEN`
-   - `SCAN_INTERVAL_MIN=15`
    - `WEBAPP_URL=https://<твой-сервис>.up.railway.app` (после появления публичного домена)
    - `GEMINI_API_KEY` (опционально, для `/ai`)
 4. Включи **публичный HTTP** у сервиса (Generate Domain)

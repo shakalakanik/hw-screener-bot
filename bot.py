@@ -34,7 +34,20 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger(__name__)
 
 TOKEN           = os.environ["TG_BOT_TOKEN"]
-SCAN_INTERVAL   = int(os.environ.get("SCAN_INTERVAL_MIN", "15")) * 60
+# Авто-скан раз в час по часам: сразу после закрытия H1-свечи (HH:00 + задержка на
+# публикацию закрытой свечи биржей). Все сигналы должны уйти в окне HH:00–HH:05.
+# SCAN_INTERVAL_MIN больше не используется (старые 15 мин не могут переопределить расписание).
+SCAN_HOUR_DELAY_S = max(5, min(120, int(os.environ.get("SCAN_HOUR_DELAY_S", "40"))))
+SCAN_SEND_DEADLINE_S = 300   # к HH:05 всё должно быть отправлено
+SCAN_SCHEDULE_TEXT = "раз в час, сразу после закрытия часовой свечи (сигналы в HH:00–HH:05 МСК)"
+
+
+def next_scan_ts(now: float, delay_s: int = SCAN_HOUR_DELAY_S) -> float:
+    """Ближайший момент HH:00:00 + delay_s строго после now (unix-секунды; часы UTC = часы МСК)."""
+    t = (int(now) // 3600) * 3600 + delay_s
+    while t <= now:
+        t += 3600
+    return float(t)
 PORT            = int(os.environ.get("PORT", "8080"))
 PUBLIC_URL      = os.environ.get("PUBLIC_URL", "").rstrip("/")   # https://yourapp.railway.app
 MSK = timezone(timedelta(hours=3))
@@ -644,7 +657,7 @@ async def cmd_status(msg: Message):
         f"Рынки: {mkt_str}\n"
         f"Режим: {bo_str}\n\n"
         f"{tpl_str}\n\n"
-        f"Интервал скана: каждые {SCAN_INTERVAL // 60} мин",
+        f"Авто-скан: {SCAN_SCHEDULE_TEXT}",
         parse_mode="HTML",
         reply_markup=main_keyboard(chat_id),
     )
@@ -1059,7 +1072,7 @@ def _ai_user_context(chat_id: int) -> dict:
     return {
         "subscribed": chat_id in _subscribers,
         "ai_enabled": storage.get_ai_enabled(chat_id),
-        "scan_interval_min": SCAN_INTERVAL // 60,
+        "scan_schedule": SCAN_SCHEDULE_TEXT,
         "markets": list(cfg.get("markets") or []),
         "names_by_market": cfg.get("names_by_market") or {m: [] for m in storage.MARKETS},
         "templates": storage.get_html_templates(chat_id),
@@ -1418,7 +1431,7 @@ async def cb_filter_done(call: CallbackQuery):
     await call.message.edit_text(
         f"✅ Настройки сохранены.\n\n"
         f"Активно: <b>{mkts}</b>\n\n"
-        f"Сигналы каждые {SCAN_INTERVAL // 60} мин "
+        f"Сигналы {SCAN_SCHEDULE_TEXT} "
         f"по включённым рынкам.",
         parse_mode="HTML",
     )
@@ -2044,8 +2057,14 @@ async def handle_health(request: web.Request) -> web.Response:
 
 # ── Фоновый скан ─────────────────────────────────────────────────────────────
 async def scan_loop():
-    await asyncio.sleep(15)
+    # Без «догоняющего» скана после рестарта: всегда ждём ближайший HH:00:40.
     while True:
+        nxt = next_scan_ts(time.time())
+        logger.info("Следующий авто-скан: %s UTC",
+                    datetime.fromtimestamp(nxt, timezone.utc).strftime("%H:%M:%S"))
+        await asyncio.sleep(max(0.0, nxt - time.time()))
+        hour_start = (int(time.time()) // 3600) * 3600
+        t0 = time.time()
         if _subscribers:
             logger.info("Авто-скан для %d подписчиков", len(_subscribers))
             try:
@@ -2056,7 +2075,13 @@ async def scan_loop():
                     incremental=True,
                     chat_best_only=_best_only_for_chat,
                 )
-                logger.info("Авто-скан: отправлено новых карточек=%d", n)
+                dur = time.time() - t0
+                late = time.time() - hour_start > SCAN_SEND_DEADLINE_S
+                (logger.warning if late else logger.info)(
+                    "Авто-скан: отправлено новых карточек=%d, длительность %.1f с, завершён в HH:%s%s",
+                    n, dur, time.strftime("%M:%S", time.gmtime(time.time())),
+                    " — ПОЗЖЕ HH:05!" if late else "",
+                )
             except Exception:
                 logger.exception("Ошибка авто-скана")
             try:
@@ -2068,7 +2093,6 @@ async def scan_loop():
                     )
             except Exception:
                 logger.exception("Ошибка проверки исходов сигналов")
-        await asyncio.sleep(SCAN_INTERVAL)
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
