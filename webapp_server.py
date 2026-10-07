@@ -28,9 +28,9 @@ SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20261007a">
-<script src="/bridge.js?v=20261007a"></script>
-<script src="/lean.js?v=20261007a"></script>
+<link rel="stylesheet" href="/mobile.css?v=20261007b">
+<script src="/bridge.js?v=20261007b"></script>
+<script src="/lean.js?v=20261007b"></script>
 """
 
 
@@ -532,7 +532,7 @@ async def api_journal_get(request: web.Request) -> web.Response:
     """Журнал сигналов, ушедших в Telegram. Новые первыми, оба рынка."""
     uid = require_user(request)
     rows = storage.list_signal_journal(uid)
-    crypto, ru = [], []
+    crypto, ru, algo = [], [], []
     for row in rows:
         item = {
             "id": row["id"],
@@ -546,8 +546,8 @@ async def api_journal_get(request: web.Request) -> web.Response:
                 for tf in ("d1", "h1", "m5")
             },
         }
-        (ru if row["market"] == "ru" else crypto).append(item)
-    return web.json_response({"crypto": crypto, "ru": ru})
+        (ru if row["market"] == "ru" else algo if row["market"] == "algo" else crypto).append(item)
+    return web.json_response({"crypto": crypto, "ru": ru, "algo": algo})
 
 
 async def api_journal_chart(request: web.Request) -> web.Response:

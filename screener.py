@@ -558,14 +558,17 @@ def passes_html(s: dict, f: dict) -> bool:
             return False
         if f["atrd"][0] == "f" and not a > float(f["atrd"][1:]):
             return False
-    # РУ-фильтры нового HTML — только для акций Мосбиржи (s.mkt==='ru').
-    # 1:1 с HTML: readF() делает parseFloat('1') → 1, а passes() сравнивает f.rusqueeze==='1',
-    # поэтому в текущем HTML эти фильтры фактически НЕ срабатывают. Здесь то же самое
-    # (f[...] — float, сравнение со строкой "1" ложно), чтобы бот = HTML.
+    # РУ-фильтры нового HTML — только для акций Мосбиржи (s.mkt==='ru'); «1» = фильтр включён.
+    # HTML: if(+f.rusqueeze===1&&!s.ru_squeeze) return false; (readF → parseFloat('1') = 1).
     if s.get("mkt") == "ru":
         for fk, sk in (("rusqueeze", "ru_squeeze"), ("ruclose", "ru_close_pos"),
                        ("ruimoex", "ru_imoex_ok"), ("rurelstr", "ru_rel_str")):
-            if f.get(fk) == "1" and not s.get(sk):
+            v = f.get(fk)
+            try:
+                on = v is not None and v != "" and float(v) == 1
+            except (TypeError, ValueError):
+                on = False
+            if on and not s.get(sk):
                 return False
     return True
 
@@ -1018,12 +1021,14 @@ def _needed_markets(subscribers: list[int], chat_filters: Callable[[int], dict])
             markets = ["crypto"]
         multi = f.get("_multi")
         if multi:
-            tpl_mkts = {t.get("_market", "crypto") for t in multi}
+            # «Крипта (Алго)» — только по явно выбранному алго-шаблону с ≥1 индикатором
+            tpl_mkts = {t.get("_market", "crypto") for t in multi
+                        if t.get("_market") != "algo" or (not t.get("_auto") and algo_mod.template_combo(t.get("filters") or {})[0])}
             for m in markets:
                 if m in tpl_mkts:
                     needed.add(m)
         else:
-            needed.update(markets)
+            needed.update(m for m in markets if m != "algo")   # без шаблонов алго не сканируется никогда
     return needed
 
 
@@ -1167,7 +1172,7 @@ async def _deliver_html(
         f = chat_filters(chat_id) or {}
         markets = f.get("markets") or ["crypto"]
         multi = f.get("_multi") or [{"_name": "", "_market": m, "_strategy": "both", "filters": {}}
-                                    for m in markets]
+                                    for m in markets if m != "algo"]   # алго: без авто/дефолта
         # Недельный лимит в боте УБРАН (решение пользователя): «макс. сделок в неделю» — только
         # фильтр бэктеста HTML. Количество сигналов бота ограничивают только шаблоны/сценарии.
         week_max = 0
@@ -1179,7 +1184,10 @@ async def _deliver_html(
             name = tpl.get("_name", "")
             raw = tpl.get("filters") or {}
             if mkt == "algo":
-                # «Крипта (Алго)»: HTML applyAll для algo отдаёт все сигналы шаблона без лимитов
+                # «Крипта (Алго)»: только явный шаблон (никакого Авто); HTML applyAll для algo
+                # отдаёт все сигналы шаблона без лимитов
+                if tpl.get("_auto") or not name:
+                    continue
                 rows = [c for c in algo_mod.cards_for(algo_ctx, raw, name) if c["signal_ts"] >= cutoff]
                 for c in rows:
                     key = (c["ticker"], "algo", c["signal_ts"], c["side"], round(c["level"], 10))

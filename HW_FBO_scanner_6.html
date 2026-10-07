@@ -1406,10 +1406,10 @@ function passes(s,f){
   }
   // РУ-фильтры — проверяются только для акций Мосбиржи
   if(s.mkt==='ru'){
-    if(f.rusqueeze==='1'&&!s.ru_squeeze) return false;
-    if(f.ruclose==='1'&&!s.ru_close_pos) return false;
-    if(f.ruimoex==='1'&&!s.ru_imoex_ok) return false;
-    if(f.rurelstr==='1'&&!s.ru_rel_str) return false;
+    if(+f.rusqueeze===1&&!s.ru_squeeze) return false;
+    if(+f.ruclose===1&&!s.ru_close_pos) return false;
+    if(+f.ruimoex===1&&!s.ru_imoex_ok) return false;
+    if(+f.rurelstr===1&&!s.ru_rel_str) return false;
   }
   if(f.atrd){
     const a=s.atrD_pct;

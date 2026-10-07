@@ -2061,6 +2061,8 @@ def normalize_journal_market(market: str | None) -> str:
     m = (market or "crypto").strip().lower()
     if m in ("ru", "moex", "мосбиржа"):
         return "ru"
+    if m in ("algo", "a"):
+        return "algo"   # «Крипта (Алго)» — свой раздел журнала; графики по крипто-свечам
     return "crypto"
 
 
@@ -2205,6 +2207,6 @@ def list_signal_journal(chat_id: int, market: str | None = None, limit: int = JO
                 """SELECT * FROM signal_journal
                    WHERE chat_id=?
                    ORDER BY sent_ts DESC, id DESC LIMIT ?""",
-                (int(chat_id), limit * 2),
+                (int(chat_id), limit * 3),
             ).fetchall()
     return [_journal_row_to_dict(r) for r in rows]

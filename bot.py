@@ -88,7 +88,8 @@ def _sync_endpoint(chat_id: int) -> str | None:
 
 def _journal_slug(market: str | None) -> str:
     """Path segment. Мосбиржа → moex (query string Telegram может выкинуть)."""
-    return "moex" if storage.normalize_journal_market(market) == "ru" else "crypto"
+    m = storage.normalize_journal_market(market)
+    return "moex" if m == "ru" else "algo" if m == "algo" else "crypto"
 
 
 def _app_url_with_sync(
@@ -112,7 +113,7 @@ def _app_url_with_sync(
         path = f"/app/journal/{slug}"
         if journal_id:
             path += f"/{int(journal_id)}"
-        fm = "ru" if slug == "moex" else "crypto"
+        fm = "ru" if slug == "moex" else slug
         # tab=journal первым в query — запасной канал, если query всё же доедет
         url = f"{PUBLIC_URL}{path}?tab=journal&fm={fm}"
         if journal_id:
@@ -171,9 +172,10 @@ def _journal_startapp_url(market: str | None, journal_id: int | None) -> str:
     """Прямая ссылка Mini App. startapp доходит даже когда web_app открывает только /app.
 
     Допустимые символы startapp: A-Z a-z 0-9 _ -
-    j_c / j_c_<id> — крипта, j_m / j_m_<id> — Мосбиржа.
+    j_c / j_c_<id> — крипта, j_m / j_m_<id> — Мосбиржа, j_a / j_a_<id> — Крипта (Алго).
     """
-    code = "m" if storage.normalize_journal_market(market) == "ru" else "c"
+    m = storage.normalize_journal_market(market)
+    code = "m" if m == "ru" else "a" if m == "algo" else "c"   # j_a / j_a_<id> — Крипта (Алго)
     param = f"j_{code}"
     if journal_id:
         param += f"_{int(journal_id)}"
@@ -1118,6 +1120,10 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
         if p.get("market") not in storage.MARKETS:
             return "Неизвестный рынок — ничего не менял."
         storage.set_market_enabled(chat_id, p["market"], bool(p.get("enabled")))
+        if p["market"] == "algo" and p.get("enabled") and not (
+                storage.get_active_config(chat_id).get("names_by_market") or {}).get("algo"):
+            return ("Рынок «Крипта (Алго)» включён, но алго-шаблон не выбран — сканов и сигналов "
+                    "по алго не будет, пока не выберешь шаблон в /filter.")
         return "Рынок обновлён."
     if action == "set_strategy":
         name = p.get("template") or ""
