@@ -51,6 +51,20 @@ def next_scan_ts(now: float, delay_s: int = SCAN_HOUR_DELAY_S) -> float:
 PORT            = int(os.environ.get("PORT", "8080"))
 PUBLIC_URL      = os.environ.get("PUBLIC_URL", "").rstrip("/")   # https://yourapp.railway.app
 MSK = timezone(timedelta(hours=3))
+# signal_ts = время ОТКРЫТИЯ H1-бара сигнала (как t в HTML; от него дедуп, 12ч-окно, графики).
+# Показываем как HTML: new Date(t+3600000) в Europe/Moscow — время ЗАКРЫТИЯ бара (появления сигнала).
+SIGNAL_BAR_MS = 3_600_000
+# Карточки, отправленные до этого момента, показывали время открытия бара (для разбора текста).
+_CLOSE_TIME_SINCE_MS = 1791388800000   # 2026-10-07 19:00 МСК
+
+
+def signal_display_ms(signal_ts: int) -> int:
+    """Время сигнала для показа (= HTML: t + 1ч, закрытие H1-бара)."""
+    return int(signal_ts) + SIGNAL_BAR_MS if signal_ts else 0
+
+
+def fmt_signal_time(signal_ts: int) -> str:
+    return datetime.fromtimestamp(signal_display_ms(signal_ts) / 1000, tz=MSK).strftime("%d.%m %H:%M МСК")
 
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
@@ -282,8 +296,7 @@ def _format_card(card: dict) -> str:
     # Время самого сигнала (час его появления на рынке), не время отправки сообщения. MSK, не UTC.
     signal_ts = card.get("signal_ts")
     if signal_ts:
-        ts_msk = datetime.fromtimestamp(signal_ts / 1000, tz=MSK)
-        time_str = ts_msk.strftime("%d.%m %H:%M МСК")
+        time_str = fmt_signal_time(signal_ts)   # закрытие H1-бара, как в HTML
     else:
         time_str = datetime.now(MSK).strftime("%d.%m %H:%M МСК") + " (время скана)"
 
@@ -410,6 +423,10 @@ def _parse_card_from_message(msg) -> dict | None:
             if ts > now + timedelta(days=1):
                 ts = datetime(year - 1, month, day, hour, minute, tzinfo=MSK)
             signal_ts = int(ts.timestamp() * 1000)
+            # новые карточки показывают закрытие бара → обратно к открытию (ключ/дедуп = open)
+            sent_ms = int(msg.date.timestamp() * 1000) if getattr(msg, "date", None) else int(time.time() * 1000)
+            if sent_ms >= _CLOSE_TIME_SINCE_MS:
+                signal_ts -= SIGNAL_BAR_MS
         except ValueError:
             signal_ts = 0
     if not signal_ts and getattr(msg, "date", None):
