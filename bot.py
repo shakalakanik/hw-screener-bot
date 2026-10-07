@@ -225,6 +225,12 @@ def _view_signal_button(
     )
 
 
+SUB_ON_LABEL = "🔔 Подписка: вкл"
+SUB_OFF_LABEL = "🔕 Подписка: выкл"
+SUB_LABELS = {SUB_ON_LABEL, SUB_OFF_LABEL}
+_OLD_START, _OLD_STOP = "▶️ Старт", "⛔ Стоп"   # старые клавиатуры
+
+
 def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
     """Клавиатура. Шаблоны обновляются только синхронизацией («🔗 Синхронизация шаблонов» / /syncurl).
     ИИ всегда включён — отдельной кнопки нет."""
@@ -232,7 +238,8 @@ def main_keyboard(chat_id: int | None = None) -> ReplyKeyboardMarkup:
         [KeyboardButton(text="📡 Скан"), KeyboardButton(text="⚙️ Фильтр")],
         [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔗 Синхронизация шаблонов")],
     ]
-    rows.append([KeyboardButton(text="▶️ Старт"), KeyboardButton(text="⛔ Стоп")])
+    subscribed = bool(chat_id) and chat_id in _subscribers
+    rows.append([KeyboardButton(text=SUB_ON_LABEL if subscribed else SUB_OFF_LABEL)])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
@@ -495,7 +502,6 @@ async def send_signal(card: dict, chat_ids: list[int]):
 
 # ── /start ────────────────────────────────────────────────────────────────────
 @dp.message(Command("start"))
-@dp.message(F.text == "▶️ Старт")
 async def cmd_start(msg: Message):
     _subscribers.add(msg.chat.id)
     storage.init()
@@ -507,7 +513,8 @@ async def cmd_start(msg: Message):
         "/scan — запустить скан сейчас\n"
         "/status — текущие настройки\n"
         "/ai — ИИ-помощник (настройки и сигналы)\n"
-        "/stop — остановить сигналы\n\n"
+        "/stop — остановить сигналы\n"
+        "«🔔 Подписка: вкл / 🔕 Подписка: выкл» — включить/выключить сигналы одной кнопкой\n\n"
         "🤖 ИИ всегда включён: просто пиши свободным текстом по-русски.",
         parse_mode="HTML",
         reply_markup=main_keyboard(msg.chat.id),
@@ -516,13 +523,32 @@ async def cmd_start(msg: Message):
 
 # ── /stop ─────────────────────────────────────────────────────────────────────
 @dp.message(Command("stop"))
-@dp.message(F.text == "⛔ Стоп")
 async def cmd_stop(msg: Message):
     _subscribers.discard(msg.chat.id)
     await msg.answer(
-        "⛔ Сигналы остановлены. Нажми «▶️ Старт», чтобы возобновить.",
+        f"🔕 Сигналы остановлены. Нажми «{SUB_OFF_LABEL}», чтобы возобновить.",
         reply_markup=main_keyboard(msg.chat.id),
     )
+
+
+# ── Кнопка-переключатель подписки (+ старые «▶️ Старт» / «⛔ Стоп») ───────────
+@dp.message(F.text.in_(SUB_LABELS | {_OLD_START, _OLD_STOP}))
+async def cmd_sub_toggle(msg: Message):
+    chat_id = msg.chat.id
+    t = (msg.text or "").strip()
+    if t == _OLD_START:
+        turn_on = True
+    elif t == _OLD_STOP:
+        turn_on = False
+    else:
+        turn_on = chat_id not in _subscribers   # переключаем по текущему состоянию
+    if turn_on:
+        _subscribers.add(chat_id)
+        text = "🔔 Подписка включена — сигналы будут приходить раз в час (HH:00–HH:05 МСК)."
+    else:
+        _subscribers.discard(chat_id)
+        text = "🔕 Подписка выключена — сигналы не приходят."
+    await msg.answer(text, reply_markup=main_keyboard(chat_id))
 
 
 # ── /syncurl — выдать стабильную ссылку для HTML ─────────────────────────────
@@ -1455,7 +1481,7 @@ async def on_free_text(msg: Message):
     text_raw = (msg.text or "").strip()
     menu_labels = {
         "📡 Скан", "⚙️ Фильтр", "📊 Статус", "🔗 Sync", "🔗 Синхронизация шаблонов",
-        "🔄 Обновить шаблоны", "▶️ Старт", "⛔ Стоп",
+        "🔄 Обновить шаблоны", "▶️ Старт", "⛔ Стоп", SUB_ON_LABEL, SUB_OFF_LABEL,
         "🤖 ИИ", "🤖 ИИ ✓",
     }
 
