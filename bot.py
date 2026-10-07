@@ -1086,13 +1086,96 @@ def _ai_user_context(chat_id: int) -> dict:
         "templates": storage.get_html_templates(chat_id),
         "templates_by_market": {m: sorted(storage.get_html_templates(chat_id, m)) for m in storage.MARKETS},
         "strategy_overrides": storage.get_template_strategy_overrides(chat_id),
+        "auto": storage.get_auto_mode(chat_id),
+        "auto_strategy": {m: storage.get_auto_strategy(chat_id, m) for m in _AUTO_MARKETS},
+        "best_only": storage.get_best_only(chat_id),
+        "template_strategies": _template_strategies_by_market(chat_id),
     }
+
+
+def _template_strategies_by_market(chat_id: int) -> dict:
+    ov = storage.get_template_strategy_overrides(chat_id)
+    out = {}
+    for m in storage.MARKETS:
+        tpls = storage.get_html_templates(chat_id, m)
+        out[m] = {n: (_effective_strategy(chat_id, n, (e or {}).get("filters") or {}, ov) if m != "algo" else "algo")
+                  for n, e in tpls.items()}
+    return out
+
+
+def _fuzzy_tpl(tpls: dict, name: str) -> str | None:
+    """Имя шаблона рынка: точное → без регистра → префикс/вхождение → похожее (опечатки)."""
+    if not name:
+        return None
+    if name in tpls:
+        return name
+    low = {k.lower().strip(): k for k in tpls}
+    n = name.lower().strip()
+    if n in low:
+        return low[n]
+    hits = [k for lk, k in low.items() if lk.startswith(n) or n.startswith(lk[:40]) or n in lk]
+    if len(hits) == 1:
+        return hits[0]
+    import difflib
+    close = difflib.get_close_matches(n, list(low), n=2, cutoff=0.75)
+    if len(close) == 1 or (close and difflib.SequenceMatcher(None, n, close[0]).ratio() >= 0.9):
+        return low[close[0]]
+    return None
+
+
+def _ai_resolve_names(chat_id: int, proposal: dict) -> dict:
+    """Перед карточкой подтверждения: имена шаблонов → реальные имена рынка; ненайденные → заметка."""
+    items = proposal.get("actions") if proposal.get("action") == "multi" else [proposal]
+    notes = list(proposal.get("notes") or [])
+    keep = []
+    for it in items or []:
+        p = it.get("params") or {}
+        a = it.get("action")
+        if a in ("set_templates", "add_templates", "remove_templates"):
+            tpls = storage.get_html_templates(chat_id, p.get("market"))
+            got, miss = [], []
+            for n in p.get("names") or []:
+                r = _fuzzy_tpl(tpls, n)
+                if r:
+                    if r not in got:
+                        got.append(r)
+                else:
+                    miss.append(n)
+            if miss:
+                notes.append(f"Шаблон(ы) {', '.join('«'+x+'»' for x in miss)} не найдены на рынке "
+                             f"{_AI_MKT_RU.get(p.get('market'))} — пропускаю.")
+            if not got and a != "set_templates":
+                continue
+            it = {**it, "params": {**p, "names": got}}
+        elif a == "set_strategy":
+            mk = [p["market"]] if p.get("market") in storage.MARKETS else list(storage.MARKETS)
+            found = None
+            for m in mk:
+                r = _fuzzy_tpl(storage.get_html_templates(chat_id, m), p.get("template") or "")
+                if r:
+                    found = (m, r)
+                    break
+            if not found:
+                notes.append(f"Шаблон «{p.get('template')}» не найден — пропускаю.")
+                continue
+            it = {**it, "params": {**p, "market": found[0], "template": found[1]}}
+        keep.append(it)
+    if proposal.get("action") != "multi" and len(keep) == 1 and not notes:
+        return keep[0]
+    return {"action": "multi", "actions": keep, "notes": notes, "summary": f"{len(keep)} изменений"}
 
 
 _AI_MKT_RU = {"crypto": "крипта", "ru": "мосбиржа", "algo": "крипта (алго)"}
 
 
+_AI_STRAT_RU = {"fbo": "ложный пробой", "brk": "пробой", "both": "оба (ЛП + пробой)"}
+
+
 def _format_proposal(proposal: dict) -> str:
+    if proposal.get("action") == "multi":
+        lines = [f"{i}. {_format_proposal(a)}" for i, a in enumerate(proposal.get("actions") or [], 1)]
+        lines += [f"ℹ️ {n}" for n in proposal.get("notes") or []]
+        return "\n".join(lines) or "—"
     action = proposal.get("action")
     p = proposal.get("params") or {}
     summary = proposal.get("summary") or action
@@ -1100,8 +1183,21 @@ def _format_proposal(proposal: dict) -> str:
         m = _AI_MKT_RU.get(p.get("market"), "крипта")
         st = "включить" if p.get("enabled") else "выключить"
         return f"{st} рынок <b>{m}</b>"
+    if action == "set_auto":
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
+        if not p.get("enabled"):
+            return f"{m}: выключить 🤖 Авто (останутся мои шаблоны)"
+        st = f" на <b>{_AI_STRAT_RU[p['strategy']]}</b>" if p.get("strategy") else ""
+        return f"{m}: включить 🤖 Авто{st}"
+    if action == "set_auto_strategy":
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
+        return f"{m}: стратегия 🤖 Авто → <b>{_AI_STRAT_RU.get(p.get('strategy'))}</b>"
+    if action == "set_best_only":
+        m = _AI_MKT_RU.get(p.get("market"), "крипта")
+        return f"{m}: «только лучший сигнал» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
     if action == "set_strategy":
-        return f"стратегия шаблона <b>{p.get('template')}</b> → <code>{p.get('strategy')}</code>"
+        return (f"стратегия шаблона <b>{p.get('template')}</b> → "
+                f"<b>{_AI_STRAT_RU.get(p.get('strategy'), p.get('strategy'))}</b>")
     if action == "set_templates":
         names = ", ".join(p.get("names") or []) or "—"
         m = _AI_MKT_RU.get(p.get("market"), "крипта")
@@ -1122,7 +1218,23 @@ def _format_proposal(proposal: dict) -> str:
 
 
 def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
-    """Применить подтверждённое предложение. Возвращает текст результата."""
+    """Применить подтверждённое предложение (одно или multi — по порядку). Те же функции
+    storage, что и кнопки /filter. Возвращает текст результата (по пункту на действие)."""
+    if proposal.get("action") == "multi":
+        out = []
+        for i, a in enumerate(proposal.get("actions") or [], 1):
+            try:
+                r = _apply_ai_one(chat_id, a)
+                ok = not any(x in r for x in ("не найден", "Неизвестн", "ничего не менял"))
+            except Exception as e:
+                logger.exception("AI apply %s", a)
+                r, ok = f"ошибка: {e}", False
+            out.append(f"{'✅' if ok else '⚠️'} {i}. {_format_proposal(a)} — {r}")
+        return "\n".join(out) or "Нечего применять."
+    return _apply_ai_one(chat_id, proposal)
+
+
+def _apply_ai_one(chat_id: int, proposal: dict) -> str:
     action = proposal.get("action")
     p = proposal.get("params") or {}
     if action == "set_market":
@@ -1133,10 +1245,30 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
                 storage.get_active_config(chat_id).get("names_by_market") or {}).get("algo"):
             return ("Рынок «Крипта (Алго)» включён, но алго-шаблон не выбран — сканов и сигналов "
                     "по алго не будет, пока не выберешь шаблон в /filter.")
-        return "Рынок обновлён."
+        return "готово."
+    if action == "set_auto":
+        m = p.get("market")
+        if m not in _AUTO_MARKETS:
+            return "у этого рынка нет 🤖 Авто — ничего не менял."
+        storage.set_auto_mode(chat_id, m, bool(p.get("enabled")))      # = кнопка auto_on
+        if p.get("enabled") and p.get("strategy") in _STRAT_CYCLE:
+            storage.set_auto_strategy(chat_id, m, p["strategy"])       # = кнопка auto_strat
+        return "готово."
+    if action == "set_auto_strategy":
+        m = p.get("market")
+        if m not in _AUTO_MARKETS or p.get("strategy") not in _STRAT_CYCLE:
+            return "у этого рынка нет 🤖 Авто — ничего не менял."
+        storage.set_auto_strategy(chat_id, m, p["strategy"])
+        return "готово."
+    if action == "set_best_only":
+        if p.get("market") not in storage.MARKETS:
+            return "Неизвестный рынок — ничего не менял."
+        storage.set_best_only(chat_id, p["market"], bool(p.get("enabled")))   # = кнопка best_only
+        return "готово."
     if action == "set_strategy":
         name = p.get("template") or ""
-        tpls = storage.get_html_templates(chat_id)
+        tpls = (storage.get_html_templates(chat_id, p["market"]) if p.get("market") in storage.MARKETS
+                else storage.get_html_templates(chat_id))
         if name not in tpls:
             # prefix match like filter callbacks
             full = next((k for k in tpls if k == name or k.startswith(name) or name.startswith(k[:40])), None)
@@ -1153,12 +1285,9 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
         tpls = storage.get_html_templates(chat_id, market)   # шаблоны этого рынка
         resolved = []
         for n in names:
-            if n in tpls:
-                resolved.append(n)
-            else:
-                full = next((k for k in tpls if k.startswith(n) or n.startswith(k[:40])), None)
-                if full:
-                    resolved.append(full)
+            full = _fuzzy_tpl(tpls, n)
+            if full and full not in resolved:
+                resolved.append(full)
         cfg = storage.get_active_config(chat_id)
         current = list((cfg.get("names_by_market") or {}).get(market) or [])
         if action == "set_templates":
@@ -1174,7 +1303,7 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
         storage.set_active_templates_for_market(chat_id, market, new_names)
         if market in ("crypto", "ru"):
             storage.set_auto_mode(chat_id, market, False)
-        return f"Шаблоны ({market}) обновлены: {len(new_names)} шт."
+        return f"активных шаблонов: {len(new_names)}."
     if action == "subscribe":
         _subscribers.add(chat_id)
         return "Подписка на сигналы включена."
@@ -1185,6 +1314,12 @@ def _apply_ai_proposal(chat_id: int, proposal: dict) -> str:
 
 
 async def _send_ai_proposal_confirm(chat_id: int, proposal: dict, base_text: str):
+    proposal = _ai_resolve_names(chat_id, proposal)
+    if proposal.get("action") == "multi" and not proposal.get("actions"):
+        notes = "\n".join(f"ℹ️ {n}" for n in proposal.get("notes") or [])
+        await bot.send_message(chat_id, f"{base_text}\n\n{notes}".strip() or "Нечего менять.",
+                               parse_mode="HTML", reply_markup=main_keyboard(chat_id))
+        return
     storage.set_ai_pending(chat_id, proposal, proposal.get("summary") or "")
     detail = _format_proposal(proposal)
     kb = InlineKeyboardMarkup(inline_keyboard=[[
@@ -1238,6 +1373,8 @@ async def cmd_ai(msg: Message):
             "Свободный текст на русском <b>поддерживается</b> — пиши как удобно.\n"
             "Примеры:\n"
             "• включи мосбиржу / выключи крипту\n"
+            "• включи крипту авто на ложный пробой, а мосбиржу авто на пробой\n"
+            "• всё выключи кроме крипты / на крипте только лучший сигнал\n"
             "• подпишись / стоп сигналы\n"
             "• что значит сила и ATR на карточке\n"
             "• чем fbo отличается от brk\n"

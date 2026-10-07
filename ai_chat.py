@@ -111,23 +111,48 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
 - Оставайся помощником ЭТОГО скринер-бота. Если вопрос совсем не про бот/торговлю/
   сигналы/настройки (быт, медицина, общие советы и т.п.) — коротко скажи, что
   ты только про HW Screener, и предложи спросить про рынки/шаблоны/сигналы.
-- Ты НЕ меняешь настройки сам. Если пользователь просит изменить настройку,
-  опиши изменение простым языком и в КОНЦЕ ответа добавь ровно один блок:
+- Ты НЕ меняешь настройки сам. Если пользователь просит изменить настройки,
+  опиши изменения простым языком и в КОНЦЕ ответа добавь ровно один блок
+  ---ACTION--- с JSON-МАССИВОМ действий (одно сообщение может содержать много
+  изменений — перечисли ВСЕ, в порядке применения):
 
 ---ACTION---
-{"action":"<код>","params":{...},"summary":"<одна строка что изменится>"}
+[{"action":"<код>","params":{...}}, {"action":"<код>","params":{...}}]
 
-Допустимые action:
-- set_market: params {"market":"crypto"|"ru"|"algo","enabled":true|false}  (algo = «Крипта (Алго)», скан по индикаторам)
-- set_strategy: params {"template":"<имя>","strategy":"fbo"|"brk"|"both"}
-- set_templates: params {"market":"crypto"|"ru"|"algo","names":["..."]}  (полная замена активных для рынка)
-- add_templates: params {"market":"crypto"|"ru"|"algo","names":["..."]}
-- remove_templates: params {"market":"crypto"|"ru"|"algo","names":["..."]}
-- subscribe: params {}
-- unsubscribe: params {}
+Допустимые action (всё, что можно нажать в /filter):
+- set_market: {"market":"crypto"|"ru"|"algo","enabled":true|false}  — рынок вкл/выкл
+- set_auto: {"market":"crypto"|"ru","enabled":true|false,"strategy":"fbo"|"brk"|"both"(необязательно)}
+    — встроенный шаблон «🤖 Авто» рынка и его стратегия. У «Крипта (Алго)» (algo) Авто НЕТ —
+    не предлагай, объясни что нужен алго-шаблон.
+- set_auto_strategy: {"market":"crypto"|"ru","strategy":"fbo"|"brk"|"both"}
+- set_best_only: {"market":"crypto"|"ru"|"algo","enabled":true|false} — «только лучший сигнал»
+- set_templates: {"market":..,"names":["..."]}  — полная замена активных шаблонов рынка (выключает Авто)
+- add_templates / remove_templates: {"market":..,"names":["..."]}
+- set_strategy: {"market":..,"template":"<имя>","strategy":"fbo"|"brk"|"both"} — ЛП/Пробой/Оба шаблона
+- subscribe: {} / unsubscribe: {}
+Стратегии: fbo = ложный пробой (ЛП), brk = пробой, both = оба.
+Имена шаблонов бери ТОЛЬКО из контекста (шаблоны своего рынка).
 
+Примеры:
+«включи крипту авто на ложный пробой, а Мосбиржу включи на пробой авто» →
+[{"action":"set_market","params":{"market":"crypto","enabled":true}},
+ {"action":"set_auto","params":{"market":"crypto","enabled":true,"strategy":"fbo"}},
+ {"action":"set_market","params":{"market":"ru","enabled":true}},
+ {"action":"set_auto","params":{"market":"ru","enabled":true,"strategy":"brk"}}]
+«включи мосбиржу и выключи крипту» →
+[{"action":"set_market","params":{"market":"ru","enabled":true}},
+ {"action":"set_market","params":{"market":"crypto","enabled":false}}]
+«всё выключи кроме крипты» →
+[{"action":"set_market","params":{"market":"crypto","enabled":true}},
+ {"action":"set_market","params":{"market":"ru","enabled":false}},
+ {"action":"set_market","params":{"market":"algo","enabled":false}}]
+«на крипте только лучший, авто оба» →
+[{"action":"set_best_only","params":{"market":"crypto","enabled":true}},
+ {"action":"set_auto","params":{"market":"crypto","enabled":true,"strategy":"both"}}]
+Если просьба неоднозначна (непонятно какой рынок, шаблон или стратегия, «на пробой» без
+указания — Авто это или шаблон) — НЕ угадывай и НЕ добавляй ACTION, задай короткий
+уточняющий вопрос.
 Если менять нечего — НЕ добавляй ---ACTION---.
-Не применяй несколько ACTION сразу — максимум один.
 HTML/Markdown: можно лёгкий Telegram HTML (<b>, <code>), без сложных тегов.
 """
 
@@ -158,19 +183,9 @@ def _parse_action_block(raw: str) -> tuple[str, dict | None]:
         head, _, tail = text.partition(ACTION_MARKER)
         text = head.strip()
         blob = tail.strip()
-        # take first JSON object
-        m = re.search(r"\{.*\}", blob, flags=re.DOTALL)
-        if m:
-            try:
-                obj = json.loads(m.group(0))
-                if isinstance(obj, dict) and obj.get("action"):
-                    proposal = {
-                        "action": str(obj["action"]).strip(),
-                        "params": obj.get("params") if isinstance(obj.get("params"), dict) else {},
-                        "summary": str(obj.get("summary") or obj["action"]).strip(),
-                    }
-            except (json.JSONDecodeError, TypeError, ValueError):
-                logger.warning("AI ACTION JSON parse failed: %s", blob[:200])
+        proposal = _parse_actions_json(blob)
+        if proposal is None and blob:
+            logger.warning("AI ACTION JSON parse failed: %s", blob[:200])
     # strip accidental fences
     text = re.sub(r"^```(?:html|markdown)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -179,7 +194,40 @@ def _parse_action_block(raw: str) -> tuple[str, dict | None]:
     return text, proposal
 
 
+def _parse_actions_json(blob: str) -> dict | None:
+    """ACTION JSON: массив действий, {"actions":[...]} или одиночный объект (старый формат)."""
+    blob = re.sub(r"^```(?:json)?\s*|\s*```$", "", (blob or "").strip())
+    cands = []
+    m = re.search(r"\[.*\]", blob, flags=re.DOTALL)
+    if m:
+        cands.append(m.group(0))
+    m = re.search(r"\{.*\}", blob, flags=re.DOTALL)
+    if m:
+        cands.append(m.group(0))
+    for c in cands:
+        try:
+            obj = json.loads(c)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("actions"), list):
+            obj = obj["actions"]
+        if isinstance(obj, list):
+            items = [o for o in obj if isinstance(o, dict) and o.get("action")]
+            if items:
+                return {"action": "multi", "actions": items, "summary": f"{len(items)} изменений"}
+        elif isinstance(obj, dict) and obj.get("action"):
+            return {
+                "action": str(obj["action"]).strip(),
+                "params": obj.get("params") if isinstance(obj.get("params"), dict) else {},
+                "summary": str(obj.get("summary") or obj["action"]).strip(),
+            }
+    return None
+
+
 _ALLOWED_ACTIONS = {
+    "set_auto",
+    "set_auto_strategy",
+    "set_best_only",
     "set_market",
     "set_strategy",
     "set_templates",
@@ -190,39 +238,215 @@ _ALLOWED_ACTIONS = {
 }
 
 
-def sanitize_proposal(proposal: dict | None) -> dict | None:
-    if not proposal or not isinstance(proposal, dict):
-        return None
-    action = str(proposal.get("action") or "").strip()
+_MKTS = ("crypto", "ru", "algo")
+_STRATS = ("fbo", "brk", "both")
+_ALGO_NO_AUTO = ("У «Крипта (Алго)» нет режима 🤖 Авто — алго сканирует только по выбранному "
+                 "алго-шаблону (/filter → ⚡ Алго).")
+
+
+def _as_bool(v) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on", "да", "вкл")
+    return bool(v)
+
+
+def _sanitize_one(item: dict, notes: list[str]) -> dict | None:
+    action = str(item.get("action") or "").strip()
     if action not in _ALLOWED_ACTIONS:
         return None
-    params = proposal.get("params") if isinstance(proposal.get("params"), dict) else {}
-    clean: dict[str, Any] = {"action": action, "params": {}, "summary": str(proposal.get("summary") or action)}
-
-    if action == "set_market":
-        market = params.get("market")
-        if market not in ("crypto", "ru", "algo"):
+    params = item.get("params") if isinstance(item.get("params"), dict) else {}
+    clean: dict[str, Any] = {"action": action, "params": {}, "summary": str(item.get("summary") or action)}
+    market = params.get("market")
+    if action in ("set_market", "set_best_only"):
+        if market not in _MKTS:
             return None
-        clean["params"] = {"market": market, "enabled": bool(params.get("enabled"))}
+        clean["params"] = {"market": market, "enabled": _as_bool(params.get("enabled"))}
+    elif action in ("set_auto", "set_auto_strategy"):
+        if market == "algo":
+            if _ALGO_NO_AUTO not in notes:
+                notes.append(_ALGO_NO_AUTO)
+            return None
+        if market not in ("crypto", "ru"):
+            return None
+        strat = params.get("strategy")
+        if strat is not None and strat not in _STRATS:
+            return None
+        if action == "set_auto_strategy":
+            if not strat:
+                return None
+            clean["params"] = {"market": market, "strategy": strat}
+        else:
+            enabled = _as_bool(params.get("enabled", True))
+            clean["params"] = {"market": market, "enabled": enabled}
+            if strat and enabled:
+                clean["params"]["strategy"] = strat
     elif action == "set_strategy":
         strat = params.get("strategy")
         name = str(params.get("template") or "").strip()
-        if not name or strat not in ("fbo", "brk", "both"):
+        if not name or strat not in _STRATS:
             return None
         clean["params"] = {"template": name, "strategy": strat}
+        if market in _MKTS:
+            clean["params"]["market"] = market
     elif action in ("set_templates", "add_templates", "remove_templates"):
-        market = params.get("market")
         names = params.get("names")
-        if market not in ("crypto", "ru", "algo") or not isinstance(names, list):
+        if isinstance(names, str):
+            names = [names]
+        if market not in _MKTS or not isinstance(names, list):
             return None
-        clean_names = [str(n).strip() for n in names if str(n).strip()]
-        clean["params"] = {"market": market, "names": clean_names}
+        clean["params"] = {"market": market, "names": [str(n).strip() for n in names if str(n).strip()]}
     else:
         clean["params"] = {}
-
-    if not clean["summary"]:
-        clean["summary"] = action
     return clean
+
+
+def sanitize_proposal(proposal: dict | None) -> dict | None:
+    """Одиночное действие (старый формат) или {"action":"multi","actions":[...]}.
+
+    Мульти-предложение → {"action":"multi","actions":[clean...],"notes":[...]}; одно валидное
+    действие без заметок схлопывается в одиночный формат. Нечего применять → None
+    (или {"action":"multi","actions":[],"notes":[...]} чтобы показать объяснение).
+    """
+    if not proposal or not isinstance(proposal, dict):
+        return None
+    notes: list[str] = list(proposal.get("notes") or [])
+    if proposal.get("action") == "multi" or isinstance(proposal.get("actions"), list):
+        items = proposal.get("actions") or []
+    else:
+        items = [proposal]
+    out: list[dict] = []
+    seen = set()
+    for it in items[:20]:
+        if not isinstance(it, dict):
+            continue
+        c = _sanitize_one(it, notes)
+        if not c:
+            continue
+        key = json.dumps([c["action"], c["params"]], sort_keys=True, ensure_ascii=False)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    if not out:
+        return {"action": "multi", "actions": [], "notes": notes, "summary": ""} if notes else None
+    if len(out) == 1 and not notes and proposal.get("action") != "multi":
+        return out[0]
+    return {"action": "multi", "actions": out, "notes": notes, "summary": f"{len(out)} изменений"}
+
+
+# ── Детерминированный разбор частых фраз (работает без Gemini) ────────────────
+_R_CRYPTO = re.compile(r"(?i)(?<!алго )\b(?:кр[иеы]п\w*|крепт\w*|crypto\w*|bybit|okx)")
+_R_RU = re.compile(r"(?i)(?:мос\s*-?\s*б[иы]?рж\w*|мосбр\w*|moex|мое?кс\w*|мб\b|рф\b|российск\w*|акци\w*)")
+_R_ALGO = re.compile(r"(?i)(?:алг[оа]\w*|algo\w*|индикатор\w*)")
+_R_ALL = re.compile(r"(?i)\b(?:все|всё|всех|оба\s+рынк\w*|все\s+рынк\w*)\b")
+_R_EXCEPT = re.compile(r"(?i)\bкроме\b")
+_R_ONV = re.compile(r"(?i)(?:вкл\w*|вклю\w*|влючи\w*|вруби\w*|запусти\w*|активир\w*|добав\w*|поставь|"
+                    r"сделай|переключи|\bon\b|enable)")
+_R_OFFV = re.compile(r"(?i)(?:выкл\w*|выклю\w*|отключ\w*|выруби\w*|убери|убрать|останови\w*|\boff\b|disable)")
+_R_AUTO = re.compile(r"(?i)(?:авто\w*|\bauto\b|🤖)")
+_R_FBO = re.compile(r"(?i)(?:ложн\w*\s*-?\s*пр[оа]бо\w*|\bлп\b|\bfbo\b|ложняк\w*|ложн\w*)")
+_R_BRK = re.compile(r"(?i)(?:пр[оа]бо[йияюе]\w*|\bbrk\b|breakout)")
+_R_BOTH = re.compile(r"(?i)\b(?:оба|обе|обоих|both|все\s+стратеги\w*)\b")
+_R_BEST = re.compile(r"(?i)(?:лучш\w*|best)")
+_R_SPLIT = re.compile(r"(?i)\s*(?:[,;.]|\bа\s+также\b|\bа\b|\bи\b|\bно\b|\bплюс\b|\bзатем\b|\bпотом\b)\s*")
+_MKT_RU_LABEL = {"crypto": "крипта", "ru": "мосбиржа", "algo": "крипта (алго)"}
+
+
+def _seg_markets(seg: str) -> list[str]:
+    out = []
+    algo = bool(_R_ALGO.search(seg))
+    if algo:
+        out.append("algo")
+    seg_wo = _R_ALGO.sub(" ", seg)
+    if _R_CRYPTO.search(seg_wo) and not (algo and re.search(r"(?i)крипт\w*\s*\(?\s*алг", seg)):
+        out.append("crypto")
+    if _R_RU.search(seg):
+        out.append("ru")
+    return out
+
+
+def _seg_strategy(seg: str) -> str | None:
+    if _R_BOTH.search(seg):
+        return "both"
+    if _R_FBO.search(seg):
+        return "fbo"
+    if _R_BRK.search(seg):
+        return "brk"
+    return None
+
+
+def parse_rules(user_text: str) -> list[dict] | None:
+    """Частые фразы: рынок + вкл/выкл + авто + ЛП/пробой/оба + «только лучший» + «кроме».
+    Разбивает по «а», «и», запятым. Возвращает список действий или None (если что-то не понял —
+    тогда пусть решает Gemini / уточнит)."""
+    text = (user_text or "").strip().lower().replace("ё", "е")
+    if not text or len(text) > 300:
+        return None
+    # «всё выключи кроме крипты» / «включи только мосбиржу»
+    if _R_EXCEPT.search(text):
+        head, _, tail = _R_EXCEPT.split(text, maxsplit=1)[0], None, _R_EXCEPT.split(text, maxsplit=1)[1]
+        keep = _seg_markets(tail)
+        if not keep or not (_R_OFFV.search(head) or _R_ONV.search(head)):
+            return None
+        on_keep = bool(_R_OFFV.search(head))   # «выключи всё кроме X» → X вкл, остальные выкл
+        acts = [{"action": "set_market", "params": {"market": m, "enabled": on_keep}} for m in keep]
+        acts += [{"action": "set_market", "params": {"market": m, "enabled": not on_keep}}
+                 for m in _MKTS if m not in keep]
+        return acts
+    m_only = re.search(r"(?i)\bтолько\b", text)
+    segs = [x for x in _R_SPLIT.split(text) if x and x.strip()]
+    acts: list[dict] = []
+    verb: bool | None = None
+    last_mkts: list[str] = []
+    for seg in segs:
+        mk = _seg_markets(seg)
+        if not mk and _R_ALL.search(seg) and (_R_ONV.search(seg) or _R_OFFV.search(seg)):
+            mk = list(_MKTS)
+        on, off = bool(_R_ONV.search(seg)), bool(_R_OFFV.search(seg))
+        if on and off:
+            return None
+        if on or off:
+            verb = on
+        auto = bool(_R_AUTO.search(seg))
+        strat = _seg_strategy(seg)
+        best = bool(_R_BEST.search(seg))
+        if not mk:
+            # «…, авто на пробой» — относится к рынку предыдущего сегмента
+            if (auto or strat or best) and last_mkts:
+                mk = last_mkts
+            elif not (on or off or auto or strat or best) and re.fullmatch(r"[\s\w]{0,12}", seg) and re.search(r"(?i)^(?:пожалуйста|плиз|тоже|еще|ещё|сразу)?$", seg.strip()):
+                continue
+            else:
+                return None
+        if verb is None and not (best or auto or strat):
+            return None
+        last_mkts = mk
+        for m in mk:
+            if best:
+                en = True if verb is None else verb
+                acts.append({"action": "set_best_only", "params": {"market": m, "enabled": en}})
+                if not (auto or strat):
+                    continue
+            if auto or strat:
+                if strat and not auto:
+                    return None   # «на пробой» без «авто» — неясно: Авто или шаблон → уточнить
+                en = True if verb is None else verb
+                if verb is not False and not any(a["action"] == "set_market" and a["params"]["market"] == m for a in acts):
+                    acts.append({"action": "set_market", "params": {"market": m, "enabled": True}})
+                p = {"market": m, "enabled": en}
+                if strat and en:
+                    p["strategy"] = strat
+                acts.append({"action": "set_auto", "params": p})
+            elif not best:
+                acts.append({"action": "set_market", "params": {"market": m, "enabled": bool(verb)}})
+    if not acts:
+        return None
+    if m_only and verb:
+        on_mk = {a["params"]["market"] for a in acts if a["action"] == "set_market" and a["params"]["enabled"]}
+        if on_mk:
+            acts += [{"action": "set_market", "params": {"market": m, "enabled": False}}
+                     for m in _MKTS if m not in on_mk]
+    return acts
 
 
 def format_user_context(ctx: dict) -> str:
@@ -234,9 +458,22 @@ def format_user_context(ctx: dict) -> str:
         f"Рынки включены: {', '.join(ctx.get('markets') or []) or 'нет'}",
     ]
     by = ctx.get("names_by_market") or {}
+    enabled = set(ctx.get("markets") or [])
+    auto = ctx.get("auto") or {}
+    auto_st = ctx.get("auto_strategy") or {}
+    best = ctx.get("best_only") or {}
+    sl = {"fbo": "ЛП", "brk": "Пробой", "both": "Оба"}
+    tstr = ctx.get("template_strategies") or {}
     for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
         names = by.get(m) or []
-        lines.append(f"Активные шаблоны {label}: {', '.join(names) if names else '—'}")
+        a = ("Авто: нет (у алго Авто не бывает)" if m == "algo" else
+             f"🤖 Авто: {'вкл' if auto.get(m) else 'выкл'} (стратегия {auto_st.get(m, 'fbo')} = {sl.get(auto_st.get(m, 'fbo'))})")
+        lines.append(f"[{m}] {label}: рынок {'ВКЛ' if m in enabled else 'выкл'}; {a}; "
+                     f"только лучший: {'вкл' if best.get(m) else 'выкл'}; "
+                     f"активные шаблоны: {', '.join(names) if names else '—'}")
+        if tstr.get(m) is not None:
+            lines.append(f"  доступные шаблоны [{m}]: " +
+                         (", ".join(f"{n}[{st}]" for n, st in list(tstr[m].items())[:40]) or "—"))
     tbm = ctx.get("templates_by_market") or {}
     for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
         if tbm.get(m) is not None:
@@ -284,6 +521,9 @@ def try_local_intent(user_text: str) -> AiReply | None:
     """
     text = (user_text or "").strip()
     if not text or len(text) > 120:
+        return None
+    # только тривиальные одиночные команды; авто/стратегии/лучший/несколько частей → Gemini
+    if re.search(r"(?i)авто|auto|пробо|ложн|\bлп\b|лучш|кроме|только|\bоба\b|шаблон|стратег|[,;]|\bа\b|\bи\b", text):
         return None
 
     # Subscribe / unsubscribe (check before markets — "стоп сигналы" ≠ market)
@@ -377,13 +617,25 @@ async def chat(
     context: dict,
 ) -> AiReply:
     """Call Gemini. history: list of {role: user|model, content: str} oldest→newest."""
-    # Local fast-path — works even without API key / during 503
+    # Local fast-path — works even without API key / during 503. Только тривиальные одиночные.
+    rules = None
+    try:
+        rules = parse_rules(user_text)
+    except Exception:
+        logger.exception("parse_rules failed")
     local = try_local_intent(user_text)
-    if local is not None:
+    if local is not None and not (rules and len(rules) > 1):
         local.proposal = sanitize_proposal(local.proposal)
         return local
+    rules_reply = None
+    if rules:
+        prop = sanitize_proposal({"action": "multi", "actions": rules})
+        if prop:
+            rules_reply = AiReply(text="Понял так (разбор без ИИ):", proposal=prop)
 
     if not _api_key():
+        if rules_reply:
+            return rules_reply
         return AiReply(
             text=(
                 "🔑 Ключ Gemini не задан.\n\n"
@@ -425,7 +677,7 @@ async def chat(
         client = _client()
     except Exception as e:
         logger.exception("Gemini client init failed")
-        return _friendly_error(e)
+        return rules_reply or _friendly_error(e)
 
     for idx, model_name in enumerate(models):
         if idx > 0:
@@ -460,7 +712,7 @@ async def chat(
                     err[:300],
                 )
                 if "API_KEY" in err.upper() or "401" in err or "403" in err:
-                    return _friendly_error(e)
+                    return rules_reply or _friendly_error(e)
                 if _is_overload_error(err):
                     if attempt == 0:
                         continue  # retry same model after 0.8s
@@ -468,6 +720,8 @@ async def chat(
                 # non-overload API error — try next model
                 break
 
+    if rules_reply:   # Gemini недоступен — детерминированный разбор частых фраз
+        return rules_reply
     if last_exc is not None:
         logger.exception("Gemini chat failed after fallbacks")
         return _friendly_error(last_exc)
