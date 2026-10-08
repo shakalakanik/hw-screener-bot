@@ -26,7 +26,7 @@ from urllib.parse import quote
 import storage
 import ai_chat
 import journal_charts
-from screener import run_scan, run_manual_scan, check_signal_outcomes, auto_template_entry
+from screener import run_scan, run_manual_scan, check_signal_outcomes, auto_template_entry, MANUAL_SEND_HOURS
 
 AUTO_NAME = storage.AUTO_TEMPLATE_NAME
 
@@ -39,7 +39,8 @@ TOKEN           = os.environ["TG_BOT_TOKEN"]
 # SCAN_INTERVAL_MIN больше не используется (старые 15 мин не могут переопределить расписание).
 SCAN_HOUR_DELAY_S = max(5, min(120, int(os.environ.get("SCAN_HOUR_DELAY_S", "40"))))
 SCAN_SEND_DEADLINE_S = 300   # к HH:05 всё должно быть отправлено
-SCAN_SCHEDULE_TEXT = "раз в час, сразу после закрытия часовой свечи (сигналы в HH:00–HH:05 МСК)"
+SCAN_SCHEDULE_TEXT = ("раз в час, сразу после закрытия часовой свечи (сигналы в HH:00–HH:05 МСК); "
+                      "приходят только сигналы только что закрывшегося часа")
 
 
 def next_scan_ts(now: float, delay_s: int = SCAN_HOUR_DELAY_S) -> float:
@@ -69,7 +70,24 @@ def fmt_signal_time(signal_ts: int) -> str:
 bot = Bot(token=TOKEN)
 dp  = Dispatcher()
 
-_subscribers: set[int] = set()
+class _Subscribers(set):
+    """Подписка хранится в БД (раньше — только в памяти: после деплоя подписка терялась)."""
+    def add(self, cid):
+        super().add(cid)
+        try:
+            storage.set_subscribed(cid, True)
+        except Exception:
+            logger.exception("persist subscribe")
+
+    def discard(self, cid):
+        super().discard(cid)
+        try:
+            storage.set_subscribed(cid, False)
+        except Exception:
+            logger.exception("persist unsubscribe")
+
+
+_subscribers: _Subscribers = _Subscribers()
 _pending_cards: dict[str, dict] = {}   # card_id → card data (also persisted in SQLite 48h)
 _pending_rename: dict[int, str] = {}   # chat_id → old template name
 _filter_tab: dict[int, str] = {}       # chat_id → "crypto" | "ru"
@@ -527,7 +545,8 @@ async def cmd_start(msg: Message):
         "Команды:\n"
         "/filter — выбрать шаблоны и рынки\n"
         "/syncurl или «🔗 Синхронизация шаблонов» — синхронизировать шаблоны из Mini App\n"
-        "/scan — запустить скан сейчас\n"
+        "/scan или «📡 Скан» — неотправленные сигналы за последние 5 ч\n"
+        "Подписка: раз в час приходят сигналы только что закрывшегося часа\n"
         "/status — текущие настройки\n"
         "/ai — ИИ-помощник (настройки и сигналы)\n"
         "/stop — остановить сигналы\n"
@@ -561,7 +580,8 @@ async def cmd_sub_toggle(msg: Message):
         turn_on = chat_id not in _subscribers   # переключаем по текущему состоянию
     if turn_on:
         _subscribers.add(chat_id)
-        text = "🔔 Подписка включена — сигналы будут приходить раз в час (HH:00–HH:05 МСК)."
+        text = ("🔔 Подписка включена — раз в час (HH:00–HH:05 МСК) приходят сигналы только что "
+                "закрывшегося часа. Пропущенные за последние 5 ч — кнопкой «📡 Скан».")
     else:
         _subscribers.discard(chat_id)
         text = "🔕 Подписка выключена — сигналы не приходят."
@@ -1634,7 +1654,7 @@ async def cb_filter_done(call: CallbackQuery):
 @dp.message(F.text == "📡 Скан")
 async def cmd_scan(msg: Message):
     await msg.answer(
-        "🔍 Запускаю скан... 1–3 минуты.\nТолько новые сигналы ≤12ч (без дампа истории).",
+        f"🔍 Запускаю скан... до минуты.\nСигналы за последние {MANUAL_SEND_HOURS} ч, которые ещё не приходили.",
         reply_markup=main_keyboard(msg.chat.id),
     )
     try:
@@ -1646,6 +1666,7 @@ async def cmd_scan(msg: Message):
             incremental=True,
             chat_best_only=_best_only_for_chat,
             stats=stats,
+            send_hours=MANUAL_SEND_HOURS,
         )
         await msg.answer(
             f"✅ Скан завершён. Новых карточек: <b>{n}</b>.\n{_scan_summary(msg.chat.id, stats.get(msg.chat.id))}",
@@ -1659,11 +1680,11 @@ async def cmd_scan(msg: Message):
 def _scan_summary(chat_id: int, st: dict | None) -> str:
     """Итог ручного скана: сколько нашёл бы HTML за то же окно и куда делась разница."""
     if not st:
-        return "Найдено за 12ч: 0 (нет активных шаблонов/рынков)."
-    parts = [f"Найдено за 12ч: <b>{st['found']}</b>", f"отправлено: <b>{st['sent']}</b>"]
+        return "Найдено: 0 (нет активных шаблонов/рынков)."
+    parts = [f"Найдено за 12ч (как HTML): <b>{st['found']}</b>", f"отправлено: <b>{st['sent']}</b>"]
     for key, label in (("already", "уже были"), ("level_dup", "повтор уровня 36ч"),
                        ("conc", "лимит «одновременно»"), ("best_only", "«только лучший»"),
-                       ("too_old", "старше 12ч")):
+                       ("too_old", f"старше {MANUAL_SEND_HOURS} ч")):
         if st.get(key):
             parts.append(f"{label}: {st[key]}")
     cfg = storage.get_active_config(chat_id)
@@ -2265,6 +2286,7 @@ async def scan_loop():
                     chat_filters=_build_filter_for_chat,
                     incremental=True,
                     chat_best_only=_best_only_for_chat,
+                    send_hours=1,   # подписка: только бар, закрывшийся в HH:00
                 )
                 dur = time.time() - t0
                 late = time.time() - hour_start > SCAN_SEND_DEADLINE_S
@@ -2297,6 +2319,8 @@ async def main():
         logger.exception("cleanup_pending_signal_cards failed")
     _sync_tokens.update(storage.load_all_sync_tokens())
     logger.info("Загружено sync-токенов: %d", len(_sync_tokens))
+    set.update(_subscribers, storage.get_subscribers())
+    logger.info("Загружено подписчиков: %d", len(_subscribers))
 
     await bot.set_my_commands([
         BotCommand(command="scan", description="Запустить скан сейчас"),

@@ -46,6 +46,17 @@ MAX_SIGNAL_AGE_H = 12
 MAX_SIGNAL_AGE_MS = MAX_SIGNAL_AGE_H * 3_600_000
 # Lookback детекции = max age (не ищем то, что всё равно не отправим).
 SCAN_LOOKBACK_H = MAX_SIGNAL_AGE_H
+# Отправка в Telegram (окно расчёта остаётся 12ч ради идентичности с HTML; ниже — фильтр ОТПРАВКИ
+# по времени сигнала; signal_ts = открытие H1-бара, показываемое время = закрытие = +1ч):
+#  • подписка (авто-скан HH:00:40) — только бар, закрывшийся в HH:00 (signal_ts == HH:00 − 1ч);
+#  • ручной «📡 Скан» — сигналы последних 5 часов (закрытие в пределах 5ч), ещё не отправленные.
+MANUAL_SEND_HOURS = 5
+
+
+def send_min_ts(now_ms: int, hours: int) -> int:
+    """Минимальный signal_ts (открытие бара) для отправки: последние `hours` закрытых H1-баров."""
+    hour_start = (int(now_ms) // 3_600_000) * 3_600_000
+    return hour_start - int(hours) * 3_600_000
 # Cold-start watermark: не дампить историю — только последний час.
 COLD_WATERMARK_LOOKBACK_MS = 3_600_000
 
@@ -1140,6 +1151,7 @@ async def _deliver_html(
     chat_best_only: Callable[[int], dict] | None = None,
     stats: dict | None = None,
     algo_ctx: dict | None = None,
+    min_send_ts: int | None = None,
 ) -> int:
     """Для каждого чата и каждого его активного шаблона — ровно тот список, что показал бы
     раздел «Сигналы» в HTML за последние win_h часов (html_pipeline.apply_all).
@@ -1212,7 +1224,8 @@ async def _deliver_html(
               "exchange": ("OKX" if _active_exchange == "okx" else "Bybit")}
         fresh = []
         for c in chosen.values():
-            if now_ms - int(c["signal_ts"]) > MAX_SIGNAL_AGE_MS:
+            if (int(c["signal_ts"]) < min_send_ts if min_send_ts is not None
+                    else now_ms - int(c["signal_ts"]) > MAX_SIGNAL_AGE_MS):
                 st["too_old"] += 1
             elif storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
                                           c.get("strategy", "brk"), c["side"]):
@@ -1256,14 +1269,19 @@ async def run_scan(
     incremental: bool = True,
     chat_best_only: Callable[[int], dict] | None = None,
     stats: dict | None = None,
+    send_hours: int = 1,
+    now_ms: int | None = None,
 ) -> int:
-    """Автоскан: как кнопка «Сканировать» в HTML с окном MAX_SIGNAL_AGE_H (12 ч),
+    """send_hours: сколько последних закрытых H1-баров отправлять (1 — подписка, 5 — ручной скан).
+    Расчёт списка — как HTML за окно 12ч (лимиты/капы идентичны), затем фильтр отправки.
+
+    Автоскан: как кнопка «Сканировать» в HTML с окном MAX_SIGNAL_AGE_H (12 ч),
     TOP_N инструментов, от MIN_VOL_USD_24H.
 
     Каждый чат получает ровно те сигналы, что HTML показал бы по его шаблонам за
     это окно, — кроме уже присланных ранее. incremental оставлен для совместимости.
     """
-    now_ms = int(time.time() * 1000)
+    now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     win_h = MAX_SIGNAL_AGE_H
     needed = _needed_markets(subscribers, chat_filters)
     if not needed:
@@ -1325,7 +1343,8 @@ async def run_scan(
     logger.info("Скан рынков %s: %.1f с", ",".join(sorted(needed)), time.time() - t0)
 
     sent = await _deliver_html(all_cards, subscribers, chat_filters, now_ms, win_h,
-                               on_signal, chat_best_only, stats, algo_ctx=algo_ctx)
+                               on_signal, chat_best_only, stats, algo_ctx=algo_ctx,
+                               min_send_ts=send_min_ts(now_ms, max(1, int(send_hours or 1))))
     logger.info("Скан: карточек %d → отправлено %d", len(all_cards), sent)
     return sent
 

@@ -2003,6 +2003,24 @@ def get_auto_mode(chat_id: int) -> dict:
     return out
 
 
+def get_subscribers() -> set[int]:
+    """Подписчики авто-скана (переживают рестарт/деплой)."""
+    try:
+        with _conn() as c:
+            _ensure_chat_settings(c)
+            rows = c.execute("SELECT chat_id FROM chat_settings WHERE key='subscribed' AND value='1'").fetchall()
+        return {int(r["chat_id"]) for r in rows}
+    except Exception:
+        return set()
+
+
+def set_subscribed(chat_id: int, on: bool):
+    with _conn() as c:
+        _ensure_chat_settings(c)
+        c.execute("INSERT OR REPLACE INTO chat_settings(chat_id,key,value) VALUES(?,?,?)",
+                  (int(chat_id), "subscribed", "1" if on else "0"))
+
+
 def set_auto_mode(chat_id: int, market: str, enabled: bool):
     if market not in ("crypto", "ru"):
         return
