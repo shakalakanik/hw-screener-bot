@@ -396,13 +396,19 @@ _F_INT = ("touch", "acc", "bias", "side", "ema", "brkbars", "cov", "preacc", "sm
 MAXRISK = 0.20  # как MAXRISK в HTML: риск > 20% цены — сделка отбрасывается
 
 
-def _f_from_template(raw: dict, market: str | None = None) -> dict:
+def _f_from_template(raw: dict, market: str | None = None, strategy: str | None = None) -> dict:
     """Как readF() в HTML: отсутствующее/«auto» значение → DEF.
-    applyMarket(): для акций РФ DEF.hours = '0-24' (все часы торгов), для крипты '9-23'."""
+    applyMarket(): для акций РФ DEF.hours = '0-24' (все часы торгов), для крипты '9-23'.
+    HTML 6.78.3: «авто» для стороны у ложного пробоя = только SHORT (d=0);
+    у пробоя и «Оба» — обе стороны."""
     f = {}
+    if strategy is None and isinstance(raw, dict):
+        strategy = raw.get("_strategy") or raw.get("strat")
     for k, dv in _F_DEF.items():
         if k == "hours" and market == "ru":
             dv = "0-24"
+        if k == "side" and strategy == "fbo":
+            dv = 0.0
         v = raw.get(k, "auto") if isinstance(raw, dict) else "auto"
         if v is None or v == "auto":
             f[k] = dv

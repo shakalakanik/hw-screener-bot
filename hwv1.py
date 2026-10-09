@@ -612,6 +612,10 @@ def signal_score(feat: dict, strategy: str) -> float:
     У ложного пробоя (модель с ext) к ним добавляются 6 признаков smExtra.
     Затем интерполяция по ступеням PAV и нормировка на 0–10.
     """
+    if strategy != "brk":
+        r = hw_score(feat)   # HTML 6.78.3: у ЛП оценка v4 (похожесть на эталоны)
+        if r is not None:
+            return math.floor(r["score"] * 10 + 0.5) / 10
     sm = _load_score_model()
     m = sm["B"] if strategy == "brk" else sm["F"]
     x = []
@@ -644,6 +648,121 @@ def signal_score(feat: dict, strategy: str) -> float:
     frac = max(0.0, min(1.0, (v - sm["vmin"]) / (sm["vmax"] - sm["vmin"])))
     return math.floor(frac * 100 + 0.5) / 10
 
+
+
+# ═══ Оценка ложного пробоя v4 (HW_FBO_scanner 6.78.3): «похожесть на эталонные сделки» ═══
+_HW_SCORE_PATH = os.path.join(os.path.dirname(__file__), "hw_score.json")
+_HW_SCORE = None
+
+
+def _load_hw_score() -> dict:
+    global _HW_SCORE
+    if _HW_SCORE is None:
+        with open(_HW_SCORE_PATH, "r", encoding="utf-8") as fh:
+            _HW_SCORE = json.load(fh)
+    return _HW_SCORE
+
+
+def fbo_shape(h1c: list, i: int, L: float, br_side: str, formed_ts: int, atr_d: float, v_med: float) -> dict:
+    """1:1 с fboShape() в HTML: признаки уровня/подхода/прокола по H1."""
+    dr = 1 if br_side == "long" else -1
+    H, D = 3_600_000, 86_400_000
+
+    def beyond(c):
+        return dr * (c - L) > 0
+
+    j = i - 1
+    if beyond(h1c[j].c):
+        while j - 1 >= 0 and beyond(h1c[j - 1].c) and h1c[j - 1].ts > formed_ts:
+            j -= 1
+    else:
+        f = -1
+        for k in range(i - 6, i):
+            if k >= 0 and beyond(h1c[k].c):
+                f = k
+                break
+        j = f if f >= 0 else i - 1
+    bstart = h1c[j].ts
+    touch = touch24 = 0
+    prom = None
+    for k in range(0, j):
+        b = h1c[k]
+        if b.ts <= formed_ts or b.ts < formed_ts + D or b.ts >= bstart:
+            continue
+        if b.l <= L <= b.h:
+            touch += 1
+            if b.ts >= bstart - 24 * H:
+                touch24 += 1
+        away = dr * (L - (b.l if dr > 0 else b.h))
+        if prom is None or away > prom:
+            prom = away
+    if prom is None:
+        prom = 0.0
+
+    ap03 = 200.0
+    for k in range(j - 1, max(-1, j - 200), -1):
+        if dr * (L - h1c[k].c) >= 0.3 * atr_d:
+            ap03 = (bstart - h1c[k].ts) / H
+            break
+    near = sum(1 for k in range(max(0, j - 12), j) if abs(h1c[k].c - L) <= 0.25 * atr_d)
+    c12 = h1c[max(0, j - 12)].c
+    vmax = 0.0
+    for k in range(j, i + 1):
+        vmax = max(vmax, h1c[k].vol_quote or 0.0)
+    return {
+        "lvB": bstart, "lv_touch": touch, "lv_touch24": touch24, "ap03": ap03, "near12": near,
+        "mv12": dr * (L - c12) / atr_d if atr_d > 0 else 0.0,
+        "vbrk": vmax / v_med if v_med > 0 else 0.0,
+        "lv_prom": prom / atr_d if atr_d > 0 else 0.0,
+        "brk_run": i - j,
+        "ret_d": dr * (L - h1c[i].c) / atr_d if atr_d > 0 else 0.0,
+    }
+
+
+def _hw_ln(x) -> float:
+    return math.log1p(max(0.0, x))
+
+
+def hw_x(s: dict):
+    for k in ("lv_touch", "ap03", "near12", "lv_prom", "brk_run"):
+        if s.get(k) is None:
+            return None
+    g = lambda k: _score_feat_num(s, k)
+    return [
+        1.0 if s.get("strength") == 5 else 0.0, 1.0 if s.get("strength") == 4 else 0.0,
+        _hw_ln(g("lv_touch24")), _hw_ln(g("lv_touch")), g("near12") / 12, _hw_ln(g("ap03")),
+        _hw_ln(g("vbrk")), min(g("v6_poke"), 6), min(g("lv_prom"), 5), min(g("dist_atr"), 3),
+        min(g("ret_d"), 1), min(g("crosses"), 16) / 4, _hw_ln(g("brk_run")),
+    ]
+
+
+def hw_score(s: dict):
+    """1:1 с hwScore(): итог = max(модель, память по эталонам), 0..10. None — нет признаков."""
+    x = hw_x(s)
+    if x is None:
+        return None
+    S = _load_hw_score()
+    z = [(v - S["mu"][j]) / S["sd"][j] for j, v in enumerate(x)]
+    dec = S["b"] + sum(S["w"][j] * z[j] for j in range(len(z)))
+    pv, val = S["pv"], S["val"]
+    if dec <= pv[0]:
+        model = val[0]
+    elif dec >= pv[-1]:
+        model = val[-1]
+    else:
+        model = val[-1]
+        for k in range(1, len(pv)):
+            if dec <= pv[k]:
+                model = val[k - 1] + (val[k] - val[k - 1]) * (dec - pv[k - 1]) / ((pv[k] - pv[k - 1]) or 1)
+                break
+    dmin, near = 1e9, -1
+    for i, r in enumerate(S["lib"]):
+        q = math.sqrt(sum((z[j] - r[j]) ** 2 for j in range(len(z))) / len(z))
+        if q < dmin:
+            dmin, near = q, i
+    mem = 10 - 3 * dmin / S["memR"] if dmin <= S["memR"] else 0.0
+    return {"score": max(0.0, min(10.0, max(model, mem))), "model": model, "mem": mem,
+            "near": S["lab"][near], "dist": dmin}
 
 
 def _card_feat(sf: dict, strategy: str, side: str, ts: int, kind: str, p, score: float) -> dict:
@@ -1013,6 +1132,7 @@ def evaluate_fbo(
                 max(0.10 * pit_atr_d, 0.02 * bar.c), side,
                 side == "long", br_side, w, pit_atr_d, a_h1, d1c,
             ))
+            sf.update(fbo_shape(h1c, hi_idx, lv.price, br_side, lv.formed_ts, pit_atr_d, v_med))
             score = signal_score(sf, "fbo")
 
             cards.append({

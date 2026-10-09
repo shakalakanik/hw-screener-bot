@@ -189,7 +189,7 @@ def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
               cutoff_ms: int, week_max: int | None, win_h: int | None = None,
               market: str | None = None) -> list[dict]:
     """renderScan(): окно → стратегия → фильтры шаблона → лимиты → недельный лимит."""
-    f = _f_from_template(raw_filters or {}, market)
+    f = _f_from_template(raw_filters or {}, market, strategy)
     rows = [c for c in cards if c["signal_ts"] >= cutoff_ms]
     if strategy != "both":
         rows = [c for c in rows if c.get("strategy", "fbo") == strategy]
