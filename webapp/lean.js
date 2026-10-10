@@ -318,6 +318,12 @@
     st.textContent = '#paneJournal .hw-jchart{width:100%;height:auto;display:block;background:#12131a;border-radius:4px;min-height:72px}' +
       '#paneJournal .hw-journal-card.hw-focus{outline:2px solid #4c9aff;outline-offset:-2px;background:rgba(76,154,255,.10)}' +
       '#paneJournal .hw-j-title{font-size:16px;font-weight:700;margin:0 0 6px}' +
+      // 👁 «Отслеживаемые» в правом верхнем углу карточки журнала (штатный .eye: .35 / .on = 1)
+      '#paneJournal .hw-journal-card{position:relative}' +
+      '#paneJournal .hw-journal-card .hw-j-title{padding-right:40px}' +
+      '#paneJournal .hw-j-eye{position:absolute;top:6px;right:6px;width:36px;height:36px;display:flex;align-items:center;' +
+      'justify-content:center;font-size:18px;line-height:1;border-radius:8px;-webkit-tap-highlight-color:transparent;z-index:1}' +
+      '#paneJournal .hw-j-eye.on{background:rgba(76,154,255,.18)}' +
       '#tabJournal{white-space:nowrap;flex:1 0 100% !important;order:5}' +
       '.tabs{flex-wrap:wrap !important;overflow:visible !important}';
     document.head.appendChild(st);
@@ -390,6 +396,68 @@
     return s;
   }
 
+  /* ---- 👁 на карточке журнала → штатный toggleWatch() скринера ----
+   * Та же запись, что кладёт бот (storage.watchlist_item_html_shape): base/sym/t/d/lv/e/st/tk…
+   * toggleWatch (обёрнут bridge.js: tombstone при снятии) пишет в hw_fbo_watch_all с mkt=MKT
+   * и через __hwOnWatchSave синхронизирует с сервером (per Telegram-аккаунт). */
+  var jWatchItems = {};
+  function journalWatchItem(row) {
+    var c = row.card || {};
+    var m = row.market === 'ru' ? 'ru' : row.market === 'algo' ? 'algo' : 'crypto';
+    var tick = String(row.ticker || c.ticker || '');
+    var base = m === 'ru' ? tick : tick.replace(/USDT$/i, '');
+    if (!base) return null;
+    var ts = parseInt(c.signal_ts || row.signal_ts || 0, 10);
+    if (!ts) return null;
+    if (ts < 1e12) ts *= 1000;   // секунды → мс
+    var side = String(c.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
+    var n = function (v) { var x = Number(v); return isNaN(x) ? 0 : x; };
+    var e = n(c.last != null ? c.last : c.entry), st = n(c.stop);
+    return {
+      mkt: m, market: m, type: c.strategy || (m === 'algo' ? 'algo' : 'brk'),
+      base: base, sym: m === 'ru' ? base : base + 'USDT', t: ts,
+      d: side === 'LONG' ? 1 : 0, side: side,
+      lv: n(c.level), k: c.kind || '', p: n(c.prob), e: e, st: st, tk: n(c.take),
+      rp: e ? Math.abs(e - st) / Math.abs(e) : 0,
+      strength: c.strength != null ? c.strength : 3, crosses: 0, vol_mult: 1,
+      score: (c.score != null && c.score !== '' && !isNaN(Number(c.score))) ? Number(c.score) : null
+    };
+  }
+  function journalIsWatched(t) {
+    try { return typeof window.isWatched === 'function' && !!window.isWatched(t); } catch (e) { return false; }
+  }
+  function journalEyeHtml(row) {
+    var t = journalWatchItem(row);
+    if (!t) return '';
+    jWatchItems[row.id] = t;
+    var on = journalIsWatched(t);
+    return '<span class="eye hw-j-eye' + (on ? ' on' : '') + '" role="button" tabindex="0" aria-pressed="' + on + '"' +
+      ' aria-label="Отслеживать" data-jid="' + jEsc(row.id) + '" data-base="' + jEsc(t.base) + '" data-t="' + t.t + '">👁</span>';
+  }
+  function onJournalEye(ev) {
+    var eye = ev.target && ev.target.closest ? ev.target.closest('.hw-j-eye') : null;
+    if (!eye) return;
+    if (ev.type === 'keydown' && ev.key !== 'Enter' && ev.key !== ' ') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    var t = jWatchItems[eye.getAttribute('data-jid')];
+    if (!t || typeof window.toggleWatch !== 'function') return;
+    // toggleWatch пишет в раздел текущего рынка — журнал показывает только его; на всякий случай сверяем
+    var cm = typeof window.__hwCurMkt === 'function' ? window.__hwCurMkt() : curMarket();
+    if (cm !== t.mkt) return;
+    var item = {};
+    for (var k in t) item[k] = t[k];
+    if (item.score == null) {
+      try { item.score = typeof window.signalScore === 'function' ? window.signalScore(item) : null; } catch (e) { item.score = null; }
+      if (item.score == null || isNaN(Number(item.score))) item.score = 0;
+    }
+    try { window.toggleWatch(item); } catch (e2) { return; }
+    var on = journalIsWatched(t);
+    eye.classList.toggle('on', on);
+    eye.setAttribute('aria-pressed', String(on));
+    try { if (typeof window.syncEyeButtons === 'function') window.syncEyeButtons(); } catch (e3) {}
+  }
+
   function journalCardHtml(row) {
     var c = row.card || {};
     var side = String(c.side || '');
@@ -418,6 +486,7 @@
       return '<div class="' + cls + '"><h4>' + title + '</h4><img class="hw-jchart" alt="' + jEsc(title) + '" loading="lazy" data-src="' + jEsc(full) + '"></div>';
     }
     return '<article class="card hw-journal-card" id="jcard-' + row.id + '" data-id="' + row.id + '" data-market="' + jEsc(row.market) + '">' +
+      journalEyeHtml(row) +
       '<div class="hw-j-title">' + emoji + ' ' + jEsc(row.ticker || c.ticker || '') + ' — ' + jEsc(side || '—') + '</div>' +
       '<div class="tradeInfo">' +
         '<div><span>рынок</span> <b>' + mkt + ' · ' + strat + jEsc(prob) + '</b></div>' +
@@ -605,8 +674,14 @@
     var secs = { crypto: ['Крипта', crypto], ru: ['Мосбиржа', ru], algo: ['Крипта (Алго)', algo] };
     // Только раздел выбранного вверху рынка (deep link уже переключил рынок на свой)
     var cur = curMarket();
+    jWatchItems = {};
     var html = journalSectionHtml(cur, secs[cur][0], secs[cur][1]);
     body.innerHTML = html;
+    if (!body.__hwEyeArmed) {
+      body.__hwEyeArmed = true;
+      body.addEventListener('click', onJournalEye);
+      body.addEventListener('keydown', onJournalEye);
+    }
     armJournalCharts(body);
     focusJournalCard();
   }
