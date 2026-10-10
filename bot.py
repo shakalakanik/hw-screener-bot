@@ -511,8 +511,9 @@ async def send_signal(card: dict, chat_ids: list[int]):
                 logger.warning("signal_history record failed %s: %s", card_id, e)
             # Журнал — только если карточка реально ушла в чат (см. except ниже).
             journal_id = _remember_journal(chat_id, card)
-            # watch:{16-hex} fits Telegram 64-byte callback_data limit
-            row = [InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{card_id}")]
+            # Под карточкой только «🔎 Посмотреть сигнал». Кнопку «👁 Отслеживать» убрали:
+            # добавить в «Отслеживаемые» — глазом на карточке в журнале Mini App.
+            # cb_watch/cb_unwatch оставлены для старых сообщений.
             view_btn = _view_signal_button(
                 chat_id,
                 card.get("ticker") or "",
@@ -520,10 +521,7 @@ async def send_signal(card: dict, chat_ids: list[int]):
                 card.get("market") or "crypto",
                 journal_id=journal_id,
             )
-            rows = [row]
-            if view_btn:
-                rows.append([view_btn])
-            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+            kb = InlineKeyboardMarkup(inline_keyboard=[[view_btn]]) if view_btn else None
             await bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
             sent_ok = True
         except Exception as e:
@@ -1884,28 +1882,14 @@ async def cb_unwatch(call: CallbackQuery):
         logger.warning("miniapp_watch remove failed: %s", e)
     storage.remove_from_watchlist(chat_id, watch_id)
 
-    # Восстанавливаем 👁 — cb_watch снова разберёт текст сообщения при необходимости
-    re_id = "msg"
+    # Старые карточки: «👁 Отслеживать» больше не возвращаем — остаётся только
+    # «🔎 Посмотреть сигнал» (отслеживание — глазом в журнале Mini App).
     parsed = None
     try:
         parsed = _parse_card_from_message(call.message)
-        if parsed:
-            re_key = (
-                f"{parsed['ticker']}:{parsed['side']}:{parsed.get('strategy', 'brk')}:"
-                f"{int(parsed['level'] * 1e6)}"
-            )
-            re_id = storage.make_pending_card_id(re_key, chat_id)
-            storage.save_pending_signal_card(
-                re_id,
-                chat_id,
-                {**parsed, "chat_id": chat_id},
-                signal_ts=int(parsed.get("signal_ts") or 0),
-            )
-            _pending_cards[re_id] = {**parsed, "chat_id": chat_id}
     except Exception as e:
-        logger.warning("unwatch re-bind failed: %s", e)
-    row = [InlineKeyboardButton(text="👁 Отслеживать", callback_data=f"watch:{re_id}")]
-    rows = [row]
+        logger.warning("unwatch parse failed: %s", e)
+    rows = []
     if parsed:
         view_btn = _view_signal_button(
             chat_id,
@@ -1915,7 +1899,7 @@ async def cb_unwatch(call: CallbackQuery):
         )
         if view_btn:
             rows.append([view_btn])
-    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    kb = InlineKeyboardMarkup(inline_keyboard=rows) if rows else None
     try:
         await call.message.edit_reply_markup(reply_markup=kb)
     except Exception:
