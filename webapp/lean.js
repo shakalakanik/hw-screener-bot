@@ -489,14 +489,13 @@
       journalEyeHtml(row) +
       '<div class="hw-j-title">' + ((row.is_best || c.is_best) ? '⭐ ' : '') + emoji + ' ' + jEsc(row.ticker || c.ticker || '') + ' — ' + jEsc(side || '—') + '</div>' +
       '<div class="tradeInfo">' +
-        '<div><span>рынок</span> <b>' + mkt + ' · ' + strat + jEsc(prob) + '</b></div>' +
+        '<div><span>рынок</span> <b>' + mkt + ' · ' + strat + '</b></div>' +
         tpl +
-        '<div><span>уровень</span> <b>' + jFmt(level) + (c.kind ? ' [' + jEsc(c.kind) + ']' : '') + '</b></div>' +
-        '<div><span>вход</span> <b>' + jFmt(entry) + (dist == null ? '' : '  (расст. ' + dist.toFixed(0) + '% ATR)') + '</b></div>' +
+        '<div><span>уровень</span> <b>' + jFmt(level) + '</b></div>' +
+        '<div><span>вход</span> <b>' + jFmt(entry) + '</b></div>' +
         '<div><span>стоп-лосс</span> <b class="stop">' + jFmt(stop) + '  (−' + risk.toFixed(1) + '%)</b></div>' +
         '<div><span>тейк-профит</span> <b class="take">' + jFmt(take) + '  (+' + tp.toFixed(1) + '%)</b></div>' +
         '<div><span>оценка</span> ' + score + '</div>' +
-        '<div><span>тренд D1</span> <b>' + jEsc(bias) + '</b></div>' +
         // signal_ts = открытие H1-бара; показываем закрытие (+1ч), как HTML new Date(t+3600000)
         '<div><span>сигнал</span> <b>' + jEsc(jMsk((Number(c.signal_ts || row.signal_ts) || 0) && (Number(c.signal_ts || row.signal_ts) + 3600000))) + '</b></div>' +
       '</div>' +
