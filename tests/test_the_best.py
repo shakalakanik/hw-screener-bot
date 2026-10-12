@@ -75,6 +75,8 @@ chk("ON: only best", [c["ticker"] for c in sent] == ["GRASSUSDT"] and sent[0]["m
 # AI
 chk("AI: the best on", ai_chat.parse_rules("включи the best") == [{"action": "set_the_best", "params": {"enabled": True}}])
 chk("AI: the best off", ai_chat.parse_rules("the best выкл") == [{"action": "set_the_best", "params": {"enabled": False}}])
-chk("AI: только лучший ≠ the best", (ai_chat.parse_rules("крипта только лучший") or [{}])[0].get("action") == "set_best_only")
+chk("AI: «только лучший» удалён (не the best)", ai_chat.parse_rules("крипта только лучший") is None)
+storage.set_best_only(CH, "crypto", True)
+chk("stored best_only ignored → off", storage.get_best_only(CH) == {m: False for m in storage.MARKETS})
 chk("AI sanitize", ai_chat.sanitize_proposal({"action": "set_the_best", "params": {"enabled": "да"}}) is not None)
 print("FAILS", fails); sys.exit(1 if fails else 0)
