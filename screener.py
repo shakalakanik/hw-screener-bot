@@ -43,6 +43,9 @@ CAP_CLUSTER = 3
 
 # Жёсткий потолок возраста сигнала для любой отправки в Telegram.
 MAX_SIGNAL_AGE_H = 12
+# HTML 6.78.x: чекбокс «без ночи» (noNight). У пользователя в десктопном HTML он ВЫКЛЮЧЕН →
+# скан круглосуточно, а «авто» часов входа = 0-24 (readF). Автоскан подписки следует этому.
+CRYPTO_NO_NIGHT = os.getenv("CRYPTO_NO_NIGHT", "0") == "1"
 MAX_SIGNAL_AGE_MS = MAX_SIGNAL_AGE_H * 3_600_000
 # Lookback детекции = max age (не ищем то, что всё равно не отправим).
 SCAN_LOOKBACK_H = MAX_SIGNAL_AGE_H
@@ -1158,6 +1161,7 @@ async def _deliver_html(
     stats: dict | None = None,
     algo_ctx: dict | None = None,
     min_send_ts: int | None = None,
+    no_night: bool | None = None,
 ) -> int:
     """Для каждого чата и каждого его активного шаблона — ровно тот список, что показал бы
     раздел «Сигналы» в HTML за последние win_h часов (html_pipeline.apply_all).
@@ -1212,6 +1216,10 @@ async def _deliver_html(
                     if key not in chosen:
                         chosen[key] = {**c, "matched_template": name, "template_thr": None}
                 continue
+            nn = CRYPTO_NO_NIGHT if no_night is None else bool(no_night)
+            if mkt == "crypto" and not nn and raw.get("hours") in (None, "auto"):
+                # HTML readF: «авто» часов входа при выключенном «без ночи» = '0-24'
+                raw = {**raw, "hours": "0-24"}
             rows = apply_all(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), cutoff, week_max,
                              win_h=win_h, market=mkt)
             thr = raw.get("thr")
@@ -1301,7 +1309,7 @@ async def run_scan(
         async with httpx.AsyncClient() as client:
             return await _scan_crypto_html(
                 client, n_inst=TOP_N, min_vol=MIN_VOL_USD_24H, win_h=win_h,
-                no_night=True, no_stocks=True,
+                no_night=CRYPTO_NO_NIGHT, no_stocks=True,
             )
 
     async def _ru():
@@ -1448,7 +1456,7 @@ async def run_manual_scan(
     await _progress(92, f"отбор по шаблону ({len(all_cards)} сигналов до фильтров)…")
     sent = await _deliver_html(
         all_cards, [chat_id], lambda _cid: chat_filter, now_ms, lookback,
-        on_signal, chat_best_only,
+        on_signal, chat_best_only, no_night=use_no_night,
     )
     await _progress(100, f"готово, отправлено {sent}", n_sent=sent)
     return sent
