@@ -715,12 +715,6 @@ async def cmd_status(msg: Message):
             blocks.append(f"{mlabel}:\n" + "\n".join(lines))
         tpl_str = "\n".join(blocks)
 
-    bo = cfg.get("best_only") or storage.get_best_only(chat_id)
-    bo_str = ", ".join(
-        f"{ {'crypto': 'Крипта', 'ru': 'Мосбиржа', 'algo': 'Алго'}[m] }: "
-        f"{'⭐ лучший' if bo.get(m) else 'все'}"
-        for m in storage.MARKETS
-    )
 
     await msg.answer(
         f"📋 <b>Статус</b>\n\n"
@@ -853,12 +847,6 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         callback_data=f"mkt_on:{market}",
     )])
 
-    bo = (cfg.get("best_only") or storage.get_best_only(chat_id)).get(market, False)
-    bo_label = "⭐ Только лучший ✓" if bo else "⭐ Только лучший"
-    buttons.append([InlineKeyboardButton(
-        text=bo_label,
-        callback_data=f"best_only:{market}",
-    )])
     if market == "crypto":
         tb = storage.get_the_best(chat_id)
         buttons.append([InlineKeyboardButton(
@@ -904,7 +892,6 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     n_on = len(active)
-    bo_state = "вкл" if bo else "выкл"
     if auto_on:
         act_line = f"активный: <b>{AUTO_NAME}</b> ({_STRAT_ICON.get(auto_strat, '')})"
     else:
@@ -912,8 +899,7 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
     if is_algo:
         txt = (
             f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
-            f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n"
-            f"Только лучший: <b>{bo_state}</b>\n\n"
+            f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n\n"
             "• Скан по индикаторам (как «Крипта (Алго)» в HTML): каждый закрытый час, где выполнены "
             "условия шаблона → сигнал; на монете новый — только после закрытия предыдущего\n"
             "• Шаблоны алго сохраняются в HTML на рынке «Крипта (Алго)» (кнопка «В шаблон»)\n"
@@ -922,13 +908,10 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
     else:
       txt = (
         f"🎛 <b>{_MKT_TAB[market]}</b>\n\n"
-        f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n"
-        f"Только лучший: <b>{bo_state}</b>\n\n"
+        f"Рынок: <b>{'вкл' if enabled else 'выкл'}</b> · {act_line}\n\n"
         f"• {AUTO_NAME} — как шаблон «Авто» в HTML: все фильтры сброшены в авто; "
         "выбор своего шаблона выключает Авто\n"
         "• Вкл/выкл рынок — получать сигналы по нему\n"
-        "• ⭐ Только лучший — если в одном скане несколько сигналов "
-        "по этому рынку, отправить только лучший\n"
         "• Слева — шаблоны этого рынка (у каждого рынка свои)\n"
         "• Стратегия: 🔻ЛП → 📈Проб → 📈🔻Оба\n"
         "• Переименовать шаблон — в HTML (✏️ Переименовать)"
@@ -1006,15 +989,11 @@ async def cb_mkt_on(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("best_only:"))
 async def cb_best_only(call: CallbackQuery):
-    chat_id = call.message.chat.id
+    """«Только лучший» удалён — кнопка на старых клавиатурах просто перерисовывает меню."""
     mkt = call.data.split(":", 1)[1]
-    if mkt not in _MARKETS:
-        await call.answer()
-        return
-    cur = storage.get_best_only(chat_id).get(mkt, False)
-    storage.set_best_only(chat_id, mkt, not cur)
-    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
-    await call.answer("только лучший: вкл" if not cur else "только лучший: выкл")
+    if mkt in _MARKETS:
+        await _send_filter_menu(call.message.chat.id, edit_msg=call.message, market=mkt)
+    await call.answer("«Только лучший» больше нет")
 
 
 @dp.callback_query(F.data.startswith("the_best:"))
@@ -1167,7 +1146,6 @@ def _ai_user_context(chat_id: int) -> dict:
         "strategy_overrides": storage.get_template_strategy_overrides(chat_id),
         "auto": storage.get_auto_mode(chat_id),
         "auto_strategy": {m: storage.get_auto_strategy(chat_id, m) for m in _AUTO_MARKETS},
-        "best_only": storage.get_best_only(chat_id),
         "the_best": storage.get_the_best(chat_id),
         "template_strategies": _template_strategies_by_market(chat_id),
     }
@@ -1274,9 +1252,6 @@ def _format_proposal(proposal: dict) -> str:
         return f"{m}: стратегия 🤖 Авто → <b>{_AI_STRAT_RU.get(p.get('strategy'))}</b>"
     if action == "set_the_best":
         return f"крипта: «⭐ The Best» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
-    if action == "set_best_only":
-        m = _AI_MKT_RU.get(p.get("market"), "крипта")
-        return f"{m}: «только лучший сигнал» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
     if action == "set_strategy":
         return (f"стратегия шаблона <b>{p.get('template')}</b> → "
                 f"<b>{_AI_STRAT_RU.get(p.get('strategy'), p.get('strategy'))}</b>")
@@ -1344,11 +1319,6 @@ def _apply_ai_one(chat_id: int, proposal: dict) -> str:
         return "готово."
     if action == "set_the_best":
         storage.set_the_best(chat_id, bool(p.get("enabled")))   # = кнопка the_best
-        return "готово."
-    if action == "set_best_only":
-        if p.get("market") not in storage.MARKETS:
-            return "Неизвестный рынок — ничего не менял."
-        storage.set_best_only(chat_id, p["market"], bool(p.get("enabled")))   # = кнопка best_only
         return "готово."
     if action == "set_strategy":
         name = p.get("template") or ""
@@ -1462,7 +1432,7 @@ async def cmd_ai(msg: Message):
             "Примеры:\n"
             "• включи мосбиржу / выключи крипту\n"
             "• включи крипту авто на ложный пробой, а мосбиржу авто на пробой\n"
-            "• всё выключи кроме крипты / на крипте только лучший сигнал\n"
+            "• всё выключи кроме крипты\n"
             "• подпишись / стоп сигналы\n"
             "• что значит сила и ATR на карточке\n"
             "• чем fbo отличается от brk\n"
@@ -1686,7 +1656,6 @@ async def cmd_scan(msg: Message):
             subscribers=[msg.chat.id],
             chat_filters=_build_filter_for_chat,
             incremental=True,
-            chat_best_only=_best_only_for_chat,
             stats=stats,
             send_hours=MANUAL_SEND_HOURS,
         )
@@ -1705,7 +1674,7 @@ def _scan_summary(chat_id: int, st: dict | None) -> str:
         return "Найдено: 0 (нет активных шаблонов/рынков)."
     parts = [f"Найдено за 12ч (как HTML): <b>{st['found']}</b>", f"отправлено: <b>{st['sent']}</b>"]
     for key, label in (("already", "уже были"), ("level_dup", "повтор уровня 36ч"),
-                       ("conc", "лимит «одновременно»"), ("best_only", "«только лучший»"),
+                       ("conc", "лимит «одновременно»"),
                        ("too_old", f"старше {MANUAL_SEND_HOURS} ч"),
                        ("night", f"крипта вне {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК")):
         if st.get(key):
@@ -1722,10 +1691,6 @@ def _scan_summary(chat_id: int, st: dict | None) -> str:
         tail += "\n⚠️ Источник данных бота: OKX (Bybit недоступен или выключен), а HTML на Bybit — список монет и свечи отличаются."
     return " · ".join(parts) + tail
 
-
-# ── best_only per chat (для screener._apply_best_only) ───────────────────────
-def _best_only_for_chat(chat_id: int) -> dict:
-    return storage.get_best_only(chat_id)
 
 
 # ── Построить фильтр для чата из активных шаблонов ───────────────────────────
@@ -2186,8 +2151,7 @@ async def handle_manual_scan_post(request: web.Request) -> web.Response:
                 template_name=template_name,
                 filters=filters,
                 on_progress=_on_progress,
-                chat_best_only=_best_only_for_chat,
-            )
+                )
             job["n_sent"] = n
             job["status"] = "done"
             job["progress"] = 100
@@ -2294,8 +2258,7 @@ async def scan_loop():
                     subscribers=list(_subscribers),
                     chat_filters=_build_filter_for_chat,
                     incremental=True,
-                    chat_best_only=_best_only_for_chat,
-                    send_hours=1,   # подписка: только бар, закрывшийся в HH:00
+                            send_hours=1,   # подписка: только бар, закрывшийся в HH:00
                 )
                 dur = time.time() - t0
                 late = time.time() - hour_start > SCAN_SEND_DEADLINE_S

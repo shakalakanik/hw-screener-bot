@@ -1264,9 +1264,8 @@ def get_active_config(chat_id: int) -> dict:
 
 
 def get_best_only(chat_id: int) -> dict:
-    """Режим «только лучший» per-market: {"crypto": bool, "ru": bool}."""
-    return dict(get_active_config(chat_id).get("best_only") or {m: False for m in MARKETS})
-
+    """«Только лучший» удалён (13.10): сохранённый флаг игнорируется — всегда выкл. Данные в БД не трогаем."""
+    return {m: False for m in MARKETS}
 
 def set_best_only(chat_id: int, market: str, enabled: bool):
     """Вкл/выкл «только лучший» для одного рынка (crypto|ru|algo)."""

@@ -125,10 +125,9 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
     — встроенный шаблон «🤖 Авто» рынка и его стратегия. У «Крипта (Алго)» (algo) Авто НЕТ —
     не предлагай, объясни что нужен алго-шаблон.
 - set_auto_strategy: {"market":"crypto"|"ru","strategy":"fbo"|"brk"|"both"}
-- set_best_only: {"market":"crypto"|"ru"|"algo","enabled":true|false} — «только лучший сигнал»
 - set_the_best: {"enabled":true|false} — «⭐ The Best» (только крипта): вкл — слать только сигналы отбора
     The Best (ЛП-шорты: D1 ≥2 зелёных подряд, объём не разгонялся, без шипов/хвостов, ≤14/нед);
-    выкл — как обычно, но такие сигналы помечаются ⭐. Это НЕ «только лучший сигнал».
+    выкл — как обычно, но такие сигналы помечаются ⭐.
 - set_templates: {"market":..,"names":["..."]}  — полная замена активных шаблонов рынка (выключает Авто)
 - add_templates / remove_templates: {"market":..,"names":["..."]}
 - set_strategy: {"market":..,"template":"<имя>","strategy":"fbo"|"brk"|"both"} — ЛП/Пробой/Оба шаблона
@@ -149,9 +148,8 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
 [{"action":"set_market","params":{"market":"crypto","enabled":true}},
  {"action":"set_market","params":{"market":"ru","enabled":false}},
  {"action":"set_market","params":{"market":"algo","enabled":false}}]
-«на крипте только лучший, авто оба» →
-[{"action":"set_best_only","params":{"market":"crypto","enabled":true}},
- {"action":"set_auto","params":{"market":"crypto","enabled":true,"strategy":"both"}}]
+«на крипте авто оба» →
+[{"action":"set_auto","params":{"market":"crypto","enabled":true,"strategy":"both"}}]
 Если просьба неоднозначна (непонятно какой рынок, шаблон или стратегия, «на пробой» без
 указания — Авто это или шаблон) — НЕ угадывай и НЕ добавляй ACTION, задай короткий
 уточняющий вопрос.
@@ -302,7 +300,6 @@ def _parse_actions_json(blob: str) -> dict | None:
 _ALLOWED_ACTIONS = {
     "set_auto",
     "set_auto_strategy",
-    "set_best_only",
     "set_the_best",
     "set_market",
     "set_strategy",
@@ -336,7 +333,7 @@ def _sanitize_one(item: dict, notes: list[str]) -> dict | None:
     if action == "set_the_best":
         clean["params"] = {"enabled": _as_bool(params.get("enabled"))}
         return clean
-    if action in ("set_market", "set_best_only"):
+    if action == "set_market":
         if market not in _MKTS:
             return None
         clean["params"] = {"market": market, "enabled": _as_bool(params.get("enabled"))}
@@ -512,10 +509,7 @@ def parse_rules(user_text: str) -> list[dict] | None:
         last_mkts = mk
         for m in mk:
             if best:
-                en = True if verb is None else verb
-                acts.append({"action": "set_best_only", "params": {"market": m, "enabled": en}})
-                if not (auto or strat):
-                    continue
+                return None   # «только лучший» удалён — пусть уточнит ИИ
             if auto or strat:
                 if strat and not auto:
                     return None   # «на пробой» без «авто» — неясно: Авто или шаблон → уточнить
@@ -550,7 +544,6 @@ def format_user_context(ctx: dict) -> str:
     enabled = set(ctx.get("markets") or [])
     auto = ctx.get("auto") or {}
     auto_st = ctx.get("auto_strategy") or {}
-    best = ctx.get("best_only") or {}
     sl = {"fbo": "ЛП", "brk": "Пробой", "both": "Оба"}
     tstr = ctx.get("template_strategies") or {}
     for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
@@ -558,7 +551,6 @@ def format_user_context(ctx: dict) -> str:
         a = ("Авто: нет (у алго Авто не бывает)" if m == "algo" else
              f"🤖 Авто: {'вкл' if auto.get(m) else 'выкл'} (стратегия {auto_st.get(m, 'fbo')} = {sl.get(auto_st.get(m, 'fbo'))})")
         lines.append(f"[{m}] {label}: рынок {'ВКЛ' if m in enabled else 'выкл'}; {a}; "
-                     f"только лучший: {'вкл' if best.get(m) else 'выкл'}; "
                      f"активные шаблоны: {', '.join(names) if names else '—'}")
         if tstr.get(m) is not None:
             lines.append(f"  доступные шаблоны [{m}]: " +

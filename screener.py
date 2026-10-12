@@ -879,78 +879,6 @@ def _best_only_rank(card: dict) -> tuple:
     )
 
 
-def _apply_best_only(
-    pending: list[dict],
-    chat_best_only: Callable[[int], dict],
-) -> list[dict]:
-    """Если у чата best_only[market]=True — оставить только 1 лучший сигнал
-    этого рынка для чата; убрать chat_id из остальных by_template.
-
-    Независимые настройки crypto / ru. Чаты с выкл. — без изменений.
-    """
-    if not pending or chat_best_only is None:
-        return pending
-
-    all_chats: set[int] = set()
-    for item in pending:
-        for chats in (item.get("by_template") or {}).values():
-            all_chats.update(chats)
-    if not all_chats:
-        return pending
-
-    settings = {cid: (chat_best_only(cid) or {}) for cid in all_chats}
-
-    # Кандидаты: (chat_id, market) → индексы pending, где чат фигурирует
-    candidates: dict[tuple[int, str], list[int]] = {}
-    for idx, item in enumerate(pending):
-        market = item["card"].get("market", "crypto")
-        if market not in ("crypto", "ru"):
-            market = "crypto"
-        chats_in: set[int] = set()
-        for chat_list in (item.get("by_template") or {}).values():
-            chats_in.update(chat_list)
-        for cid in chats_in:
-            if (settings.get(cid) or {}).get(market):
-                candidates.setdefault((cid, market), []).append(idx)
-
-    keep_for: dict[tuple[int, str], int] = {}
-    for key, idxs in candidates.items():
-        if len(idxs) == 1:
-            keep_for[key] = idxs[0]
-        else:
-            keep_for[key] = max(idxs, key=lambda i: _best_only_rank(pending[i]["card"]))
-
-    if not keep_for:
-        return pending
-
-    out: list[dict] = []
-    for idx, item in enumerate(pending):
-        market = item["card"].get("market", "crypto")
-        if market not in ("crypto", "ru"):
-            market = "crypto"
-        new_by: dict = {}
-        for tpl, chats in (item.get("by_template") or {}).items():
-            filtered = []
-            for cid in chats:
-                if (settings.get(cid) or {}).get(market):
-                    if keep_for.get((cid, market)) == idx:
-                        filtered.append(cid)
-                else:
-                    filtered.append(cid)
-            if filtered:
-                new_by[tpl] = filtered
-        if new_by:
-            out.append({"card": item["card"], "by_template": new_by})
-
-    dropped = len(pending) - len(out)
-    if dropped or any(True for _ in keep_for):
-        logger.info(
-            "best_only: pending %d → %d (правил чат+рынок: %d)",
-            len(pending), len(out), len(keep_for),
-        )
-    return out
-
-
 def _week_start_ms(ts_ms: int) -> int:
     """Понедельник 00:00 UTC недели, в которую попал сигнал."""
     d = ts_ms // 86_400_000
@@ -1178,8 +1106,7 @@ async def _deliver_html(
     раздел «Сигналы» в HTML за последние win_h часов (html_pipeline.apply_all).
 
     Поверх — только бот-правила: не старше MAX_SIGNAL_AGE_H, без повторов (история отправок
-    чата + общий дедуп уровня ±0.5%/36ч), лимит одновременных по шаблону, «только лучший»
-    по рынку, недельная квота с учётом уже отправленного. Отправка — от старых к новым."""
+    чата + общий дедуп уровня ±0.5%/36ч), лимит одновременных по шаблону, недельная квота с учётом уже отправленного. Отправка — от старых к новым."""
     from html_pipeline import apply_all, best_pipeline, best_key, iso_week_key
 
     cutoff = now_ms - win_h * 3_600_000
@@ -1261,7 +1188,7 @@ async def _deliver_html(
 
         # Счётчики для прозрачности (ручной «Скан» пишет итог: найдено как в HTML → отправлено).
         st = {"found": len(chosen), "too_old": 0, "night": 0, "already": 0, "level_dup": 0,
-              "conc": 0, "best_only": 0, "sent": 0,
+              "conc": 0, "sent": 0,
               "exchange": ("OKX" if _active_exchange == "okx" else "Bybit")}
         fresh = []
         for c in chosen.values():
@@ -1300,15 +1227,7 @@ async def _deliver_html(
         fresh = [c for c in fresh if concurrency_allows(chat_id, c["matched_template"], f)]
         st["conc"] = n0 - len(fresh)
 
-        # «Только лучший» (настройка бота, в HTML её нет) — по оценке, отдельно для рынка
-        if chat_best_only is not None and fresh:
-            bo = chat_best_only(chat_id) or {}
-            keep = []
-            for mkt in {c.get("market", "crypto") for c in fresh}:
-                grp = [c for c in fresh if c.get("market", "crypto") == mkt]
-                keep.extend([max(grp, key=_best_only_rank)] if bo.get(mkt) else grp)
-            st["best_only"] = len(fresh) - len(keep)
-            fresh = keep
+        # «Только лучший» удалён (13.10): chat_best_only принимается для совместимости и игнорируется
 
 
         fresh.sort(key=lambda c: c["signal_ts"])
@@ -1317,7 +1236,7 @@ async def _deliver_html(
             storage.mark_sent(c["ticker"], c["side"], c["level"], c.get("strategy", "brk"))
             sent += 1
             st["sent"] += 1
-        if any(st[k] for k in ("too_old", "night", "level_dup", "conc", "best_only")):
+        if any(st[k] for k in ("too_old", "night", "level_dup", "conc")):
             logger.info("deliver chat=%s: %s", chat_id, st)
         if stats is not None:
             stats[chat_id] = st
