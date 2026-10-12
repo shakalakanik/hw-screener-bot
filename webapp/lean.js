@@ -826,6 +826,17 @@
     });
   }
 
+  /* 💾 «Сохранить» (скачать HTML со всеми данными) в Mini App не нужна: прячем и глушим клик
+     (capture на document — срабатывает раньше обработчика HTML). Шаблоны/отслеживаемые не трогаем. */
+  function killSaveFileBtn() {
+    var b = document.getElementById('btnSaveFile');
+    if (b) { b.style.display = 'none'; b.disabled = true; b.setAttribute('aria-hidden', 'true'); }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('#btnSaveFile') : null;
+    if (t) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
+
   function start() {
     var n = 0;
     var t = setInterval(function () {
@@ -834,6 +845,7 @@
         clearInterval(t);
         if (!ready()) { console.warn('[lean] screener DOM not ready, giving up'); return; }
         installConcHooks();
+        killSaveFileBtn();
         try { installBestStar(); markBestRows(); } catch (e) {}
         hideBacktestRunUI();
         hideOtherTabs();

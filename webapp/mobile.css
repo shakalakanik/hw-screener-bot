@@ -155,3 +155,6 @@ table {
     margin: -8px -8px 8px;
   }
 }
+
+/* 💾 Сохранить (скачать HTML-файл) — в Telegram бесполезна: скрыта на всех вкладках */
+#btnSaveFile{display:none!important}
