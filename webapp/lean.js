@@ -487,7 +487,7 @@
     }
     return '<article class="card hw-journal-card" id="jcard-' + row.id + '" data-id="' + row.id + '" data-market="' + jEsc(row.market) + '">' +
       journalEyeHtml(row) +
-      '<div class="hw-j-title">' + emoji + ' ' + jEsc(row.ticker || c.ticker || '') + ' — ' + jEsc(side || '—') + '</div>' +
+      '<div class="hw-j-title">' + ((row.is_best || c.is_best) ? '⭐ ' : '') + emoji + ' ' + jEsc(row.ticker || c.ticker || '') + ' — ' + jEsc(side || '—') + '</div>' +
       '<div class="tradeInfo">' +
         '<div><span>рынок</span> <b>' + mkt + ' · ' + strat + jEsc(prob) + '</b></div>' +
         tpl +
@@ -797,6 +797,36 @@
     }, 200);
   }
 
+  /* ⭐ The Best (HTML 6.93): в таблице «Сигналы» помечаем строки, которые отобрал бы конвейер The best
+     (bestPipeline движка) на том же окне. Только отметка — фильтр/кнопки не меняем. */
+  function installBestStar() {
+    if (typeof window.renderScan !== 'function' || window.renderScan.__hwBest) return;
+    var orig = window.renderScan;
+    var wrapped = function () {
+      var r = orig.apply(this, arguments);
+      try { markBestRows(); } catch (e) {}
+      return r;
+    };
+    wrapped.__hwBest = true;
+    window.renderScan = wrapped;
+  }
+  function markBestRows() {
+    /* global LAST, MKT, bestPipeline, windowHours */
+    if (typeof bestPipeline !== 'function' || typeof LAST === 'undefined' || !LAST || typeof MKT === 'undefined' || MKT !== 'crypto') return;
+    var cutoff = Date.now() - windowHours() * 3600000;
+    var K = {};
+    bestPipeline(LAST.filter(function (s) { return s.t >= cutoff; })).forEach(function (t) { K[t.base + '|' + t.t] = 1; });
+    document.querySelectorAll('#tb tr').forEach(function (tr) {
+      var eye = tr.querySelector('.eye[data-base]');
+      if (!eye) return;
+      var key = eye.getAttribute('data-base') + '|' + eye.getAttribute('data-t');
+      var td = tr.children[2];
+      if (!td || !K[key] || td.getAttribute('data-hw-best')) return;
+      td.setAttribute('data-hw-best', '1');
+      td.textContent = '⭐ ' + td.textContent;
+    });
+  }
+
   function start() {
     var n = 0;
     var t = setInterval(function () {
@@ -805,6 +835,7 @@
         clearInterval(t);
         if (!ready()) { console.warn('[lean] screener DOM not ready, giving up'); return; }
         installConcHooks();
+        try { installBestStar(); markBestRows(); } catch (e) {}
         hideBacktestRunUI();
         hideOtherTabs();
         renameTemplatesTab();
