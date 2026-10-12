@@ -126,6 +126,9 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
     не предлагай, объясни что нужен алго-шаблон.
 - set_auto_strategy: {"market":"crypto"|"ru","strategy":"fbo"|"brk"|"both"}
 - set_best_only: {"market":"crypto"|"ru"|"algo","enabled":true|false} — «только лучший сигнал»
+- set_the_best: {"enabled":true|false} — «⭐ The Best» (только крипта): вкл — слать только сигналы отбора
+    The Best (ЛП-шорты: D1 ≥2 зелёных подряд, объём не разгонялся, без шипов/хвостов, ≤14/нед);
+    выкл — как обычно, но такие сигналы помечаются ⭐. Это НЕ «только лучший сигнал».
 - set_templates: {"market":..,"names":["..."]}  — полная замена активных шаблонов рынка (выключает Авто)
 - add_templates / remove_templates: {"market":..,"names":["..."]}
 - set_strategy: {"market":..,"template":"<имя>","strategy":"fbo"|"brk"|"both"} — ЛП/Пробой/Оба шаблона
@@ -300,6 +303,7 @@ _ALLOWED_ACTIONS = {
     "set_auto",
     "set_auto_strategy",
     "set_best_only",
+    "set_the_best",
     "set_market",
     "set_strategy",
     "set_templates",
@@ -329,6 +333,9 @@ def _sanitize_one(item: dict, notes: list[str]) -> dict | None:
     params = item.get("params") if isinstance(item.get("params"), dict) else {}
     clean: dict[str, Any] = {"action": action, "params": {}, "summary": str(item.get("summary") or action)}
     market = params.get("market")
+    if action == "set_the_best":
+        clean["params"] = {"enabled": _as_bool(params.get("enabled"))}
+        return clean
     if action in ("set_market", "set_best_only"):
         if market not in _MKTS:
             return None
@@ -419,6 +426,7 @@ _R_AUTO = re.compile(r"(?i)(?:авто\w*|\bauto\b|🤖)")
 _R_FBO = re.compile(r"(?i)(?:ложн\w*\s*-?\s*пр[оа]бо\w*|\bлп\b|\bfbo\b|ложняк\w*|ложн\w*)")
 _R_BRK = re.compile(r"(?i)(?:пр[оа]бо[йияюе]\w*|\bbrk\b|breakout)")
 _R_BOTH = re.compile(r"(?i)\b(?:оба|обе|обоих|both|все\s+стратеги\w*)\b")
+_R_THE_BEST = re.compile(r"(?i)(?:\bthe\s*best\b|\bзе\s*бест\b|\bthebest\b)")
 _R_BEST = re.compile(r"(?i)(?:лучш\w*|best)")
 _R_SPLIT = re.compile(r"(?i)\s*(?:[,;.]|\bа\s+также\b|\bа\b|\bи\b|\bно\b|\bплюс\b|\bзатем\b|\bпотом\b)\s*")
 _MKT_RU_LABEL = {"crypto": "крипта", "ru": "мосбиржа", "algo": "крипта (алго)"}
@@ -465,6 +473,15 @@ def parse_rules(user_text: str) -> list[dict] | None:
         acts += [{"action": "set_market", "params": {"market": m, "enabled": not on_keep}}
                  for m in _MKTS if m not in keep]
         return acts
+    # «the best вкл/выкл» — отдельный переключатель ⭐ The Best (крипта), не «только лучший»
+    if _R_THE_BEST.search(text):
+        rest = _R_THE_BEST.sub(" ", text)
+        if _R_SPLIT.sub(" ", rest).strip() and (_seg_markets(rest) and _seg_markets(rest) != ["crypto"]):
+            return None
+        on, off = bool(_R_ONV.search(rest)), bool(_R_OFFV.search(rest))
+        if on and off:
+            return None
+        return [{"action": "set_the_best", "params": {"enabled": not off}}]
     m_only = re.search(r"(?i)\bтолько\b", text)
     segs = [x for x in _R_SPLIT.split(text) if x and x.strip()]
     acts: list[dict] = []

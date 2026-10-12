@@ -45,6 +45,7 @@ CAP_CLUSTER = 3
 MAX_SIGNAL_AGE_H = 12
 # HTML 6.78.x: чекбокс «без ночи» (noNight). У пользователя в десктопном HTML он ВЫКЛЮЧЕН →
 # скан круглосуточно, а «авто» часов входа = 0-24 (readF). Автоскан подписки следует этому.
+THE_BEST_NAME = "⭐ The Best"
 CRYPTO_NO_NIGHT = os.getenv("CRYPTO_NO_NIGHT", "0") == "1"
 MAX_SIGNAL_AGE_MS = MAX_SIGNAL_AGE_H * 3_600_000
 # Lookback детекции = max age (не ищем то, что всё равно не отправим).
@@ -1169,12 +1170,17 @@ async def _deliver_html(
     Поверх — только бот-правила: не старше MAX_SIGNAL_AGE_H, без повторов (история отправок
     чата + общий дедуп уровня ±0.5%/36ч), лимит одновременных по шаблону, «только лучший»
     по рынку, недельная квота с учётом уже отправленного. Отправка — от старых к новым."""
-    from html_pipeline import apply_all
+    from html_pipeline import apply_all, best_pipeline, best_key, iso_week_key
 
     cutoff = now_ms - win_h * 3_600_000
     by_market: dict[str, list[dict]] = {}
     for c in all_cards:
         by_market.setdefault(c.get("market", "crypto"), []).append(c)
+
+    # The best (HTML 6.93 bestPipeline) — общий для всех чатов список по крипте
+    nn_all = CRYPTO_NO_NIGHT if no_night is None else bool(no_night)
+    best_rows = best_pipeline(by_market.get("crypto", []), cutoff, nn_all) if by_market.get("crypto") else []
+    best_keys = {best_key(c) for c in best_rows}
 
     # Дедуп уровня — снимок ДО рассылки, чтобы отправка первому чату не блокировала второй.
     dup_cache: dict[tuple, bool] = {}
@@ -1199,9 +1205,19 @@ async def _deliver_html(
         # фильтр бэктеста HTML. Количество сигналов бота ограничивают только шаблоны/сценарии.
         week_max = 0
         chosen: dict[tuple, dict] = {}
+        try:
+            the_best = storage.get_the_best(chat_id)
+        except Exception:
+            the_best = False
+        if the_best and "crypto" in markets:
+            # ⭐ The best ВКЛ: по крипте уходят только сигналы конвейера The best (шаблоны крипты не применяются)
+            for c in best_rows:
+                chosen[best_key(c)] = {**c, "matched_template": THE_BEST_NAME, "template_thr": None, "is_best": True}
         for tpl in multi:
             mkt = tpl.get("_market", "crypto")
             if mkt not in markets:
+                continue
+            if mkt == "crypto" and the_best:
                 continue
             name = tpl.get("_name", "")
             raw = tpl.get("filters") or {}
@@ -1230,7 +1246,8 @@ async def _deliver_html(
             for c in rows:
                 key = (c["ticker"], c.get("strategy"), c["signal_ts"], c["side"], round(c["level"], 10))
                 if key not in chosen:
-                    chosen[key] = {**c, "matched_template": name, "template_thr": thr}
+                    chosen[key] = {**c, "matched_template": name, "template_thr": thr,
+                                   "is_best": mkt == "crypto" and best_key(c) in best_keys}
 
         # Счётчики для прозрачности (ручной «Скан» пишет итог: найдено как в HTML → отправлено).
         st = {"found": len(chosen), "too_old": 0, "already": 0, "level_dup": 0,
@@ -1248,6 +1265,25 @@ async def _deliver_html(
                 st["level_dup"] += 1
             else:
                 fresh.append(c)
+        if the_best and fresh:
+            # The best: не больше BEST_WEEK сигналов за ISO-неделю (как bestWeekCap) — с учётом уже отправленных
+            from hwv1 import BEST_WEEK
+            try:
+                sent_wk = [iso_week_key(t) for t in storage.best_sent_ts_since(chat_id, now_ms - 8 * 86_400_000)]
+            except Exception:
+                sent_wk = []
+            cnt: dict[str, int] = {}
+            for k in sent_wk:
+                cnt[k] = cnt.get(k, 0) + 1
+            keep = []
+            for c in sorted(fresh, key=lambda x: x["signal_ts"]):
+                if c.get("matched_template") == THE_BEST_NAME:
+                    k = iso_week_key(c["signal_ts"])
+                    if cnt.get(k, 0) >= BEST_WEEK:
+                        continue
+                    cnt[k] = cnt.get(k, 0) + 1
+                keep.append(c)
+            fresh = keep
         n0 = len(fresh)
         fresh = [c for c in fresh if concurrency_allows(chat_id, c["matched_template"], f)]
         st["conc"] = n0 - len(fresh)

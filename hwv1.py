@@ -605,7 +605,7 @@ def _false_break_extra(feat: dict) -> list[float]:
     ]
 
 
-def signal_score(feat: dict, strategy: str) -> float:
+def signal_score(feat: dict, strategy: str, market: str = "crypto") -> float:
     """Оценка сигнала 0–10 — 1:1 с signalScore() в HW_FBO_scanner_6.html.
 
     Логистическая регрессия по 32 признакам + флаг типа (отдельная для ЛП и для пробоя).
@@ -613,6 +613,10 @@ def signal_score(feat: dict, strategy: str) -> float:
     Затем интерполяция по ступеням PAV и нормировка на 0–10.
     """
     if strategy != "brk":
+        if market != "ru":
+            v6 = score_v6(feat)   # HTML 6.93: у ЛП на крипте — ярусная оценка v6
+            if v6 is not None:
+                return math.floor(v6 * 10 + 0.5) / 10
         r = hw_score(feat)   # HTML 6.78.3: у ЛП оценка v4 (похожесть на эталоны)
         if r is not None:
             return math.floor(r["score"] * 10 + 0.5) / 10
@@ -648,6 +652,115 @@ def signal_score(feat: dict, strategy: str) -> float:
     frac = max(0.0, min(1.0, (v - sm["vmin"]) / (sm["vmax"] - sm["vmin"])))
     return math.floor(frac * 100 + 0.5) / 10
 
+
+
+# ═══ Оценка ЛП v5/v6 (HTML 6.88–6.93), только крипта ═══
+_SCORE_V5 = None
+
+
+def _load_score_v5() -> dict:
+    global _SCORE_V5
+    if _SCORE_V5 is None:
+        with open(os.path.join(os.path.dirname(__file__), "score_v5.json"), "r", encoding="utf-8") as fh:
+            _SCORE_V5 = json.load(fh)
+    return _SCORE_V5
+
+
+def score_v5_raw(s: dict):
+    """1:1 scoreV5raw(): логистическая регрессия на рангах → перцентиль 0..10. None — нет признаков."""
+    S = _load_score_v5()
+    vol5 = s.get("vol5mAvg")
+    appr = s.get("approach_atr")
+    if appr is None:
+        appr = s.get("appr")
+    v = {"lv_touch24": s.get("lv_touch24"), "ap03": s.get("ap03"), "near12": s.get("near12"),
+         "approach_atr": appr, "lv_touch": s.get("lv_touch"), "mv12": s.get("mv12"),
+         "log_vol5m": (math.log10(max(vol5, 1)) if vol5 is not None else None), "v6_poke": s.get("v6_poke")}
+    z = S["b"]
+    import bisect
+    for j, k in enumerate(S["K"]):
+        x = v[k]
+        if x is None:
+            return None
+        try:
+            x = float(x)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(x):
+            return None
+        q = S["Q"][j]
+        z += S["w"][j] * bisect.bisect_right(q, x) / len(q)
+    P = S["P"]
+    if z <= P[0]:
+        return 0.0
+    if z >= P[-1]:
+        return 10.0
+    for i in range(1, len(P)):
+        if z <= P[i]:
+            return ((i - 1) + (z - P[i - 1]) / ((P[i] - P[i - 1]) or 1)) * 10 / (len(P) - 1)
+    return 10.0
+
+
+def _risk_d(s: dict):
+    st, e, a = s.get("st"), s.get("e"), s.get("atrD")
+    if st is not None and e is not None:
+        return abs(st - e)
+    if a is not None and e is not None:
+        return max(0.10 * a, 0.02 * e)
+    return None
+
+
+def score_v6(s: dict):
+    """1:1 scoreV6(): шорт с D1-серией ≥2, vtr ≤1.0, без шипа/хвоста → 8+0.2·v5; иначе ≤7.9."""
+    T = score_v5_raw(s)
+    if T is None:
+        return None
+    side = s.get("side") or ("short" if s.get("d") == 0 else "long")
+    d = _risk_d(s)
+    g = s.get("g_spk")
+    spike = g is not None and g >= 8
+    pk = s.get("pk_ext")
+    poke = (abs(pk - s["e"]) / d > 3) if (pk is not None and d) else False
+    ds, vtr = s.get("d1_streak"), s.get("vtr")
+    if side == "short" and ds is not None and vtr is not None and ds >= 2 and vtr <= 1.0 and not spike and not poke:
+        return 8 + 0.2 * T
+    return max(0.0, min(7.9, 0.79 * T - (3 if spike else 0) - (2 if poke else 0)))
+
+
+# ═══ The best (HTML 6.93, режим «edge») ═══
+BEST_SPK = 8
+BEST_POKE = 3
+BEST_WEEK = 14
+EDGE_D1 = 2
+EDGE_VTR = 1.0
+
+
+def best_verdict(s: dict):
+    """1:1 bestVerdict() (BEST_MODE='edge'): None — проходит, иначе причина."""
+    if (s.get("type") or "fbo") != "fbo":
+        return "notfbo"
+    side = s.get("side") or ("short" if s.get("d") == 0 else "long")
+    if side != "short":
+        return "notshort"
+    ds, vtr = s.get("d1_streak"), s.get("vtr")
+    if ds is None or vtr is None:
+        return "nodata"
+    if ds < EDGE_D1:
+        return "d1"
+    if vtr > EDGE_VTR:
+        return "vol"
+    g = s.get("g_spk")
+    if g is not None and g >= BEST_SPK:
+        return "spike"
+    return None
+
+
+def best_poke(s: dict):
+    pk, st, e = s.get("pk_ext"), s.get("st"), s.get("e")
+    if pk is None or st is None or e is None:
+        return None
+    d = abs(st - e)
+    return abs(pk - e) / d if d > 0 else None
 
 
 # ═══ Оценка ложного пробоя v4 (HW_FBO_scanner 6.78.3): «похожесть на эталонные сделки» ═══
@@ -709,7 +822,25 @@ def fbo_shape(h1c: list, i: int, L: float, br_side: str, formed_ts: int, atr_d: 
     vmax = 0.0
     for k in range(j, i + 1):
         vmax = max(vmax, h1c[k].vol_quote or 0.0)
+    # HTML 6.93: «дёрганость» (самый большой H1-бар за 48ч / медианный бар за 167ч),
+    # экстремум прокола за 3 бара (вкл. бар сигнала), затухание объёма перед сигналом.
+    rngs = sorted(h1c[k].h - h1c[k].l for k in range(max(0, i - 167), i))
+    nn = len(rngs)
+    med = (rngs[(nn - 1) // 2] if nn % 2 else (rngs[nn // 2 - 1] + rngs[nn // 2]) / 2) if nn else 0.0
+    spk = 0.0
+    for k in range(max(0, i - 48), i):
+        spk = max(spk, h1c[k].h - h1c[k].l)
+    pk = None
+    for k in range(max(0, i - 2), i + 1):
+        v = h1c[k].h if dr > 0 else h1c[k].l
+        pk = v if pk is None else (max(pk, v) if dr > 0 else min(pk, v))
+    vtr = None
+    if i >= 4:
+        vb = (h1c[i - 2].vol_quote or 0) + (h1c[i - 3].vol_quote or 0) + (h1c[i - 4].vol_quote or 0)
+        if vb > 0:
+            vtr = (h1c[i - 1].vol_quote or 0) / (vb / 3)
     return {
+        "g_spk": spk / med if med > 0 else None, "pk_ext": pk, "vtr": vtr,
         "lvB": bstart, "lv_touch": touch, "lv_touch24": touch24, "ap03": ap03, "near12": near,
         "mv12": dr * (L - c12) / atr_d if atr_d > 0 else 0.0,
         "vbrk": vmax / v_med if v_med > 0 else 0.0,
@@ -1133,7 +1264,8 @@ def evaluate_fbo(
                 side == "long", br_side, w, pit_atr_d, a_h1, d1c,
             ))
             sf.update(fbo_shape(h1c, hi_idx, lv.price, br_side, lv.formed_ts, pit_atr_d, v_med))
-            score = signal_score(sf, "fbo")
+            sf.update({"vol5mAvg": v_med / 12, "atrD": pit_atr_d, "e": bar.c, "side": side})
+            score = signal_score(sf, "fbo", market)
 
             cards.append({
                 "ticker": ticker,

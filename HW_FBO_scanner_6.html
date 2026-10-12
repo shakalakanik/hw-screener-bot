@@ -78,6 +78,11 @@ progress{width:100%;height:6px;margin-top:8px}
     <div class="field"><label>Рынок</label>
       <select id="mkt"><option value="crypto">Крипта</option><option value="ru">Акции РФ (MOEX)</option><option value="algo">Крипта (Алго)</option></select></div>
     <div class="field" id="fldScStrat"><label>Стратегия</label><select id="sc_strat"><option value="fbo">Ложный пробой</option><option value="brk">Пробой</option><option value="both">Оба</option></select></div>
+    <div class="field" id="fldScSide"><label>Сторона</label>
+      <select id="sc_side" class="flt" title="«Авто»: для ложного пробоя — только SHORT, для пробоя/«Оба» — обе стороны">
+        <option value="auto">авто (ЛП→SHORT, иначе обе)</option>
+        <option value="1">только LONG</option><option value="0">только SHORT</option>
+      </select></div>
     <div class="field" style="align-self:center"><span id="sc_fsnote" class="muted" style="font-size:12px"></span></div>
     <div class="field" id="fldSrcRu" style="display:none"><label>Источник</label>
       <div class="note" style="padding:7px 0">MOEX ISS · задержка 15 мин</div></div>
@@ -98,6 +103,7 @@ progress{width:100%;height:6px;margin-top:8px}
     <div class="field"><label>Макс. сделок в неделю <span class="muted">(топ по оценке)</span></label>
       <input id="sc_weekmax" type="number" value="20" min="1" max="200" step="1" style="width:110px" title="Из всех найденных за окно сигналов в списке ниже остаются только N лучших за каждую неделю — по оценке сигнала (0–10)."></div>
     <div class="field"><button id="run">Сканировать</button></div>
+    <div class="field"><button id="scBest" class="ghost" title="ТЕСТОВЫЙ режим. Оставляет ЛП-шорты с оценкой 8–10: перед сигналом 2+ зелёных дневных свечи подряд, объём часа перед сигналом не выше среднего за 3 часа до него, без дёрганых монет и без большого хвоста прокола над стопом. Внутри недели — по похожести на ваш выбор, не больше 14 в неделю; отслеживаемые — всегда. В прошлом (март–октябрь 2026) ~31% тейков при тейке 3R против 24% у всех ЛП-шортов. Кандидат, проверяем вперёд; в алгоритм не встроено.">The best (тест)</button></div>
     <div class="field"><label title="Вкладка должна быть открыта. Каждый час на 2-й минуте — скан и уведомление о новых сигналах"><input id="autoScan" type="checkbox"> автоскан каждый час + уведомления</label></div>
   </div>
   <div class="sect"><span>Фильтры отбора — «авто» значит фильтр выключен</span></div>
@@ -207,11 +213,6 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="auto">авто (неважно)</option>
             <option value="1">только по тренду</option><option value="0">только против</option>
           </select></div>
-        <div class="field"><label>Сторона</label>
-          <select id="sc_side" class="flt">
-            <option value="auto">авто (любая)</option>
-            <option value="1">только LONG</option><option value="0">только SHORT</option>
-          </select></div>
         <div class="field"><label>Сигналов в час, макс</label>
           <select id="sc_cap" class="flt">
             <option value="auto">авто (3)</option>
@@ -234,7 +235,7 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="5d">только 5d</option>
             <option value="prev">только prev</option>
           </select></div>
-        <div class="field"><label>Оценка сигнала от <span class="muted">(фильтр/перебор)</span></label>
+        <div class="field"><label>Похожесть от <span class="muted">(фильтр/перебор)</span></label>
           <select id="sc_msc" class="flt" title="Оценка 0–10 объединяет 34 признака сигнала. Перебор комбинаций тоже подбирает этот порог.">
             <option value="auto">авто (любая)</option>
             <option value="3">от 3</option><option value="5">от 5</option><option value="6">от 6</option>
@@ -246,7 +247,7 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="1">до 1%</option><option value="1.5">до 1.5%</option>
             <option value="2">до 2%</option><option value="3">до 3%</option>
           </select></div>
-        <div class="field"><label>Оценка сигнала, не ниже</label>
+        <div class="field"><label>Похожесть, не ниже</label>
           <input id="sc_minscore" type="number" step="0.1" min="0" max="10" placeholder="напр. 5.2" style="width:100px" title="Оценка 0–10 — оставляет только сигналы с оценкой не ниже введённой. Пусто = без фильтра."></div>
         <div class="field"><label>Часы входа (МСК)</label>
           <select id="sc_hours" class="flt">
@@ -337,6 +338,11 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="auto">авто (любой)</option>
             <option value="0.2">от 20%</option><option value="0.35">от 35%</option>
             <option value="0.5">от 50%</option>
+          </select></div>
+        <div class="field ru-only" style="display:none"><label title="База у уровня: сколько из 8 часов до пробоя цена закрывалась рядом с уровнем (±0.3 ATR дня). Ваши сделки — плотная база прямо у уровня. Март–окт. 2026, шорты с RU-фильтрами: база ≥4 — 41.7% тейков, <4 — 23.7%.">База у уровня</label>
+          <select id="sc_rubase" class="flt">
+            <option value="auto">авто (любая)</option>
+            <option value="4">≥4 из 8 ч</option><option value="6">≥6 из 8 ч</option>
           </select></div>
         <div class="field ru-only" style="display:none"><label title="Диапазон H-L за 5 свечей до пробоя должен сужаться — сжатая пружина">Сужение (squeeze)</label>
           <select id="sc_rusqueeze" class="flt">
@@ -456,7 +462,7 @@ progress{width:100%;height:6px;margin-top:8px}
   <div id="btcBox" style="display:none;margin-top:6px"></div>
   <div class="scroll"><table><thead><tr>
     <th></th><th></th><th>Тикер</th><th title="Когда сигнал появился в сканере — закрытие часовой свечи. В этот момент и вход.">Время сигнала</th><th>Сторона</th><th>Тип уровня</th>
-    <th>Уровень</th><th>p</th><th>Вход</th><th>Стоп</th><th>Тейк</th><th>Риск%</th><th title="Оценка сигнала 0–10: чем выше, тем лучше (сила уровня, объём, чистота, вероятность)">Оценка</th>
+    <th>Уровень</th><th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала (1% объёма 5м ÷ 16.5×): сколько своих $ вложить, не двигая рынок">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
   <div class="note" style="margin-top:8px">Нажми на строку — графики. Нажми на глаз — в отслеживаемое.</div>
 </div>
@@ -484,9 +490,12 @@ progress{width:100%;height:6px;margin-top:8px}
   <div style="margin-top:10px"><button id="wEqBtn" class="ghost" style="padding:6px 12px">▸ График роста капитала</button></div>
   <div id="wEq" style="display:none;margin-top:6px"></div>
   <div class="scroll"><table><thead><tr>
-    <th></th><th></th><th>Тикер</th><th>Добавлен</th><th>Сторона</th><th>Уровень</th><th>p</th>
-    <th>Вход</th><th>Стоп</th><th>Тейк</th><th>Сейчас</th><th title="Оценка сигнала 0–10">Оценка</th><th>Длит.</th><th>Результат</th>
+    <th></th><th></th><th>Тикер</th><th>Добавлен</th><th>Сторона</th><th>Уровень</th>
+    <th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th>Сейчас</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала (10% объёма 5м ÷ 16.5×)">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th><th>Длит.</th><th>Результат</th>
   </tr></thead><tbody id="wtb"></tbody></table></div>
+  <div class="row" style="justify-content:flex-end;margin-top:10px">
+    <button id="refreshWatchAll" class="ghost" title="Полный пересчёт всех сделок (открытых и закрытых): статус, признаки уровня, похожесть, объём 5м и вход из капитала. Использовать после смены алгоритма.">Обновить всё</button>
+  </div>
 </div>
 </div>
 
@@ -606,7 +615,7 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="5d">только 5d</option>
             <option value="prev">только prev</option>
           </select></div>
-        <div class="field"><label>Оценка сигнала от <span class="muted">(фильтр/перебор)</span></label>
+        <div class="field"><label>Похожесть от <span class="muted">(фильтр/перебор)</span></label>
           <select id="bt_msc" class="flt" title="Оценка 0–10 объединяет 34 признака сигнала. Перебор комбинаций тоже подбирает этот порог.">
             <option value="auto">авто (любая)</option>
             <option value="3">от 3</option><option value="5">от 5</option><option value="6">от 6</option>
@@ -707,6 +716,10 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="auto">авто (любой)</option>
             <option value="0.2">от 20%</option><option value="0.35">от 35%</option>
             <option value="0.5">от 50%</option>
+          </select></div>
+        <div class="field ru-only" style="display:none"><label title="База у уровня: ≥N из 8 часов до пробоя цена закрывалась у уровня (±0.3 ATR дня)">База у уровня</label>
+          <select id="bt_rubase" class="flt">
+            <option value="auto">авто</option><option value="4">≥4 из 8 ч</option><option value="6">≥6 из 8 ч</option>
           </select></div>
         <div class="field ru-only" style="display:none"><label title="Диапазон H-L за 5 свечей до пробоя сужается">Сужение (squeeze)</label>
           <select id="bt_rusqueeze" class="flt">
@@ -828,14 +841,14 @@ progress{width:100%;height:6px;margin-top:8px}
         <option value="500">Топ-500</option>
       </select>
     </div>
-    <button id="btBest" class="ghost" title="Показывает только FBO-шорты, похожие на 19 отборных сделок: медвежье тело, прокол уровня, закрытие рядом с уровнем, расширение ATR на подходе, умеренный объём">The best</button>
+    <button id="btBest" class="ghost" title="ТЕСТОВЫЙ режим. Оставляет ЛП-шорты с оценкой 8–10: перед сигналом 2+ зелёных дневных свечи подряд, объём часа перед сигналом не выше среднего за 3 часа до него, без дёрганых монет и без большого хвоста прокола над стопом. Внутри недели — по похожести на ваш выбор, не больше 14 в неделю; отслеживаемые — всегда. В прошлом (март–октябрь 2026) ~31% тейков при тейке 3R против 24% у всех ЛП-шортов. Кандидат, проверяем вперёд; в алгоритм не встроено.">The best (тест)</button>
     <div class="field"><label>Мин. сделок/нед для перебора</label>
       <input id="bt_minwk" type="number" value="5" min="1" max="50" step="1" style="width:110px"></div>
     <div class="field"><label>Макс. сделок в день</label>
       <input id="bt_daymax" type="number" value="0" min="0" max="50" step="1" style="width:110px" title="0 = без ограничения"></div>
     <div class="field"><label>Одновременно в рынке, макс</label>
       <input id="bt_conc" type="number" value="0" min="0" max="50" step="1" style="width:130px" title="0 = без ограничения. Новая сделка пропускается, пока столько уже открыто"></div>
-    <div class="field"><label>Оценка сделки, не ниже</label>
+    <div class="field"><label>Похожесть, не ниже</label>
       <input id="bt_minscore" type="number" value="0" min="0" max="10" step="0.1" style="width:110px" title="0 = без ограничения. Показывает в бэктесте только сделки с оценкой не ниже введённой."></div>
     <div class="field"><label><input id="bt_oos" type="checkbox"> Проверка вне выборки <span class="muted">(перебор подбирает на первых 2/3)</span></label></div>
     <div class="field"><label>Последние N недель <span class="muted">(1–12, 0 = весь период)</span></label>
@@ -863,8 +876,8 @@ progress{width:100%;height:6px;margin-top:8px}
   <div id="btPeriodOut"></div>
   <div id="btMonth"></div>
   <div class="scroll"><table><thead><tr>
-    <th></th><th>Тикер</th><th title="Когда сигнал появился в сканере — закрытие часовой свечи. В этот момент и вход.">Время сигнала</th><th>Сторона</th><th>Тип уровня</th><th>Уровень</th><th>p</th>
-    <th>Вход</th><th>Стоп</th><th>Тейк</th><th>Риск%</th><th title="Оценка сигнала 0–10">Оценка</th><th>Длит.</th><th>Исход</th>
+    <th></th><th>Тикер</th><th title="Когда сигнал появился в сканере — закрытие часовой свечи. В этот момент и вход.">Время сигнала</th><th>Сторона</th><th>Тип уровня</th><th>Уровень</th>
+    <th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала (10% объёма 5м ÷ 16.5×)">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th><th>Длит.</th><th>Исход</th>
   </tr></thead><tbody id="bttb"></tbody></table></div>
   <div class="note" style="margin-top:8px">Показаны последние 300. Данные бэктеста живут до перезагрузки страницы.</div>
 </div>
@@ -1262,6 +1275,7 @@ const HOLD_CRYPTO=168, HOLD_RU=48, LOOKBACK=6, MAXRISK=0.20;
 function getHold(){ return MKT==='ru'?HOLD_RU:HOLD_CRYPTO; }
 const HOLD=168; // fallback — заменяем ниже через getHold() в recompute и scanSymbol
 let LAST=[], BT=[], REGIME=null, EX=null, MKT='crypto';
+let SC_BEST=false, BT_BEST=false;   // «The best» (ТЕСТОВЫЙ режим): отдельно для вкладок «Сигналы» и «Бэктест»
 let PRIO_RAND=null;
 let SEARCH_OOS=false, OOS_T=null, OOS_END=null;   // проверка вне выборки в переборе
 let SEARCH_TYPE=null, SEARCH_DIV=1, MINWK_OVR=null;   // перебор в режиме «Оба»: тип, доля бюджета, минимум сделок/нед
@@ -1296,18 +1310,27 @@ function isStock(base){ return STOCKS.test(base)||STOCK_PREFIX.test(base); }
 /* ===== фильтры ===== */
 const FIDS=['thr','stop','str','cross','touch','acc','dist','over','vc','vol','bias','side','cap','age','kind','maxrisk','hours','daycap','streak','pause',
   'free','wall','daypos','body','wick','brkbars','volret','dow','ema','appr','atrr','dens','round','green','streakd','atrd','minn','cov','preacc','smooth','d1ag','poke','msc',
-  'rusqueeze','ruclose','ruimoex','rurelstr'];
+  'rusqueeze','ruclose','ruimoex','rurelstr','rubase'];
 const DEF={thr:0.20,stop:10,tgt:3,str:0,cross:99,touch:null,acc:null,dist:99,over:0,vc:null,vol:0,bias:null,side:null,cap:3,age:0,
            kind:null,maxrisk:99,hours:'9-23',daycap:99,streak:0,pause:24,
            free:0,wall:0,daypos:null,body:0,wick:0,brkbars:null,volret:0,dow:null,ema:null,
-           rusqueeze:null,ruclose:null,ruimoex:null,rurelstr:null,
+           rusqueeze:null,ruclose:null,ruimoex:null,rurelstr:null,rubase:0,
            appr:null,atrr:null,dens:99,round:null,green:null,streakd:0,atrd:null,minn:8,cov:null,preacc:null,smooth:null,d1ag:null,poke:0,msc:0};
 function readF(pfx){
   const f={};
   for(const id of FIDS){
     const e=el('#'+pfx+'_'+id);
     const v=e?e.value:'auto';
-    if(v==='auto') f[id]=DEF[id];
+    if(v==='auto'&&id==='hours'){
+      // «авто» для часов входа подчиняется чекбоксу «без ночи»: выключен — сканируем круглосуточно
+      const nn=el('#noNight');
+      f[id]=(nn&&!nn.checked)?'0-24':DEF[id];
+    }
+    else if(v==='auto'&&id==='side'){
+      // «авто» для стороны: ложный пробой — только SHORT, пробой/оба — обе стороны
+      f[id]=stratOf(pfx)==='fbo'?0:DEF[id];
+    }
+    else if(v==='auto') f[id]=DEF[id];
     else if(['kind','hours','daypos','dow','appr','atrr','round','green','atrd'].includes(id)) f[id]=v;
     else if(['touch','acc','bias','side','ema','brkbars','cov','preacc','smooth','d1ag'].includes(id)) f[id]=+v;
     else f[id]=parseFloat(v);
@@ -1406,10 +1429,13 @@ function passes(s,f){
   }
   // РУ-фильтры — проверяются только для акций Мосбиржи
   if(s.mkt==='ru'){
+    // 6.92: раньше сравнивалось со строкой '1', а readF отдаёт число → эти 4 фильтра НИКОГДА не работали. Исправлено.
     if(+f.rusqueeze===1&&!s.ru_squeeze) return false;
     if(+f.ruclose===1&&!s.ru_close_pos) return false;
     if(+f.ruimoex===1&&!s.ru_imoex_ok) return false;
     if(+f.rurelstr===1&&!s.ru_rel_str) return false;
+    // 6.92: «база у уровня» — сколько из 8 часов до пробоя цена закрывалась у уровня (±0.3 ATR дня); по сделкам пользователя
+    if(f.rubase&&s.type==='brk'&&(s.ru_base8==null||s.ru_base8<f.rubase)) return false;
   }
   if(f.atrd){
     const a=s.atrD_pct;
@@ -1458,6 +1484,42 @@ function smExtra(s){ const side=s.d===1?1:-1;
            Math.min(+s.p||0,0.6)*Math.min(+s.p||0,0.6)*10 ]; }                          // нелинейность вероятности модели
 function smPredict(m,s){ const x=smRaw(s); if(m.ext) x.push(...smExtra(s)); let z=m.b0;
   for(let j=0;j<x.length;j++) z+=m.w[j]*Math.max(-3,Math.min(3,(x[j]-m.mu[j])/(m.sd[j]||1))); return 1/(1+Math.exp(-z)); }
+// ===== Оценка ЛП v5 (6.88) — по слепой разметке 300 графиков + отслеживаемым сделкам (вес 3) =====
+// Признаки: касания уровня за 24ч и всего, сколько стояла у уровня (12ч), скорость подхода (ap03 и approach_atr), ход за 12ч,
+// ликвидность (объём 5м), сила прокола (v6_poke). Логистическая регрессия на рангах; оценка = перцентиль среди ЛП-шортов
+// июль–окт. (0–10). Штрафы: дёрганая монета (шип H1 ≥8× обычного) −3, хвост прокола >3 стопов −2.
+// Проверка: «беру» vs «не беру» AUC 0.80 (кросс-проверка); медиана «беру» 8.3, «не беру» 4.1; отслеживаемые 6.1–9.8 (медиана 8.5).
+// Это оценка ПОХОЖЕСТИ НА ВАШ ВЫБОР: на исход не влияет (по диапазонам 0–2…8–10: 22–27% на марте–июне и июле–октябре).
+const SCORE_V5={"K": ["lv_touch24", "ap03", "near12", "approach_atr", "lv_touch", "mv12", "log_vol5m", "v6_poke"], "Q": [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 9.0, 21.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 7.5, 8.0, 9.0, 11.0, 12.0, 14.0, 17.0, 22.0, 31.0, 63.0, 200.0], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 8.4, 9.0, 10.0, 11.0, 12.0], [0.552507, 1.13327, 1.29161, 1.38873, 1.48672, 1.57065, 1.62815, 1.69294, 1.76373, 1.82013, 1.89518, 1.96853, 2.01986, 2.07397, 2.13774, 2.18991, 2.24454, 2.32316, 2.40104, 2.44144, 2.517, 2.57917, 2.62774, 2.68826, 2.77546, 2.85566, 2.94007, 3.04083, 3.14897, 3.24776, 3.36436, 3.49924, 3.63815, 3.79918, 4.00183, 4.19415, 4.47627, 4.87653, 5.27423, 6.06748, 8.11022], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 10.65, 14.0, 20.0, 37.0], [-2.7351, -0.222356, 0.00645585, 0.058755, 0.0911136, 0.122275, 0.153012, 0.177282, 0.197316, 0.223582, 0.243082, 0.26393, 0.288454, 0.311485, 0.333274, 0.360784, 0.382528, 0.399457, 0.423294, 0.440935, 0.46647, 0.49405, 0.517453, 0.542725, 0.575847, 0.603549, 0.641137, 0.679245, 0.715168, 0.758542, 0.79658, 0.837602, 0.889565, 0.970417, 1.03218, 1.12611, 1.24185, 1.36748, 1.55922, 1.96316, 4.38528], [1.15476, 2.02547, 2.26857, 2.44313, 2.58131, 2.67321, 2.80653, 2.91632, 3.00914, 3.06953, 3.1283, 3.19399, 3.25529, 3.31774, 3.37628, 3.43382, 3.49654, 3.55, 3.60711, 3.6617, 3.71244, 3.7534, 3.79708, 3.84467, 3.89641, 3.93726, 3.99264, 4.04122, 4.0974, 4.17415, 4.24342, 4.31254, 4.37727, 4.48099, 4.57192, 4.69231, 4.82215, 4.98269, 5.17147, 5.50424, 7.06997], [0.335062, 0.710206, 0.821434, 0.903679, 0.968171, 1.02676, 1.07211, 1.13449, 1.1742, 1.22202, 1.26528, 1.30226, 1.34569, 1.40582, 1.44463, 1.47745, 1.50769, 1.54534, 1.58278, 1.61989, 1.65452, 1.69165, 1.73912, 1.79185, 1.83993, 1.89508, 1.96329, 2.01708, 2.08099, 2.15655, 2.24787, 2.32208, 2.42956, 2.55691, 2.69331, 2.892, 3.2383, 3.61422, 4.02328, 4.87841, 7.43972]], "w": [-1.2302, -1.0357, -2.0247, 1.3348, -1.2591, -0.4805, 0.6303, 0.6893], "b": 0.0297, "P": [-4.9112, -3.181, -2.6889, -2.2765, -1.9701, -1.7033, -1.4221, -1.1623, -0.887, -0.6515, -0.4252, -0.2317, -0.087, 0.0956, 0.2595, 0.4697, 0.6802, 0.8616, 1.025, 1.2242, 1.7492]};
+function scoreV5raw(s){
+  const v={lv_touch24:s.lv_touch24,ap03:s.ap03,near12:s.near12,approach_atr:s.approach_atr??s.appr,lv_touch:s.lv_touch,mv12:s.mv12,
+    log_vol5m:(s.vol5mAvg!=null?Math.log10(Math.max(s.vol5mAvg,1)):null),v6_poke:s.v6_poke};
+  let z=SCORE_V5.b;
+  for(let j=0;j<SCORE_V5.K.length;j++){ const x=v[SCORE_V5.K[j]]; if(x==null||!isFinite(x)) return null;
+    const q=SCORE_V5.Q[j]; let lo=0,hi=q.length; while(lo<hi){ const m=(lo+hi)>>1; if(q[m]<=x) lo=m+1; else hi=m; }
+    z+=SCORE_V5.w[j]*lo/q.length; }
+  const P=SCORE_V5.P; if(z<=P[0]) return 0; if(z>=P[P.length-1]) return 10;
+  for(let i=1;i<P.length;i++) if(z<=P[i]) return ((i-1)+(z-P[i-1])/((P[i]-P[i-1])||1))*10/(P.length-1);
+  return 10;
+}
+function scoreV5(s){
+  let v=scoreV5raw(s); if(v==null) return null;
+  if(s.g_spk!=null&&s.g_spk>=8) v-=3;
+  if(s.pk_ext!=null&&s.e!=null&&s.atrD!=null){ const d=s.st!=null?Math.abs(s.st-s.e):Math.max(0.10*s.atrD,0.02*s.e); if(d>0&&Math.abs(s.pk_ext-s.e)/d>3) v-=2; }
+  return Math.max(0,v);
+}
+// 6.89: оценка ЛП = ярусы. Шорт, прошедший правило «исход» (D1 ≥2 зелёных подряд, объём часа перед сигналом ≤1.0 от среднего
+// за 3 часа до него, без шипа H1 ≥8× и без хвоста прокола >3 стопов) → 8–10 (8 + 0.2×вкус v5). Остальные → 0–7.9 (0.79×вкус v5, штрафы).
+// Проверка (тейк 3R, март–июнь / июль–окт.): 9–10 — 32.8% / 31.3%; 8–9 — 29.8% / 31.4%; 7–8 — 28.7% / 25.7%; 5–7 — 20.1% / 21.7%; 0–3 — 24.6% / 22.5%.
+// Лонги правилом «исход» не проверялись → максимум 7.9. Нет поля объёма (старый скан) → считается как «не прошёл ярус».
+function scoreV6(s){
+  const T=scoreV5raw(s); if(T==null) return null;
+  const side=s.side||(s.d===0?'short':'long');
+  const d=s.st!=null&&s.e!=null?Math.abs(s.st-s.e):(s.atrD!=null&&s.e!=null?Math.max(0.10*s.atrD,0.02*s.e):null);
+  const spike=s.g_spk!=null&&s.g_spk>=8, poke=(s.pk_ext!=null&&d>0)?Math.abs(s.pk_ext-s.e)/d>3:false;
+  if(side==='short'&&s.d1_streak!=null&&s.vtr!=null&&s.d1_streak>=2&&s.vtr<=1.0&&!spike&&!poke) return 8+0.2*T;
+  return Math.max(0,Math.min(7.9,0.79*T-(spike?3:0)-(poke?2:0)));
+}
 function signalScore(s){
   // v2 (после ручной оценки 50 сделок): у ложного пробоя к 34 признакам добавлены 6 новых — сидение
   // за уровнем, вход далеко от уровня, аномалия, D1 сильно против, чёткий и чистый уровень, нелинейная p.
@@ -1468,6 +1530,8 @@ function signalScore(s){
   // ступени не было верхней границы: любой «сильный» по фильтрам сигнал попадал в неё и получал
   // 9.4–10. Плюс убран признак «сторона сделки» (лонг/шорт): он отражал направление рынка в период
   // обучения, а не качество сигнала.
+  // ЛП: новая оценка v3 (похожесть на эталонные сделки). Пробой — прежняя модель.
+  if((s.type||'fbo')==='fbo'){ const cr=MKT==='crypto'&&s.mkt!=='ru'; const v6=cr?scoreV6(s):null; if(v6!=null) return Math.round(v6*10)/10; /* 6.90: v6 только для крипты; MOEX — прежняя оценка */ const r=hwScore(s); if(r) return Math.round(r.score*10)/10; }
   const M=s.type==='brk'?SCORE_MODEL.B:SCORE_MODEL.F, st=M.st, p=smPredict(M,s);
   let v;
   if(p<=st[0].c) v=st[0].v;
@@ -1475,6 +1539,93 @@ function signalScore(s){
   else for(let i=1;i<st.length;i++){ if(p<=st[i].c){ const a=st[i-1],b=st[i]; v=a.v+(b.v-a.v)*(p-a.c)/((b.c-a.c)||1); break; } }
   return Math.round(Math.max(0,Math.min(1,(v-SCORE_MODEL.vmin)/(SCORE_MODEL.vmax-SCORE_MODEL.vmin)))*100)/10;
 }
+// ===== Оценка ложного пробоя v4 — «похожесть на эталонные сделки» =====
+// v3 (6.75) была слишком щедрой: сходство считалось по МАКСИМУМУ среди эталонов с односторонним
+// штрафом, и любой средний сигнал «перекрывал» самые слабые эталоны → 9–10 баллов почти всем верхним.
+// v4 построена на 3 месяцах (июль–октябрь 2026, 3900 сигналов ЛП, 235 монет) против 25 эталонных сделок:
+//  1) модель (логистическая регрессия с сильной регуляризацией) — общие черты эталонов: сильный уровень,
+//     нет касаний уровня за 24ч до пробоя, цена не «стоит» у уровня перед проколом, быстрый подход,
+//     всплеск объёма на проколе, уровень — явный экстремум (цена уходила от него далеко), вход близко
+//     к уровню, за уровнем цена была недолго;
+//  2) шкала по всем сигналам 3 месяцев: медиана — 4, верхние 20% — от 7, верхние 7% — от 8.5;
+//  3) «память»: сетап, почти совпадающий с конкретной эталонной сделкой, получает 7–10 (касается ~4%
+//     сигналов). Итог = максимум из модели и памяти.
+// Проверка: эталон, исключённый из обучения, выше 75% всех сигналов (AUC 0.75). Исход (тейк/стоп) оценка
+// НЕ предсказывает — на 3 месяцах ни один признак не предсказывал исход; это мера похожести на твой стиль.
+const HW_SCORE={names:["str5","str4","t24","touch","near12","ap03","vbrk","poke","prom","dist","ret","cross","brk"],
+  mu:[0.50231, 0.22003, 0.69887, 0.81753, 0.47093, 1.91589, 1.6812, 1.8121, 1.05635, 0.49053, 0.11379, 1.40318, 1.24963],
+  sd:[0.49999, 0.41427, 0.71325, 0.8509, 0.34717, 0.94611, 0.89653, 0.96075, 0.90827, 0.49343, 0.14682, 0.81183, 0.67524],
+  w:[0.59455, 0.49632, -0.62563, -0.07586, -0.56015, -0.32846, 0.36901, 0.12336, 0.35748, -0.76293, -0.16447, 0.01449, -0.30904],b:-1.21046,
+  pv:[-9.27921, -2.19821, -1.13505, 0.45944, 1.43379, 2.8977],val:[0, 2.5, 4, 7, 8.5, 10],memR:0.3,
+  lab:["ALGO 08.10","RAYDIUM 27.09","RENDER 06.10","ETHFI 06.10","S 06.10","WIF 02.10","1000BONK 29.09","STX 30.09","MAGIC 04.10","ZK 27.09","RE 01.10","APE 27.09","OPN 07.10","ATH 02.10","FF 29.09","RVN 05.10","KMNO 30.09","AZTEC 28.09","COW 27.09","ZKP 05.10","TWT 30.09","0G 06.10","AERO 01.10","COW 29.09","WLD 27.09","ALGO 08.10","RAYDIUM 27.09","RENDER 06.10","ETHFI 06.10","S 06.10","WIF 02.10","1000BONK 29.09","STX 30.09","MAGIC 04.10","ZK 27.09","RE 01.10","APE 27.09","OPN 07.10","ATH 02.10","FF 29.09","RVN 05.10","KMNO 30.09","AZTEC 28.09","COW 27.09","ZKP 05.10","TWT 30.09","0G 06.10","AERO 01.10","COW 29.09","WLD 27.09"],
+  lib:[[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,2.695,2.699,1.327,-0.982,-0.759,-0.497,-0.824],[0.995,-0.531,-0.008,-0.146,-0.876,-0.56,-0.206,1.217,0.367,-0.918,-0.703,-0.497,0.202],[0.995,-0.531,-0.98,-0.961,-1.116,-0.864,-0.675,-0.078,-0.159,-0.179,-0.016,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,1.123,3.114,0.813,0.524,0.319,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,-0.396,-1.292,-0.38,2.642,0.13,-0.624,-0.485,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-0.636,-0.56,0.601,0.648,-0.55,-0.342,-0.234,-0.497,0.202],[-1.005,1.883,-0.98,-0.961,-1.357,-0.864,0.447,0.559,0.517,1.334,1.852,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,0.857,0.036,1.366,-0.676,-0.391,-0.497,-0.824],[-1.005,-0.531,-0.008,0.33,-1.116,-0.864,1.44,1.105,2.235,-0.115,0.157,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,0.324,-0.864,-0.217,0.314,-0.41,0.292,0.112,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,0.411,1.335,0.186,-0.921,-0.701,-0.497,1.229],[-1.005,1.883,-0.008,-0.146,-0.876,-0.324,-0.488,-0.071,-0.308,-0.629,-0.538,-0.497,-0.824],[-1.005,1.883,-0.98,-0.961,-0.156,-0.864,0.383,0.262,-0.119,-0.764,-0.586,-0.497,0.202],[-1.005,-0.531,-0.98,-0.961,-0.876,-0.56,1.291,1.035,1.256,-0.154,0.213,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,1.044,0.601,-0.292,0.34,-0.82,-0.969,-0.76,-0.497,1.229],[-1.005,-0.531,-0.008,-0.146,-1.116,-0.864,5.568,2.388,1.086,0.789,1.496,-0.497,-0.224],[-1.005,1.883,-0.008,-0.146,-0.876,-0.56,-0.651,-0.636,-0.447,-0.364,-0.376,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,0.146,0.209,1.416,-0.525,0.119,-0.497,-0.824],[0.995,-0.531,0.964,0.668,-0.396,0.173,0.305,-0.122,1.57,-0.813,-0.567,0.735,0.803],[-1.005,1.883,-0.98,-0.961,-1.357,-1.292,2.213,0.681,0.108,-0.673,-0.392,-0.497,1.7],[0.995,-0.531,-0.98,-0.961,-0.156,-0.56,0.664,0.421,0.492,-0.932,-0.734,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-0.876,-0.324,0.194,0.046,-0.633,-0.36,-0.242,-0.497,-0.824],[-1.005,1.883,-0.98,-0.961,-1.116,-0.864,-0.135,-0.571,-0.609,0.274,0.291,-0.497,-0.824],[-1.005,-0.531,-0.98,1.483,-1.116,-0.56,-0.416,-0.729,1.502,-0.459,-0.326,1.967,-0.824],[0.995,-0.531,-0.008,-0.146,-1.116,-0.864,-0.36,-0.112,-0.161,-0.958,-0.745,-0.497,1.031],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,2.695,2.699,1.306,-0.982,-0.888,-1.113,-0.824],[0.995,-0.531,-0.008,-0.146,-0.876,-0.56,-0.206,1.217,0.357,-0.918,-0.764,-0.497,0.202],[0.995,-0.531,-0.98,-0.961,-0.636,-0.864,-0.675,-0.078,-0.279,-0.179,-0.758,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,1.123,3.114,0.667,0.524,-0.582,0.735,-0.824],[0.995,-0.531,-0.008,-0.146,-0.396,-1.292,-0.38,2.642,0.121,-0.624,-0.543,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-0.636,-0.56,0.601,0.648,-0.561,-0.342,-0.301,-0.497,0.202],[-1.005,1.883,-0.98,-0.961,-1.357,-0.864,0.447,0.559,0.517,1.334,1.852,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,0.857,0.036,1.362,-0.676,-0.418,-0.497,-0.824],[-1.005,-0.531,-0.008,0.33,-1.116,-0.864,1.44,1.105,2.194,-0.115,-0.096,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,0.324,-0.864,-0.217,0.314,-0.434,0.292,-0.036,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,-1.357,-0.864,0.411,1.335,0.179,-0.921,-0.739,-0.497,1.229],[-1.005,1.883,-0.008,-0.146,-0.636,-0.324,-0.488,-0.071,-0.331,-0.629,-0.68,-0.497,-0.824],[-1.005,1.883,-0.98,-0.961,-0.636,-0.864,0.383,0.262,-0.008,-0.764,0.098,-0.497,0.202],[-1.005,-0.531,-0.98,-0.961,-0.876,-0.56,1.291,1.035,1.283,-0.154,0.384,-0.497,-0.824],[0.995,-0.531,0.56,0.33,1.044,0.837,-0.292,-0.448,-0.796,-0.969,-0.612,0.735,0.533],[-1.005,-0.531,-0.008,-0.146,-1.116,-0.864,5.568,2.388,0.925,0.789,0.503,0.119,-0.224],[-1.005,1.883,-0.008,-0.146,-0.876,-0.56,-0.651,-0.636,-0.436,-0.364,-0.303,-0.497,-0.824],[0.995,-0.531,-0.98,-0.961,-1.357,-1.292,0.146,0.209,1.481,-0.525,0.521,-0.497,-0.824],[0.995,-0.531,0.964,0.668,-0.396,0.173,0.305,-0.122,1.589,-0.813,-0.449,0.735,0.803],[-1.005,1.883,-0.98,-0.961,-1.357,-1.292,2.213,0.681,0.053,-0.673,-0.732,-0.497,1.7],[0.995,-0.531,-0.98,-0.961,-1.116,-0.864,0.664,0.421,0.593,-0.932,-0.113,-0.497,-0.224],[0.995,-0.531,-0.98,-0.961,-0.876,-0.324,0.194,0.046,-0.633,-0.36,-0.242,-0.497,-0.824],[-1.005,1.883,-0.98,-0.961,-1.116,-0.864,-0.135,-0.571,-0.609,0.274,0.291,-0.497,-0.824],[-1.005,-0.531,-0.98,1.483,-1.116,-0.56,-0.416,-0.729,1.502,-0.459,-0.326,1.967,-0.824],[0.995,-0.531,-0.008,-0.146,-1.116,-0.864,-0.36,-0.112,-0.161,-0.958,-0.745,-0.497,1.031]]};
+const HW_LN=x=>Math.log1p(Math.max(0,x));
+function hwX(s){
+  if(s.lv_touch==null||s.ap03==null||s.near12==null||s.lv_prom==null||s.brk_run==null) return null;
+  return [s.strength===5?1:0, s.strength===4?1:0, HW_LN(s.lv_touch24), HW_LN(s.lv_touch), s.near12/12, HW_LN(s.ap03),
+          HW_LN(+s.vbrk||0), Math.min(+s.v6_poke||0,6), Math.min(s.lv_prom,5), Math.min(+s.dist_atr||0,3), Math.min(s.ret_d||0,1),
+          Math.min(+s.crosses||0,16)/4, HW_LN(s.brk_run)];
+}
+// {score, model, mem, near} или null (сигнал из старого скана без новых признаков)
+function hwScore(s){
+  const x=hwX(s); if(!x) return null;
+  const S=HW_SCORE, z=x.map((v,j)=>(v-S.mu[j])/S.sd[j]);
+  let dec=S.b; for(let j=0;j<z.length;j++) dec+=S.w[j]*z[j];
+  const pv=S.pv, val=S.val;
+  let model;
+  if(dec<=pv[0]) model=val[0]; else if(dec>=pv[pv.length-1]) model=val[val.length-1];
+  else for(let k=1;k<pv.length;k++) if(dec<=pv[k]){ model=val[k-1]+(val[k]-val[k-1])*(dec-pv[k-1])/((pv[k]-pv[k-1])||1); break; }
+  let dmin=1e9, near=-1;
+  for(let i=0;i<S.lib.length;i++){ const r=S.lib[i]; let q=0; for(let j=0;j<z.length;j++){ const d=z[j]-r[j]; q+=d*d; } q=Math.sqrt(q/z.length); if(q<dmin){ dmin=q; near=i; } }
+  const mem=dmin<=S.memR?10-3*dmin/S.memR:0;
+  return {score:Math.max(0,Math.min(10,Math.max(model,mem))), model, mem, near:S.lab[near], dist:dmin};
+}
+// Признаки уровня/подхода/прокола по H1 (считаются в scanSymbol для каждого ЛП)
+function fboShape(h1c,i,L,brSide,formedTs,atrD,vMed){
+  const dr=brSide==='long'?1:-1, beyond=c=>dr*(c-L)>0, H=3600000, D=86400000;
+  let j=i-1;
+  if(beyond(h1c[j].c)){ while(j-1>=0&&beyond(h1c[j-1].c)&&h1c[j-1].ts>formedTs) j--; }
+  else { let f=-1; for(let k=i-6;k<i;k++) if(k>=0&&beyond(h1c[k].c)){ f=k; break; } j=f>=0?f:i-1; }
+  const bstart=h1c[j].ts;
+  let touch=0,touch24=0;
+  for(let k=0;k<j;k++){ const b=h1c[k]; if(b.ts<=formedTs||b.ts<formedTs+D||b.ts>=bstart) continue;
+    if(b.l<=L&&L<=b.h){ touch++; if(b.ts>=bstart-24*H) touch24++; } }
+  const ap=th=>{ for(let k=j-1;k>Math.max(-1,j-200);k--) if(dr*(L-h1c[k].c)>=th*atrD) return (bstart-h1c[k].ts)/H; return 200; };
+  let near=0; for(let k=Math.max(0,j-12);k<j;k++) if(Math.abs(h1c[k].c-L)<=0.25*atrD) near++;
+  const c12=h1c[Math.max(0,j-12)].c;
+  let vmax=0; for(let k=j;k<=i;k++) vmax=Math.max(vmax,h1c[k].vol_quote||0);
+  // насколько далеко цена уходила от уровня после формирования (уровень — явный экстремум), в ATR_D
+  let prom=-Infinity;
+  for(let k=0;k<j;k++){ const b=h1c[k]; if(b.ts<=formedTs||b.ts<formedTs+D||b.ts>=bstart) continue;
+    const away=dr*(L-(dr>0?b.l:b.h)); if(away>prom) prom=away; }
+  if(prom===-Infinity) prom=0;
+  // «Дёрганость» (для The best): самый большой H1-бар за 48 ч до бара сигнала / медианный бар за 167 ч
+  const rngs=[]; for(let k=Math.max(0,i-167);k<i;k++) rngs.push(h1c[k].h-h1c[k].l);
+  const srt=rngs.slice().sort((a,b)=>a-b), nn=srt.length;
+  const med=nn?(nn%2?srt[(nn-1)/2]:(srt[nn/2-1]+srt[nn/2])/2):0;
+  let spk=0; for(let k=Math.max(0,i-48);k<i;k++) spk=Math.max(spk,h1c[k].h-h1c[k].l);
+  // экстремум прокола за 3 последних бара (включая бар сигнала) — для «хвост прокола / стоп»
+  let pk=dr>0?-Infinity:Infinity; for(let k=Math.max(0,i-2);k<=i;k++) pk=dr>0?Math.max(pk,h1c[k].h):Math.min(pk,h1c[k].l);
+  // Затухание объёма перед сигналом: объём бара i-1 / средний объём баров i-4..i-2 (для режима The best «исход»)
+  let vtr=null; if(i>=4){ const vb=(h1c[i-2].vol_quote||0)+(h1c[i-3].vol_quote||0)+(h1c[i-4].vol_quote||0); if(vb>0) vtr=(h1c[i-1].vol_quote||0)/(vb/3); }
+  return {g_spk:med>0?spk/med:null, pk_ext:isFinite(pk)?pk:null, vtr, lvB:bstart, lv_touch:touch, lv_touch24:touch24, ap03:ap(0.3), near12:near,
+          mv12:atrD>0?dr*(L-c12)/atrD:0, vbrk:vMed>0?vmax/vMed:0,
+          lv_prom:atrD>0?prom/atrD:0, brk_run:i-j, ret_d:atrD>0?dr*(L-h1c[i].c)/atrD:0};
+}
+// Уточнение по 5-минуткам: касания уровня за 24ч до пробоя и скорость подхода (мин от 0.3 ATR_D)
+// m5 — массив {t|ts,h,l,c}; возвращает true, если поля обновлены
+function fboM5Refine(s,m5){
+  if(!s||s.lvB==null||!m5||!m5.length||!(s.atrD>0)) return false;
+  const L=s.lv, dr=s.side==='short'?1:-1, D=86400000, H=3600000, fts=s.t-(s.level_age_h||0)*H;
+  const bs=s.lvB, lo=Math.max(fts+D,bs-96*H), from24=Math.max(lo,bs-24*H);
+  const bars=m5.map(b=>({ts:b.ts??b.t,h:+b.h,l:+b.l,c:+b.c})).sort((a,b)=>a.ts-b.ts);
+  if(!bars.length||bars[0].ts>from24) return false;           // не хватает истории — не трогаем
+  let t24=0; for(const b of bars) if(b.ts>=from24&&b.ts<bs&&b.l<=L&&L<=b.h) t24++;
+  let ap=96*60; for(let k=bars.length-1;k>=0;k--){ const b=bars[k]; if(b.ts>=bs) continue; if(dr*(L-b.c)>=0.3*s.atrD){ ap=(bs-b.ts)/60000; break; } }
+  s.m5t24=t24; s.m5ap=ap; return true;
+}
+const HW_FEAT_KEYS=['g_spk','pk_ext','vtr','lvB','lv_touch','lv_touch24','ap03','near12','mv12','vbrk','lv_prom','brk_run','ret_d','dist_atr','m5t24','m5ap','v6_poke','vol_contraction','atrD','level_age_h','strength','crosses','vol5mAvg','posMax','vol_mult'];
+function hwCopyFeat(dst,src){ for(const k of HW_FEAT_KEYS) if(src[k]!==undefined) dst[k]=src[k]; return dst; }
 function scoreColor(v){ return v>=7?'take':v>=4.5?'':'stop'; }
 function scoreEl(v){ return `<b class="${scoreColor(v)}">${v!=null?v.toFixed(1):'—'}</b>`; }
 
@@ -2075,6 +2226,7 @@ function scanSymbol(base,sym,d1,h1,opt){
               body_ratio: (bar.h-bar.l)>0 ? Math.abs(bar.c-bar.o)/(bar.h-bar.l) : 0,
               wick_ratio: (bar.h-bar.l)>0 ? (brSide==='long' ? (Math.min(bar.o,bar.c)-bar.l) : (bar.h-Math.max(bar.o,bar.c)))/(bar.h-bar.l) : 0,
               // РУ-специфичные признаки (вычисляются только для MKT==='ru')
+              ru_base8: MKT==='ru'?h1cut.slice(-9,-1).filter(b=>Math.abs(b.c-lv.price)<=0.3*atrD).length:null,
               ru_squeeze: MKT==='ru'?(()=>{
                 const w=h1cut.slice(-6,-1); if(w.length<5) return 0;
                 const ranges=w.map(b=>b.h-b.l);
@@ -2090,7 +2242,7 @@ function scanSymbol(base,sym,d1,h1,opt){
               atr_ratio: atrD>0 ? aH1/atrD : 0,
               lvl_density: levels.filter(L=>Math.abs(L.price-lv.price)<=atrD).length,
               round_dist: roundDist(lv.price), green_ratio: greenRatio(h1cut), d1_streak: d1Streak(d1c,bar.ts),
-              turn24:0, p:0});   // модель обучена на ложных пробоях — для пробоя её оценка не применяется
+              turn24:0, p:0, vol5mAvg:vMed/12, posMax:(vMed/12)*0.10});   // модель обучена на ложных пробоях — для пробоя её оценка не применяется
           }
         }
       }
@@ -2173,7 +2325,10 @@ function scanSymbol(base,sym,d1,h1,opt){
         round_dist: roundDist(lv.price),
         green_ratio: greenRatio(h1cut),
         d1_streak: d1Streak(d1c,bar.ts),
-        turn24: 0};
+        turn24: 0,
+        vol5mAvg: vMed/12,
+        posMax: (vMed/12)*0.10};
+      Object.assign(s, fboShape(h1c,i,lv.price,brSide,lv.formedTs,atrD,vMed));
       s.p=modelPredict(s);
       out.push(s);
     }
@@ -2222,6 +2377,27 @@ function fmt(v){
   if(a>=1) return v.toFixed(3);
   if(a>=0.01) return v.toFixed(5);
   return v.toPrecision(4);
+}
+function fmtStop(t){
+  // Стоп в цене + рядом в скобках его расстояние от входа в процентах.
+  const e=t.e, st=t.st;
+  if(e==null||st==null||isNaN(e)||isNaN(st)||!e) return fmt(st);
+  const pct=Math.abs(e-st)/e*100;
+  return `${fmt(st)} <span class="muted" style="font-size:11px">(${pct.toFixed(2)}%)</span>`;
+}
+function fmtBE(t){
+  // Цена, на которой сработает безубыток (+1.5R от входа в сторону тейка) — удобно под уведомление.
+  const e=t.e, st=t.st;
+  if(e==null||st==null||isNaN(e)||isNaN(st)) return '—';
+  const risk=Math.abs(e-st);
+  const lvl=t.d?e+BE_TRIGGER_R*risk:e-BE_TRIGGER_R*risk;
+  return fmt(lvl);
+}
+function fmtVol(v){
+  if(!v||v<=0) return '—';
+  if(v>=1e6) return '$'+(v/1e6).toFixed(2)+'M';
+  if(v>=1e3) return '$'+(v/1e3).toFixed(1)+'K';
+  return '$'+v.toFixed(0);
 }
 function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
 /* Форматирует длительность сделки: ms → "3ч 20м" или "45м" */
@@ -2293,14 +2469,25 @@ async function expandRow(tr,t,cols){
       <div><span>сторона</span> <b class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</b></div>
       <div><span>уровень</span> <b>${fmt(t.lv)}</b></div>
       <div><span>вход</span> <b>${fmt(t.e)}</b>${t.ewM!=null?'<span class="muted" style="font-size:11px"> (окно '+ewStr(t.ewM)+')</span>':''}</div>
-      <div><span>стоп</span> <b class="stop">${fmt(t.st)}</b></div>
+      <div><span>стоп</span> <b class="stop">${fmtStop(t)}</b></div>
+      <div><span>безубыток</span> <b>${fmtBE(t)}</b></div>
       <div><span>тейк</span> <b class="take">${fmt(t.tk)}</b></div>
       <div><span>риск</span> <b>${(t.rp*100).toFixed(2)}%</b></div>
       <div><span>тип</span> <b>${typeLbl(t)}</b></div>
-      ${t.type!=='algo'?`<div><span>p</span> <b>${pStr(t)}</b></div>
-      <div><span>сила</span> <b>${t.strength}</b></div>
+      ${t.type!=='algo'?`<div><span>сила</span> <b>${t.strength}</b></div>
       <div><span>запилов</span> <b>${t.crosses}</b></div>
-      <div><span>объём</span> <b>${(t.vol_mult??0).toFixed(1)}×</b></div>`:''}
+      <div><span>объём</span> <b>${(t.vol_mult??0).toFixed(1)}×</b></div>
+      ${MKT!=='ru'&&(t.vol5mAvg||0)>0?`<div><span>объём 5м</span> <b>${fmtVol(t.vol5mAvg)}</b></div>
+      <div><span>вход (капитал)</span> <b class="take">${fmtVol((t.posMax||0)/16.5)}</b></div>`:''}`:''}
+      ${(()=>{ const r=(t.type||'fbo')==='fbo'?hwScore(t):null; if(!r) return '';
+        const ap=t.ap03>=200?'>200 ч':(t.ap03<1?'<1 ч':Math.round(t.ap03)+' ч');
+        return `<div><span>похожесть</span> <b class="${scoreColor(r.score)}">${r.score.toFixed(1)}</b> <span class="muted" style="font-size:11px">${r.mem>r.model?'почти как эталон '+r.near:'ближе всего: '+r.near}</span></div>
+      <div><span>касаний уровня до пробоя</span> <b>${t.lv_touch} ч</b> <span class="muted" style="font-size:11px">за 24ч: ${t.lv_touch24} ч${t.m5t24!=null?' · '+t.m5t24+' баров 5м':''}</span></div>
+      <div><span>подход к уровню</span> <b>${ap}</b>${t.m5ap!=null?` <span class="muted" style="font-size:11px">на 5м ${Math.round(t.m5ap)} мин</span>`:''}</div>
+      <div><span>стояла у уровня (12ч)</span> <b>${t.near12} ч</b></div>
+      <div><span>уходила от уровня</span> <b>${(+t.lv_prom||0).toFixed(1)} ATR</b></div>
+      <div><span>за уровнем</span> <b>${t.brk_run} ч</b></div>
+      <div><span>прокол / объём</span> <b>${(+t.v6_poke||0).toFixed(1)}×ATR · ${(+t.vbrk||0).toFixed(1)}×</b></div>`; })()}
       <div><span>длит.</span> <b class="muted">${tradeDur(t)}</b></div>
       ${t.o?`<div><span>исход</span> <b>${outcomeHtml(t.o)}</b></div>`:''}
      </div>
@@ -2347,8 +2534,8 @@ function toggleWatch(t){
   let w=loadWatch();
   const i=w.findIndex(x=>x.base===t.base&&x.t===t.t);
   if(i>=0) w.splice(i,1);
-  else w.push({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
-               strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,score:t.score!=null?t.score:signalScore(t),added:Date.now()});
+  else w.push(hwCopyFeat({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
+               strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,vol5mAvg:t.vol5mAvg,posMax:t.posMax,score:t.score!=null?t.score:signalScore(t),added:Date.now()},t));
   saveWatch(w); updCounts();
 }
 function updCounts(){
@@ -2369,22 +2556,28 @@ function kpiSignals(rows){
 function renderScan(){
   const f=readF('sc');
   const winH=windowHours(), cutoff=Date.now()-winH*3600000;
-  let rows=applyAll(byStrat(LAST.filter(s=>s.t>=cutoff),stratOf('sc')),f,true,undefined,brkF('sc'));
+  // The best (тест): отбор по профилю ЛП-шортов ДО лимитов «монета 12ч / сигналов в час / недельный кап».
+  // Относится только к ложному пробою — для режима «Пробой» не применяется.
+  const scBase0=byStrat(LAST.filter(s=>s.t>=cutoff),stratOf('sc'));
+  const scBestOn=SC_BEST&&MKT==='crypto'&&stratOf('sc')!=='brk';   // The best — только крипта
+  const scSrc=scBestOn?bestSource(byStrat(LAST.filter(s=>s.t>=cutoff),'fbo')):scBase0;
+  let rows=scBestOn?bestPipeline(LAST.filter(s=>s.t>=cutoff)):applyAll(scSrc,f,true,undefined,brkF('sc'));
   const minSc=parseFloat(el('#sc_minscore')?el('#sc_minscore').value:'');
-  if(!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
+  if(!scBestOn&&!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
   window.__SCAN_ROWS__=rows;
   el('#kpi').innerHTML=kpiSignals(rows);
   // «Воронка» — где именно отсеиваются сигналы. Раньше строка статуса после скана показывала
   // сырое число сигналов за окно (до всех фильтров) и не обновлялась при смене настроек, из-за
   // чего казалось, что при +1 к недельному лимиту сделок «резко стало в разы меньше».
   try{
-    const base=byStrat(LAST.filter(s=>s.t>=cutoff),stratOf('sc'));
+    const base=scSrc;
     const fB_=brkF('sc'), fx_=s=>(fB_&&s.type==='brk')?fB_:f;
     const ok=base.filter(s=>passes(s,fx_(s))).map(s=>({...s,score:signalScore(s)})).map(s=>recompute(s,fx_(s))).filter(Boolean).filter(s=>s.rp*100<=fx_(s).maxrisk);
     const wm=scanWeekMax(), seqd=applySequential(capCluster(applyCoinLimit(ok),f.cap),f,true);
     const byW={}; for(const t of rows){ const k=isoWeekKey(t.t); byW[k]=(byW[k]||0)+1; }
     const wv=Object.values(byW), weeks=Math.max(1,windowHours()/168);
-    el('#scanFunnel').innerHTML=`Сигналов за окно: <b>${base.length}</b> → прошли фильтры: <b>${ok.length}</b> → `+
+    const bestNote=SC_BEST?(scBestOn?`<b style="color:var(--take)">The best (тест)</b>: ${BEST_MODE==='edge'?'оценка 8–10: D1-серия вверх ≥2, объём не разгонялся, без шипов и больших хвостов + отслеживаемые':'ЛП-шорты с высокой оценкой вкуса + всё из «Отслеживаемого»'}, не больше ${BEST_WEEK}/нед; фильтры панели, мин. оценка и недельный лимит здесь не действуют — так же, как в шаблоне тестировщика — кандидатов <b>${scSrc.length}</b> из <b>${scBase0.length}</b>. `:`The best относится только к ложному пробою — в этом режиме не применяется. `):'';
+    el('#scanFunnel').innerHTML=bestNote+`Сигналов за окно: <b>${base.length}</b> → прошли фильтры: <b>${ok.length}</b> → `+
       `после лимитов «монета 12ч / сигналов в час / серии стопов»: <b>${seqd.length}</b> → после лимита ${wm>=999?'(без лимита)':wm+'/нед'} (топ по оценке): <b>${rows.length}</b>`+
       `${isNaN(minSc)?'':' (с учётом оценки от '+minSc+')'}. В среднем <b>${(rows.length/weeks).toFixed(1)}</b>/нед, максимум за одну неделю: <b>${wv.length?Math.max(...wv):0}</b>.`;
   }catch(e){}
@@ -2394,8 +2587,10 @@ function renderScan(){
     tr.innerHTML=`<td class="muted">▸</td><td><span class="eye ${isWatched(t)?'on':''}" data-base="${t.base}" data-t="${t.t}">👁</span></td>`+
       `<td>${t.base}</td><td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
-      `<td>${fmt(t.lv)}</td><td>${pStr(t)}</td><td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td>`+
-      `<td class="stop">${fmt(t.st)}</td><td class="take">${fmt(t.tk)}</td><td class="muted">${(t.rp*100).toFixed(2)}%</td>`+
+      `<td>${fmt(t.lv)}</td><td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td>`+
+      `<td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
+      `<td class="muted">${MKT!=='ru'&&(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
+      `<td class="${MKT!=='ru'&&(t.posMax||0)>0?'take':'muted'}">${MKT!=='ru'&&(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
       `<td>${scoreEl(t.score)}</td>`;
     tr.querySelector('.eye').addEventListener('click',ev=>{ev.stopPropagation();toggleWatch(t);syncEyeButtons();});
     tr.addEventListener('click',()=>expandRow(tr,t,12));
@@ -2464,9 +2659,12 @@ async function renderWatch(){
     }
     tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${t.base}</td>`+
       `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
-      `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td><td>${pStr(t)}</td>`+
-      `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmt(t.st)}</td><td class="take">${fmt(t.tk)}</td>`+
-      `<td>${t._now!=null?fmt(t._now):'—'}</td><td>${scoreEl(t.score!=null?t.score:signalScore(t))}</td><td class="muted">${tradeDur(t)}</td><td>${res}</td>`;
+      `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td>`+
+      `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
+      `<td>${t._now!=null?fmt(t._now):'—'}</td>`+
+      `<td class="muted">${(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
+      `<td class="${(t.posMax||0)>0?'take':'muted'}">${(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+      `<td>${scoreEl(t.score!=null?t.score:signalScore(t))}</td><td class="muted">${tradeDur(t)}</td><td>${res}</td>`;
     tr.querySelector('.eye').addEventListener('click',ev=>{ev.stopPropagation();toggleWatch(t);renderWatch();syncEyeButtons();});
     tr.addEventListener('click',()=>expandRow(tr,t,12));
     tb.appendChild(tr);
@@ -2479,9 +2677,12 @@ async function renderWatch(){
       const tr=document.createElement('tr'); tr.className='clickable'; tr.style.opacity='0.35';
       tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${t.base}</td>`+
         `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
-        `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td><td>${pStr(t)}</td>`+
-        `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmt(t.st)}</td><td class="take">${fmt(t.tk)}</td>`+
-        `<td>—</td><td>${scoreEl(t.score!=null?t.score:signalScore(t))}</td><td class="muted">—</td><td class="muted">пропущена</td>`;
+        `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td>`+
+        `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
+        `<td>—</td>`+
+        `<td class="muted">${(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
+        `<td class="muted">${(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+        `<td>${scoreEl(t.score!=null?t.score:signalScore(t))}</td><td class="muted">—</td><td class="muted">пропущена</td>`;
       tr.querySelector('.eye').addEventListener('click',ev=>{ev.stopPropagation();toggleWatch(t);renderWatch();syncEyeButtons();});
       tr.addEventListener('click',()=>expandRow(tr,t,12));
       tb.appendChild(tr);
@@ -2534,34 +2735,40 @@ async function renderWatch(){
       const wrArr=allChains.map(c=>c.st.wr??0);
       const msArr=allChains.map(c=>c.st.ms);
       const totArr=allChains.map(c=>c.st.tot);
+      // Статистика трёх конкретных сценариев (лучший/медиана/худший по totR)
+      const bestSt =allChains.length?allChains[allChains.length-1].st:null;
+      const worstSt=allChains.length?allChains[0].st:null;
       // Группируем по итоговому денежному результату (tot = итог в R)
       const totCnt={}; for(const {st} of allChains){ const k=st.tot; totCnt[k]=(totCnt[k]||0)+1; }
       const chainProb=ch=>{ const st=watchOnePosStats(ch); return (totCnt[st.tot]||1)/top30; };
       const pBest=bestChain?chainProb(bestChain):0;
       const pWorst=worstChain?chainProb(worstChain):0;
       const pMed=medChain?chainProb(medChain):0;
+      // Вероятность «лучше медианы» и «хуже медианы» (медиана включена в обе половины для суммы 100%)
+      // «хуже или равно медиане» = всё что ≤ медианы по итогу R
+      const medTot=medChain?watchOnePosStats(medChain).tot:0;
+      const pBelowMed=allChains.filter(c=>c.st.tot<=medTot).length/top30;
+      const pAboveMed=allChains.filter(c=>c.st.tot>=medTot).length/top30;
       const pct=v=>Math.round(v*100)+'%';
       // Базовый сценарий — хронологический порядок (первая сделка первой)
       const baseChain=applyWatchOnePosFrom(allW,0);
       const baseSt=watchOnePosStats(baseChain);
-      const fmtWrRange=(arr,medVal)=>{
-        if(!arr.length) return '—';
-        const mn=Math.min(...arr), mx=Math.max(...arr);
-        const c=v=>`<span class="${v>=0.5?'take':v>=0.33?'warnc':'stop'}">${(v*100).toFixed(0)}%</span>`;
-        const cm=v=>`<b>${c(v)}</b>`;
-        return `${c(mn)} <span class="muted">…</span> ${cm(medVal??mn)} <span class="muted">…</span> ${c(mx)}`;
+      // Форматтеры для per-scenario строк (используем цвет по значению)
+      const cWr=v=>`<span class="${v>=0.5?'take':v>=0.33?'muted':'stop'}">${(v*100).toFixed(0)}%</span>`;
+      const cMs=v=>`<span class="${v<=3?'take':v<=6?'muted':'stop'}">${v}</span>`;
+      const cTot=v=>`<span class="${v>=0?'take':'stop'}">${(v>=0?'+':'')+v.toFixed(0)}R</span>`;
+      // Форматтеры: Лучший … Медиана … Худший внутри 3 карточек
+      const fmtScenWr=(best,med,worst)=>{
+        const c=v=>`<span class="${v>=0.5?'take':v>=0.33?'muted':'stop'}">${(v*100).toFixed(0)}%</span>`;
+        return `${c(best)} <span class="muted">…</span> <b>${c(med)}</b> <span class="muted">…</span> ${c(worst)}`;
       };
-      const fmtMsRange=(arr,medVal)=>{
-        if(!arr.length) return '—';
-        const mn=Math.min(...arr), mx=Math.max(...arr);
-        const c=v=>`<span class="${v<=3?'take':v<=6?'warnc':'stop'}">${v}</span>`;
-        return `${c(mn)} <span class="muted">…</span> <b>${c(medVal??mn)}</b> <span class="muted">…</span> ${c(mx)}`;
+      const fmtScenMs=(best,med,worst)=>{
+        const c=v=>`<span class="${v<=3?'take':v<=6?'muted':'stop'}">${v}</span>`;
+        return `${c(best)} <span class="muted">…</span> <b>${c(med)}</b> <span class="muted">…</span> ${c(worst)}`;
       };
-      const fmtTotRange=(arr,medVal)=>{
-        if(!arr.length) return '—';
-        const mn=Math.min(...arr), mx=Math.max(...arr);
+      const fmtScenTot=(best,med,worst)=>{
         const c=v=>`<span class="${v>=0?'take':'stop'}">${(v>=0?'+':'')+v.toFixed(0)}R</span>`;
-        return `${c(mn)} <span class="muted">…</span> <b>${c(medVal??mn)}</b> <span class="muted">…</span> ${c(mx)}`;
+        return `${c(best)} <span class="muted">…</span> <b>${c(med)}</b> <span class="muted">…</span> ${c(worst)}`;
       };
       rng.style.display='';
       const n=medSt.n;
@@ -2569,11 +2776,17 @@ async function renderWatch(){
       const note=`${allChains.length} вариантов старта (33% ранних), каждый равновероятен. `+
         `Лучший / Медианный / Худший — по итоговому R. Вероятности: доля вариантов, дающих тот же результат. `+
         `Значения меняются при обновлении списка.`;
-      rng.innerHTML=`<div class="note" style="margin-bottom:6px"><b>Диапазон (1 позиция)</b>${fewNote} — ${note} Мин … <b>медиана</b> … макс:</div>`+
+      rng.innerHTML=`<div class="note" style="margin-bottom:6px"><b>Сценарии (1 позиция)</b>${fewNote} — ${note}</div>`+
         `<div class="kpi">`+
-        `<div><label>Винрейт: мин … медиана … макс</label><b style="font-size:16px">${fmtWrRange(wrArr,medSt.wr??0)}</b></div>`+
-        `<div><label>Макс. стопов подряд</label><b style="font-size:16px">${msArr.length?fmtMsRange(msArr,medSt.ms):'—'}</b></div>`+
-        `<div><label>Итог (R)</label><b style="font-size:16px">${totArr.length?fmtTotRange(totArr,medSt.tot):'—'}</b></div>`+
+        `<div><label>Винрейт: лучший … медиана … худший</label><b style="font-size:16px">${bestSt&&medSt.n&&worstSt?fmtScenWr(bestSt.wr??0,medSt.wr??0,worstSt.wr??0):'—'}</b></div>`+
+        `<div><label>Макс. стопов подряд</label><b style="font-size:16px">${bestSt&&medSt.n&&worstSt?fmtScenMs(bestSt.ms,medSt.ms,worstSt.ms):'—'}</b></div>`+
+        `<div><label>Итог (R)</label><b style="font-size:16px">${bestSt&&medSt.n&&worstSt?fmtScenTot(bestSt.tot,medSt.tot,worstSt.tot):'—'}</b></div>`+
+        `</div>`+
+        `<div style="margin:8px 0 4px;font-size:12px;line-height:1.7">`+
+          `<span class="take">▲ Лучше медианы: <b>${pct(pAboveMed-pMed)}</b></span>&nbsp;&nbsp;`+
+          `<span class="muted">Медиана: <b>${pct(pMed)}</b></span>&nbsp;&nbsp;`+
+          `<span class="stop">▼ Хуже медианы: <b>${pct(pBelowMed-pMed)}</b></span>&nbsp;&nbsp;`+
+          `<span class="muted" style="font-size:11px">(итого: ${pct(pBelowMed-pMed)}+${pct(pMed)}+${pct(pAboveMed-pMed)}=${pct(pBelowMed-pMed+pMed+pAboveMed-pMed)})</span>`+
         `</div>`+
         `<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">`+
           `<button class="ghost" id="wScenBest"   style="padding:4px 10px;font-size:12px">▸ Лучший</button>`+
@@ -2656,59 +2869,170 @@ async function renderWatch(){
     }
   }
 }
-async function refreshWatch(){
+// 5-минутки за окно, заканчивающееся в endTs (Bybit — один запрос до 1000 баров, OKX — по 300)
+async function hwM5(sym,endTs,n){
+  if(MKT!=='crypto'||!EX||!EX.m5) return [];
+  if(EX===Bybit) return await EX.m5(sym,Math.min(1000,n),endTs);
+  let out=[],end=endTs;
+  for(let p=0;p<Math.ceil(n/300);p++){ const part=await EX.m5(sym,300,end); if(!part.length) break; out=part.concat(out); end=part[0].t; }
+  const seen={}; return out.filter(b=>seen[b.t]?false:(seen[b.t]=1)).sort((a,b)=>a.t-b.t);
+}
+// После скана: догружаем 5м для показанных ЛП и уточняем оценку (в LAST — исходные объекты сигналов)
+async function hwRefineRows(rows){
+  if(MKT!=='crypto'||!EX) return 0;
+  const todo=rows.filter(t=>(t.type||'fbo')==='fbo'&&t.lvB!=null&&t.m5t24==null).slice(0,80);
+  let n=0;
+  for(let k=0;k<todo.length;k++){
+    const t=todo[k];
+    setStatus(`уточняю оценку по 5-минуткам: ${k+1}/${todo.length} — ${t.base}`);
+    try{
+      const m5=await hwM5(t.sym,t.t+3600000,400);
+      for(const src of LAST) if(src.base===t.base&&src.t===t.t&&src.lv===t.lv&&(src.type||'fbo')==='fbo'){ if(fboM5Refine(src,m5)) n++; }
+    }catch(e){}
+    await yieldNow();
+  }
+  return n;
+}
+// Пересчёт данных сигнала по свежим свечам. Признаки считаются по уровню и часу ИЗ САМОЙ СДЕЛКИ
+// (так, как её видишь ты); сигнал скринера в тот же час на том же уровне, если найден, уточняет
+// силу уровня и время его формирования.
+async function hwRefreshSignal(t,d1,h1){
+  const h1c=lastClosed(h1), d1c=lastClosed(d1), idx=h1c.findIndex(b=>b.ts===t.t);
+  if(idx<60||MKT==='algo') return false;
+  const bar=h1c[idx], H=3600000, D=86400000, isF=(t.type||'fbo')==='fbo';
+  let m=null;
+  try{
+    const sig=scanSymbol(t.base,t.sym,d1,h1,{noNight:false,scanBars:h1c.length-idx+1,raw:true})
+      .filter(s=>(s.type||'fbo')===(t.type||'fbo')&&s.t===t.t)
+      .sort((a,b)=>Math.abs(a.lv-t.lv)-Math.abs(b.lv-t.lv));
+    if(sig[0]&&Math.abs(sig[0].lv/t.lv-1)<=0.01) m=sig[0];
+  }catch(_){}
+  // ATR дневки — как в scanSymbol: закрытые дни + текущий день, собранный из часовок
+  const dayStart=Math.floor(bar.ts/D)*D, cut=d1c.filter(b=>b.ts+D<=bar.ts), td=h1c.filter(b=>b.ts>=dayStart&&b.ts<=bar.ts);
+  if(td.length) cut.push({ts:dayStart,o:td[0].o,h:Math.max(...td.map(x=>x.h)),l:Math.min(...td.map(x=>x.l)),c:bar.c,vol_quote:0,confirmed:true});
+  const atrD=m?m.atrD:atr(cut);
+  if(!(atrD>0)) return false;
+  let formedTs;
+  if(m) formedTs=bar.ts-(m.level_age_h||0)*H;
+  else{
+    const hiSide=t.side==='short'; let best=null;
+    for(const b of cut.slice(-27,-1)){ const d=Math.abs((hiSide?b.h:b.l)-t.lv); if(!best||d<best.d) best={d,ts:b.ts}; }
+    formedTs=(best&&best.d/t.lv<0.015)?best.ts:bar.ts-48*H;
+  }
+  const h1cut=h1c.slice(0,idx+1), aH1=atr(h1cut.slice(-60));
+  const vw=h1c.slice(Math.max(0,idx-24),idx).map(b=>b.vol_quote||0).filter(v=>v>0).sort((a,b)=>a-b);
+  const vMed=vw.length?vw[Math.floor(vw.length/2)]:0;
+  const brSide=t.side==='short'?'long':'short', beyond=b=>brSide==='long'?b.c>t.lv:b.c<t.lv;
+  const bb=h1cut.slice(-7,-1).filter(beyond);
+  Object.assign(t,{atrD, level_age_h:(bar.ts-formedTs)/H,
+    vol_mult:vMed>0?(bar.vol_quote||0)/vMed:0, vol5mAvg:vMed/12, posMax:(vMed/12)*0.10});
+  if(m&&m.strength!=null) t.strength=m.strength;
+  if(isF){
+    Object.assign(t,{vol_contraction:volContraction(h1cut),
+      v6_poke:(bb.length&&aH1>0)?Math.max(...bb.map(b=>b.h-b.l))/aH1:0,
+      dist_atr:aH1>0?Math.abs(bar.c-t.lv)/aH1:0,
+      crosses:V0.countCloseCrosses(h1c.filter(b=>b.ts>formedTs&&b.ts<=bar.ts),t.lv,formedTs)},
+      fboShape(h1c,idx,t.lv,brSide,formedTs,atrD,vMed));
+    delete t.m5t24; delete t.m5ap;
+  }
+  return true;
+}
+async function refreshWatch(all){
+  all=all===true;
   const w=loadWatch(); if(!w.length){renderWatch();return;}
-  const btn=el('#refreshWatch'); btn.disabled=true;
+  const btn=el('#refreshWatch'), btnAll=el('#refreshWatchAll'); btn.disabled=true; if(btnAll) btnAll.disabled=true;
   const wrap=el('#watchProgWrap'), prog=el('#watchProg'), lbl=el('#watchProgLabel');
   wrap.style.display=''; prog.value=0; lbl.textContent='подключаюсь…';
   try{
     if(!EX){ const s=await pickSource(el('#src').value); EX=s.ex; }
-  }catch(e){ wrap.style.display='none'; btn.disabled=false; renderWatch(); return; }
-  const openOnly=w.filter(t=>!t._res); // только открытые
-  const total=openOnly.length;
-  if(!total){ wrap.style.display='none'; btn.disabled=false; saveWatch(w); renderWatch(); return; }
+  }catch(e){ wrap.style.display='none'; btn.disabled=false; if(btnAll) btnAll.disabled=false; renderWatch(); return; }
+  // «Обновить» — только открытые позиции: статус и текущая цена (быстро).
+  // «Обновить всё» — все позиции, включая закрытые: статус + полный пересчёт признаков,
+  // похожести, объёма 5м и входа из капитала (после смены алгоритма).
+  const list=all?w:w.filter(t=>!t._res);
+  const total=list.length;
+  if(!total){ wrap.style.display='none'; btn.disabled=false; if(btnAll) btnAll.disabled=false; saveWatch(w); renderWatch(); return; }
   for(let i=0;i<total;i++){
-    const t=openOnly[i];
-    lbl.textContent=`${i+1}/${total} (открытых) — ${t.base}`;
+    const t=list[i];
+    lbl.textContent=`${i+1}/${total}${all?'':' (открытых)'} — ${t.base}`;
     prog.value=(i+1)/total*100;
     try{
-      const h1=await EX.kline(t.sym,'1h',400);
-      const after=h1.filter(b=>b.ts>t.t);
-      // Если kline вернул данные — берём последнюю цену; иначе пробуем через tickers()
-      if(h1.length){ t._now=h1[h1.length-1].c; }
-      else{ try{ const tk=await EX.tickers(); const row=tk.find(r=>r.sym===t.sym||r.base===t.base); t._now=row?+row.last:null; }catch(_){} }
-      t._res=null; t._closeTs=null;
-      const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
-      let curStop=t.st, moved=false;
-      for(const b of after){
-        const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
-        if(hs){t._res=moved?'be':'stop'; t._closeTs=b.ts; break;}
-        if(ht){t._res='take'; t._closeTs=b.ts; break;}
-        if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
-      }
-      t._beMoved=moved;
-      // Окно входа: тянем 5-минутки для первых 4ч после сигнала → точность 5 мин
-      try{
-        const signalEnd=t.t+3600000; // момент прихода сигнала
-        const ewLo=t.e-0.3*Math.abs(t.e-t.st), ewHi=t.e+0.3*Math.abs(t.e-t.st);
-        let m5bars=[];
-        if(MKT==='ru'){ m5bars=(await MOEX.m5(t.sym,48,signalEnd)).filter(b=>b.ts>=signalEnd&&b.ts<signalEnd+4*3600000); }
-        else { const raw=await EX.kline(t.sym,'5m',50); m5bars=raw.filter(b=>b.ts>=signalEnd&&b.ts<signalEnd+4*3600000); }
-        let ewM=0;
-        for(const b of m5bars){
-          const bh=b.h||b.high, bl=b.l||b.low;
-          if(bh>=ewLo&&bl<=ewHi){ ewM+=5; }
-          else if(bh>=ewLo||bl<=ewHi){ ewM+=2.5; break; }
-          else break;
+      if(all){
+        const hrs=Math.ceil((Date.now()-t.t)/3600000);
+        const need=Math.min(2000,Math.max(400,hrs+300));
+        const [d1,h1]=await Promise.all([EX.kline(t.sym,'1d',Math.min(450,Math.ceil(need/24)+60)),EX.kline(t.sym,'1h',need)]);
+        const after=h1.filter(b=>b.ts>t.t);
+        if(h1.length){ t._now=h1[h1.length-1].c; }
+        else{ try{ const tk=await EX.tickers(); const row=tk.find(r=>r.sym===t.sym||r.base===t.base); t._now=row?+row.last:null; }catch(_){} }
+        t._res=null; t._closeTs=null;
+        const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
+        let curStop=t.st, moved=false;
+        for(const b of after){
+          const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
+          if(hs){t._res=moved?'be':'stop'; t._closeTs=b.ts; break;}
+          if(ht){t._res='take'; t._closeTs=b.ts; break;}
+          if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
         }
-        t.ewM=ewM;
-      }catch(_){ t.ewM=null; }
+        t._beMoved=moved;
+        // признаки сигнала, объём 5м, вход из капитала — по свежим данным
+        try{ await hwRefreshSignal(t,d1,h1); }catch(_){}
+        // 5-минутки: 33ч до сигнала (уточнение оценки) + 4ч после (окно входа ±0.3R)
+        try{
+          const signalEnd=t.t+3600000;
+          let m5bars=[];
+          if(MKT==='ru'){ m5bars=(await MOEX.m5(t.sym,48,signalEnd)).map(b=>({...b,t:b.ts??b.t})); }
+          else { m5bars=await hwM5(t.sym,signalEnd+4*3600000,450); }
+          if((t.type||'fbo')==='fbo') fboM5Refine(t,m5bars.filter(b=>(b.ts??b.t)<signalEnd));
+          const ewLo=t.e-0.3*Math.abs(t.e-t.st), ewHi=t.e+0.3*Math.abs(t.e-t.st);
+          let ewM=0;
+          for(const b of m5bars.filter(b=>{const ts=b.ts??b.t; return ts>=signalEnd&&ts<signalEnd+4*3600000;})){
+            const bh=b.h||b.high, bl=b.l||b.low;
+            if(bh>=ewLo&&bl<=ewHi){ ewM+=5; }
+            else if(bh>=ewLo||bl<=ewHi){ ewM+=2.5; break; }
+            else break;
+          }
+          t.ewM=ewM;
+        }catch(_){}
+        if(hwX(t)) t.score=signalScore(t);
+      } else {
+        // Лёгкое обновление открытой сделки: только статус и текущая цена.
+        const h1=await EX.kline(t.sym,'1h',400);
+        const after=h1.filter(b=>b.ts>t.t);
+        if(h1.length){ t._now=h1[h1.length-1].c; }
+        else{ try{ const tk=await EX.tickers(); const row=tk.find(r=>r.sym===t.sym||r.base===t.base); t._now=row?+row.last:null; }catch(_){} }
+        t._res=null; t._closeTs=null;
+        const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
+        let curStop=t.st, moved=false;
+        for(const b of after){
+          const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
+          if(hs){t._res=moved?'be':'stop'; t._closeTs=b.ts; break;}
+          if(ht){t._res='take'; t._closeTs=b.ts; break;}
+          if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
+        }
+        t._beMoved=moved;
+        // Окно входа: 5-минутки для первых 4ч после сигнала
+        try{
+          const signalEnd=t.t+3600000;
+          const ewLo=t.e-0.3*Math.abs(t.e-t.st), ewHi=t.e+0.3*Math.abs(t.e-t.st);
+          let m5bars=[];
+          if(MKT==='ru'){ m5bars=(await MOEX.m5(t.sym,48,signalEnd)).filter(b=>b.ts>=signalEnd&&b.ts<signalEnd+4*3600000); }
+          else { const raw=await EX.kline(t.sym,'5m',50); m5bars=raw.filter(b=>b.ts>=signalEnd&&b.ts<signalEnd+4*3600000); }
+          let ewM=0;
+          for(const b of m5bars){
+            const bh=b.h||b.high, bl=b.l||b.low;
+            if(bh>=ewLo&&bl<=ewHi){ ewM+=5; }
+            else if(bh>=ewLo||bl<=ewHi){ ewM+=2.5; break; }
+            else break;
+          }
+          t.ewM=ewM;
+        }catch(_){}
+      }
     }catch(e){
-      // kline упал — пробуем хотя бы текущую цену через tickers
       if(t._now==null){ try{ const tk=await EX.tickers(); const row=tk.find(r=>r.sym===t.sym||r.base===t.base); if(row) t._now=+row.last; }catch(_){} }
     }
+    await yieldNow();
   }
-  wrap.style.display='none'; btn.disabled=false;
+  wrap.style.display='none'; btn.disabled=false; if(btnAll) btnAll.disabled=false;
   saveWatch(w); renderWatch();
 }
 // Проверка «оценка работает» — группирует закрытые сделки по диапазону оценки (0–1, 1–2, …
@@ -2735,7 +3059,7 @@ function renderCalibration(res){
       `<b style="width:44px;text-align:right;font-size:13px">${wr!=null?(wr*100).toFixed(0)+'%':'—'}</b>`+
       `<span class="muted" style="width:64px;text-align:right;font-size:11px">n=${b.n}${ok?'':' (мало)'}</span></div>`;
   }
-  return `<div class="note"><b>Калибровка: оценка → винрейт</b> — если оценка работает как должна, столбики растут слева направо. `+
+  return `<div class="note"><b>Похожесть → винрейт</b> — похожесть на твои эталонные сделки, это НЕ прогноз исхода: на 3 месяцах (июль–октябрь, 3173 сделки) ни один признак и ни одна модель не предсказали тейк лучше монетки, поэтому столбики здесь почти ровные. В бэктесте только лучшие N в неделю по похожести — чтобы увидеть всю шкалу, поставь в «Сигналах» «лучших в неделю» = 999. `+
     `Диапазоны с n&lt;${MINN} серые — на них рано делать выводы.</div><div style="margin-top:6px">${rows}</div>`;
 }
 function renderBt(){
@@ -2743,18 +3067,14 @@ function renderBt(){
   if(btMetaEl) btMetaEl.textContent=BT.length?`Состав: ${BT.length} сделок · ${sigLabel(BT_META)}${BT_RANGE.a?' · период: '+btRangeLabel():''}${btLastWeeks()?' · считаются только последние '+btLastWeeks()+' нед.':''}`:'Бэктест пуст — отсканируй и добавь «В бэктест»';
   if(BT_CAL_OPEN) renderBtCal();
   const f=readF('bt');
-  let rows=applyAll(byStrat(btPeriodCut(BT),stratOf('bt')),f,false,undefined,brkF('bt'));
+  // The best (тест) — отбор по профилю ЛП-шортов ДО лимитов «монета 12ч / сигналов в час / серии»,
+  // чтобы эти правила работали среди уже отобранных сигналов (плохой сигнал не вытесняет хороший).
+  // Источник — всегда ЛП (The best описывает только ложный пробой).
+  const btBestOn=BT_BEST&&MKT==='crypto';   // The best — только крипта
+  const btSrc=btBestOn?bestSource(byStrat(btPeriodCut(BT),'fbo')):byStrat(btPeriodCut(BT),stratOf('bt'));
+  let rows=btBestOn?bestPipeline(btPeriodCut(BT),btLimits()):applyAll(btSrc,f,false,undefined,brkF('bt'));
   const minSc=parseFloat(el('#bt_minscore')?el('#bt_minscore').value:'');
-  if(!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
-  // The best — применяем к полному BT (не к уже отфильтрованным строкам),
-  // иначе если у пользователя стоит acc=1, nothing passes (иссл.: acc=0 нужен).
-  if(BT_BEST){
-    const f_best=readF('bt');
-    rows=byStrat(btPeriodCut(BT),'fbo')   // берём все FBO из BT
-           .filter(s=>isBestFBO(s))         // применяем профиль
-           .map(s=>{const r=recompute(s,f_best);return r;})  // считаем исход
-           .filter(Boolean);                 // убираем null
-  }
+  if(!btBestOn&&!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
   const res=rows.filter(t=>t.o==='take'||t.o==='stop');
   const w=res.filter(t=>t.o==='take').length;
   const wr=res.length?w/res.length:0;
@@ -2769,7 +3089,7 @@ function renderBt(){
     `<div><label>Сделок/нед</label><b>${span>0?(res.length/span*7).toFixed(1):'—'}</b></div>`+
     `<div><label>Итого</label><b class="${tot>=0?'take':'stop'}">${closed.length?(tot>=0?'+':'')+tot.toFixed(1)+'R':'—'}</b></div>`;
   if(seqMode(f) && rows.length){
-    const R=rangeStatsBt(byStrat(btPeriodCut(BT),stratOf('bt')),f,brkF('bt'));
+    const R=rangeStatsBt(btSrc,f,brkF('bt'));
     el('#btkpi').innerHTML+=
       `<div style="flex-basis:100%;min-width:0;background:transparent;border:0;padding:4px 0 0">`+
       `<div class="note"><b>Устойчивость</b> — ${RANGE_RUNS} прогонов, в каждом ~${Math.round(RANGE_DROP*100)}% монет заменено (как при дневных колебаниях оборота). `+
@@ -2800,9 +3120,11 @@ function renderBt(){
     tr.innerHTML=`<td class="muted">▸</td><td>${t.base}</td>`+
       `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
-      `<td>${fmt(t.lv)}</td><td>${pStr(t)}</td><td title="В скобках: окно входа ±0.3R">${fmt(t.e)}${t.ewM!=null?'<span class="muted"> ('+ewStr(t.ewM)+')</span>':''}</td>`+
-      `<td class="stop">${fmt(t.st)}</td><td class="take">${fmt(t.tk)}</td>`+
-      `<td class="muted">${(t.rp*100).toFixed(2)}%</td><td>${scoreEl(t.score)}</td><td class="muted">${tradeDur(t)}</td><td>${oc}${t.m5used?' <span class="muted" title="исход уточнён по 5-минуткам" style="font-size:11px">5м</span>':t.ambH?' <span class="muted" title="стоп и тейк в одном часе — не уточнено" style="font-size:11px">?</span>':''}</td>`;
+      `<td>${fmt(t.lv)}</td><td title="В скобках: окно входа ±0.3R">${fmt(t.e)}${t.ewM!=null?'<span class="muted"> ('+ewStr(t.ewM)+')</span>':''}</td>`+
+      `<td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
+      `<td class="muted">${(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
+      `<td class="${(t.posMax||0)>0?'take':'muted'}">${(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+      `<td>${scoreEl(t.score)}</td><td class="muted">${tradeDur(t)}</td><td>${oc}${t.m5used?' <span class="muted" title="исход уточнён по 5-минуткам" style="font-size:11px">5м</span>':t.ambH?' <span class="muted" title="стоп и тейк в одном часе — не уточнено" style="font-size:11px">?</span>':''}</td>`;
     tr.addEventListener('click',()=>expandRow(tr,t,12));
     tb.appendChild(tr);
   }
@@ -2829,24 +3151,18 @@ function renderRegime(){
 }
 
 /* ===== сканирование ===== */
-el('#run').addEventListener('click',async()=>{
-  if(MKT==='algo'){ runAlgoScan(); return; }
-  const btn=el('#run'); btn.disabled=true;
-  const prog=el('#prog'); prog.style.display=''; prog.value=0;
-  try{
-    setStatus('подключаюсь…');
-    const {ex,tk}=await pickSource(el('#src').value); EX=ex;
+/* 6.93: общий сбор сигналов по рынку — им пользуются и кнопка «Скан» (Сигналы), и «Скан» тестировщика (крипта),
+   чтобы глубина истории (D1/H1), список инструментов и фильтр оборота были одинаковыми → одинаковые сигналы. */
+async function scanUniverse(ex,tk,winH,onStart,onProg){
     const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
     const noStocks=MKT==='crypto'&&el('#noStocks').checked;
-    // Сканируется ровно столько инструментов, сколько указано в «Инструментов» (топ по обороту),
-    // затем отсеиваются те, у кого средний дневной оборот за период ниже «Мин. оборота».
     let list=tk.filter(t=>t.turn>=minVol*0.5&&t.last>0);
     if(noStocks) list=list.filter(t=>!isStock(t.base));
     list=list.sort((a,b)=>b.turn-a.turn).slice(0,nInst);
     const perCoin={};   // base -> {avg, sig}
-    const winH=windowHours(), need=Math.min(9100,winH+280);
+    const need=Math.min(9100,winH+280);
     const estMin=Math.ceil(list.length*(need/1000)*(ex.name==='OKX'?3:ex.name==='MOEX'?1.6:1)/40);
-    setStatus(`${ex.name}: сканирую ${list.length} инструментов, окно ${winH}ч — загрузка займёт примерно ${estMin} мин…`);
+    if(onStart) onStart(list.length,estMin);
     const opt={noNight:MKT==='crypto'&&el('#noNight').checked,scanBars:winH+8,
                imoexAbove:null,imoexRet5:null,sym5ret:null};
     // Для РУ: загружаем IMOEX один раз и вычисляем его направление
@@ -2864,8 +3180,7 @@ el('#run').addEventListener('click',async()=>{
     }
     let raw=[],i=0,brk=0,rev=0;
     for(const it of list){
-      i++; prog.value=i/list.length*100;
-      if(i%5===0) setStatus(`${i}/${list.length} — ${it.base} (сигналов: ${raw.length})`);
+      i++; if(onProg) onProg(i,list.length,it.base,raw.length);
       try{
         const d1n=Math.min(450, Math.ceil(winH/24)+60);
         const [d1,h1]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need)]);
@@ -2894,12 +3209,29 @@ el('#run').addEventListener('click',async()=>{
           }
         }
       }catch(e){}
-      await new Promise(r=>setTimeout(r,0));
+      await yieldNow();
     }
     // окончательный список: по среднему дневному обороту за период
     const kept=Object.entries(perCoin).filter(([,v])=>v.avg>=minVol).sort((a,b)=>b[1].avg-a[1].avg).slice(0,nInst);
     raw=[]; for(const [,v] of kept) raw=raw.concat(v.sig);
-    UNIVERSE_NOTE=`просканировано ${list.length} инструментов, из них ${kept.length} с достаточным средним оборотом`;
+    return {raw, nList:list.length, nKept:kept.length, brk, rev};
+}
+el('#run').addEventListener('click',async()=>{
+  if(MKT==='algo'){ runAlgoScan(); return; }
+  const btn=el('#run'); btn.disabled=true;
+  const prog=el('#prog'); prog.style.display=''; prog.value=0;
+  try{
+    setStatus('подключаюсь…');
+    const {ex,tk}=await pickSource(el('#src').value); EX=ex;
+    const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
+    const noStocks=MKT==='crypto'&&el('#noStocks').checked;
+    // Сканируется ровно столько инструментов, сколько указано в «Инструментов» (топ по обороту),
+    // затем отсеиваются те, у кого средний дневной оборот за период ниже «Мин. оборота».
+    const winH=windowHours();
+    const U=await scanUniverse(ex,tk,winH,(n,estMin)=>setStatus(`${ex.name}: сканирую ${n} инструментов, окно ${winH}ч — загрузка займёт примерно ${estMin} мин…`),
+      (i,n,base,cnt)=>{ prog.value=i/n*100; if(i%5===0) setStatus(`${i}/${n} — ${base} (сигналов: ${cnt})`); });
+    let raw=U.raw; const brk=U.brk, rev=U.rev;
+    UNIVERSE_NOTE=`просканировано ${U.nList} инструментов, из них ${U.nKept} с достаточным средним оборотом`;
     LAST=raw.sort((a,b)=>b.t-a.t);   // дедуп уже сделан внутри scanSymbol
     LAST_SCAN_META=scanSignature();
     const f=readF('sc');
@@ -2922,6 +3254,8 @@ el('#run').addEventListener('click',async()=>{
     const sTr=Math.max(0,Math.min(2,(1.0-Math.min(trendiness,1.0))*2));
     REGIME={score:sRev+sWr+sTr,revertRate,wr,closed:closed.length,signals:wk.length,trendiness};
     renderRegime(); renderScan();
+    // Уточнение оценки ЛП по 5-минуткам для показанных сигналов (касания уровня за 24ч и скорость подхода)
+    try{ if(await hwRefineRows(window.__SCAN_ROWS__||[])) renderScan(); }catch(e){}
     setStatus(`готово: ${ex.name}, ${UNIVERSE_NOTE}. Итог по сигналам — в строке под показателями.`);
     saveScanUi(); saveScanData(); autoNotify();
   }catch(e){ setStatus('ошибка: '+e.message+' — попробуй сменить источник'); }
@@ -2934,8 +3268,8 @@ el('#addWatch').addEventListener('click',()=>{
   let w=loadWatch(), added=0;
   for(const t of rows){
     if(w.some(x=>x.base===t.base&&x.t===t.t)) continue;
-    w.push({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
-            strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,score:t.score!=null?t.score:signalScore(t),added:Date.now()});
+    w.push(hwCopyFeat({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
+            strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,vol5mAvg:t.vol5mAvg,posMax:t.posMax,score:t.score!=null?t.score:signalScore(t),added:Date.now()},t));
     added++;
   }
   saveWatch(w); renderWatch(); setStatus(`добавлено в отслеживаемое: ${added}`);
@@ -3516,7 +3850,7 @@ async function runSearchCore(){
     const pre={};
     for(const st of stops.map(Number)){
       log(`подготовка данных: стоп ${st}% ATR…`);
-      await new Promise(r=>setTimeout(r,0));
+      await yieldNow();
       Object.assign(pre, precompute(BTS,[st],tgts.map(Number)));
     }
     // fastEvalCombo нужен ИНДЕКС (idx), не сырой массив — берём его из pre[key].idx
@@ -3564,7 +3898,7 @@ async function runSearchCore(){
           `найдено подходящих ${outCount.toLocaleString('ru-RU')} · `+
           `${Math.round(rate).toLocaleString('ru-RU')} комб/сек · осталось ~${left<60?Math.ceil(left)+' сек':Math.ceil(left/60)+' мин'}`+
           `<div class="bar" style="margin-top:8px"><i style="width:${pct}%;background:var(--accent)"></i></div>`);
-      await new Promise(r=>setTimeout(r,0));
+      await yieldNow();
     };
     const tryCombo=(c,dedupe)=>{
       if(dedupe){
@@ -3588,7 +3922,7 @@ async function runSearchCore(){
       const now=Date.now();
       if(now-lastYield<60) return;
       lastYield=now;
-      if(now-lastPaint>=250) await paint(); else await new Promise(r=>setTimeout(r,0));
+      if(now-lastPaint>=250) await paint(); else await yieldNow();
     };
     const exhausted=()=>evals>=BUDGET;
 
@@ -3624,7 +3958,7 @@ async function runSearchCore(){
     }
 
     // остаток бюджета — лучевой поиск вглубь от лучших найденных
-    if(false && !exhausted() && outCount){   // глубже 4 фильтров не ищем (максимум — все четвёрки)
+    if(!exhausted() && outCount){   // beam search вглубь: используем остаток бюджета
       const BEAM=60;
       let beam=out.slice().sort(cmpKeep).slice(0,BEAM);
       for(let d=5; d<=9 && !exhausted(); d++){
@@ -3656,7 +3990,7 @@ async function runSearchCore(){
     const cand=out.slice(0,ROB_CAND);
     for(let q=0;q<cand.length;q++){
       log(`<b>проверяю надёжность лучших ${cand.length}: ${q+1} из ${cand.length}</b><div class="bar" style="margin-top:8px"><i style="width:${(q+1)/cand.length*100}%;background:var(--accent)"></i></div>`);
-      await new Promise(r=>setTimeout(r,0));
+      await yieldNow();
 await yieldNow(); cand[q].rob=robustCheck(cand[q].c); cand[q].rank=cand[q].wr*cand[q].rob.mult;
     }
     cand.sort((a,b)=>b.rank-a.rank||b.wr-a.wr);
@@ -3736,71 +4070,130 @@ el('#btSearch').addEventListener('click',()=>{
 });
 el('#btBack').addEventListener('click',showSearchResults);
 
-/* ===== The best — фильтр лучших FBO-шортов ===== */
-// Признаки выведены из сравнения 19 выбранных сделок vs 1200+ прочих сигналов за неделю
-let BT_BEST=false;
-
-/* ─── The best: профиль 19 лучших FBO-шортов ─────────────────────────────
-   Признаки: медвежье тело, прокол уровня, закрытие рядом с уровнем,
-   свежий уровень, волатильный инструмент, умеренный объём.
-   Поля могут отсутствовать в старых сигналах — такие пропускаем (не фильтруем).
-─────────────────────────────────────────────────────────────────────────── */
-/* ─── The best: фильтр на основе анализа 18 эталонных сделок (исследование Grok)
-   Период 3 месяца, 30 ликвидных инструментов Bybit, 364 FBO-сигнала для сравнения.
-   Три ключевых признака с достоверными различиями (p<0.05):
-   1. crosses ≤ 4  — уровень не проторгован (94% твоих vs 70% прочих)
-   2. acc === 0    — НЕТ накопления у уровня  (94%/62% комбинированно с crosses)
-   3. approach_atr ≥ 2.5 — импульсный подход к уровню (65% vs 34%, p=0.016)
-   Что НЕ работает: EMA-направление (только 2/17!), body_ratio, wick_ratio, сила уровня.
+/* ===== The best (ТЕСТОВЫЙ РЕЖИМ) — фильтр ЛП-шортов, похожих на ваши отметки «беру» в слепой разметке ===== */
+/* v3 (скринер 6.80). Источник — слепая разметка 12.10.2026: 300 ЛП-шортов (июль–окт.), графики D1/H1/M5 обрезаны на входе, исходы скрыты;
+   вердикты: 43 «беру», 27 «сомневаюсь», 230 «не беру».
+   Правило: lv_touch24 = 0 (уровень не касались за 24ч до пробоя) И ap03 ≤ 3 (цена была ≥0.3 ATR от уровня не раньше, чем за 3 ч до пробоя — быстрый подход).
+   Проверка вкуса (честно):
+     • проходят 84% «беру» (36 из 43, 95% ДИ 70–92), 48% «сомневаюсь» (13 из 27) и 19% «не беру» (44 из 230); всего 31% сигналов;
+     • вложенная кросс-проверка (пороги подбираются только на обучающих фолдах): 0.59 против 0.39 у v2 (J = доля прошедших среди «беру» − доля прошедших среди остальных);
+       подбор выбирал именно это правило в 92 из 100 фолдов; разбиение по времени в обе стороны: J 0.76 (июль–авг.→сент.–окт.) и 0.49 (наоборот) против 0.46 / 0.35 у v2;
+       бутстрэп: J(v3) − J(v2) = +0.23, 95% ДИ +0.08…+0.39.
+     • ваши повторные показы совпали лишь в 13 из 20 (65%) — потолок для любой модели, метки шумные.
+   Что правило НЕ делает: не предсказывает исход. На 1668 ЛП-шортах с исходом (июль–окт.) прошедшие 23.0% против 23.6% (разница −0.6 п.п.,
+   95% ДИ −4.9…+3.8); вне размеченной выборки 24.0% против 22.9% (p=0.69). Ваши «беру» вслепую дали 17.6% тейков (6 из 34 закрытых) против 26.1% у «не беру» (p=0.39).
+   Поэтому это «отбор по вашему вкусу» (в ~3 раза меньше графиков на разбор), а не прогноз тейка; в алгоритм НЕ встроено.
+   v2 (approach_atr ≥ 2.5, near12 ≤ 3, lv_touch24 ≤ 2) заменён: он повторял вкус хуже (67% «беру» / 63% «сомневаюсь» / 25% «не беру»).
+   Поля могут отсутствовать в старых сканах — такое условие пропускаем и считаем отдельно.
 ──────────────────────────────────────────────────────────────────────────── */
-function isBestFBO(s){
-  // Только FBO-шорт (17/18 эталонов)
-  if(s.type!=='fbo') return false;
+/* v4 (6.81): строгий режим. Модель вкуса (логистическая регрессия по 7 полям скринера, обучена на 300 слепых метках)
+   ставит оценку каждому ЛП-шорту; проходят только ~10% лучших (порог = 90-й перцентиль по 2040 шортам июль–окт.).
+   Кросс-проверка: среди прошедших ~60% ваших «беру» (у v3 было ~39%, без фильтра ~14%); ловит ~40% всех «беру».
+   На исход по-прежнему не влияет (топ-10%: 21.5% тейков против 23.6%). Сигналы без нужных полей НЕ проходят (раньше проходили все). */
+const BEST_M={"K": ["lv_touch24", "ap03", "near12", "approach_atr", "lv_touch", "mv12", "log_vol5m"], "Q": [[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 9.0, 21.0], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 11.0, 12.0, 14.0, 17.0, 22.0, 31.0, 63.0, 200.0], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [0.552507, 1.13272, 1.29162, 1.38823, 1.47936, 1.5682, 1.6269, 1.69357, 1.76585, 1.82187, 1.90099, 1.97333, 2.02393, 2.0789, 2.1431, 2.19763, 2.26267, 2.34199, 2.41034, 2.46279, 2.53503, 2.59359, 2.63767, 2.70109, 2.78997, 2.87454, 2.96497, 3.07616, 3.17646, 3.28035, 3.39447, 3.52703, 3.6637, 3.85649, 4.05101, 4.2521, 4.58401, 4.93935, 5.40536, 6.24518, 8.11022], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 7.0, 8.0, 10.075, 14.0, 20.0, 37.0], [-2.7351, -0.249263, 0.0, 0.0567014, 0.0911197, 0.123325, 0.155051, 0.181669, 0.203125, 0.228056, 0.244277, 0.266589, 0.294269, 0.314765, 0.339691, 0.364564, 0.388513, 0.403968, 0.428509, 0.448618, 0.477583, 0.503321, 0.527882, 0.552649, 0.582816, 0.616321, 0.652716, 0.695063, 0.73339, 0.771965, 0.805862, 0.857699, 0.91992, 0.98613, 1.05371, 1.14741, 1.26798, 1.3982, 1.58817, 2.00066, 4.38528], [1.15476, 2.0235, 2.25722, 2.42416, 2.57379, 2.66877, 2.77696, 2.90717, 3.00221, 3.06571, 3.12011, 3.19079, 3.25397, 3.31636, 3.37709, 3.43521, 3.49552, 3.54908, 3.6044, 3.66045, 3.71044, 3.74992, 3.79314, 3.84429, 3.89305, 3.93675, 3.98843, 4.04039, 4.09533, 4.17134, 4.24042, 4.31241, 4.37747, 4.48655, 4.57604, 4.70016, 4.83651, 4.98789, 5.17123, 5.4921, 7.06997]], "w": [-0.9406, -0.6953, -2.1449, 0.4624, -0.7654, -0.2817, 1.068], "b": 0.4718, "thr": 0.7508};
+BEST_M.thr=7.6;     // 6.88: порог по оценке v5 (0–10), верхние ~24% ЛП-шортов; было 0.43 по старой модели вкуса.
+//    // v5 (6.83): верхние ~24% по оценке вкуса (раньше 10%), дальше режем шипы и большие хвосты; итог ≈13/нед в бэктесте июль–окт.
+const BEST_SPK=8;     // самый большой H1-бар за 48 ч ≥ 8 медианных баров — «дёрганая/размашистая монета»
+const BEST_POKE=3;    // хвост прокола выше входа больше 3 стопов — «маленький стоп после резкого выноса»
+let BEST_MODE='edge';   // переключатель режимов убран по просьбе пользователя (6.86); The best работает в режиме «вкус»
+// Режим «исход» (кандидат), 6.85: D1 ≥2 зелёных свечей подряд перед шортом И объём часа перед сигналом ≤1.0 от среднего за 3 часа до него
+// (покупатели не разгоняются на подходе) И без шипов/больших хвостов.
+// История: в 6.84 стояло D1 ≥3 и объём ≤0.89 (38% на июле–октябре), но на новых данных (март–июнь, скан тем же кодом) оно дало 24.7% — НЕ подтвердилось.
+// Нынешний вариант: март–июнь 30.7% (n=218), июль–окт 31.9% (n=226), все 7 мес 31.3% при базе 23.7%, каждый месяц 29–43%; +0.20R/сделку.
+// Вариант выбран среди соседних уже после проверки на марте–июне → всё ещё кандидат, нужна проверка вперёд. Отслеживаемые в этот режим НЕ добавляются.
+const EDGE={d1:2, vtr:1.0};
+function bestPoke(t){ if(t.pk_ext==null||t.st==null||t.e==null) return null; const d=Math.abs(t.st-t.e); return d>0?Math.abs(t.pk_ext-t.e)/d:null; }
+function bestScore(s){ return scoreV5raw(s); }   // 6.88: The best и оценка — одна модель (v5)
+function bestVerdict(s){
+  if(s.type!=='fbo') return 'notfbo';
   const side=s.side||(s.d===0?'short':'long');
-  if(side!=='short') return false;
-
-  // ── Ключевой признак 1: уровень не проторгован ──────────────────────────
-  // crosses ≤ 4: 94.1% твоих vs 70.8% прочих шортов, p=0.046
-  if((s.crosses||0)>4) return false;
-
-  // ── Ключевой признак 2: НЕТ накопления у уровня ─────────────────────────
-  // acc=0 (комбо с crosses≤4): 94.1% vs 62.4%, p=0.007 — сильнейший признак
-  // acc=1 означает накопление есть; acc=0 — нет (именно это у твоих эталонов)
-  if(s.acc===1||s.acc==='1') return false;  // есть накопление → не наш паттерн
-
-  // ── Ключевой признак 3: импульсный подход к уровню ─────────────────────
-  // approach_atr ≥ 2.5: медиана у твоих 3.08 ATR vs 2.35 у прочих, p=0.031
-  const appr=s.approach_atr??s.appr??null;
-  if(appr!=null && appr<2.5) return false;
-
-  // Дополнительно: инструмент должен быть достаточно волатильным
-  if(s.e>0 && s.atrD>0 && s.atrD/s.e<0.010) return false;
-
-  return true;
+  if(side!=='short') return 'notshort';
+  if(BEST_MODE==='edge'){
+    if(s.d1_streak==null||s.vtr==null) return 'nodata';
+    if(s.d1_streak<EDGE.d1) return 'd1';
+    if(s.vtr>EDGE.vtr) return 'vol';
+    if(s.g_spk!=null && s.g_spk>=BEST_SPK) return 'spike';
+    return null;
+  }
+  const z=bestScore(s); if(z==null) return 'nodata';
+  if(z<BEST_M.thr) return 'low';
+  if(s.g_spk!=null && s.g_spk>=BEST_SPK) return 'spike';
+  return null;
+}
+const BEST_WEEK=14;   // The best: не больше 14 сигналов в неделю (ваш недельный лимит тоже действует, если он меньше)
+function bestWatchSet(){ try{ return new Set(loadWatch().map(w=>w.base+'|'+w.t)); }catch(e){ return new Set(); } }
+// Источник для The best: ЛП-шорты с высокой оценкой вкуса + все сделки из «Отслеживаемого» (всегда)
+function bestSource(list){ const W=bestWatchSet(); return list.filter(s=>W.has(s.base+'|'+s.t)||isBestFBO(s)); }
+// Недельный отбор: отслеживаемые всегда остаются, остальные — по оценке вкуса, всего не больше BEST_WEEK
+// 6.93: недельный отбор — по времени (как в живой торговле): в каждой ISO-неделе берутся сигналы по порядку,
+// пока их меньше BEST_WEEK; отслеживаемые остаются всегда. Раньше — топ по оценке за неделю, но это зависело от
+// сигналов, которых ещё не было, и кнопка с шаблоном в тестировщике расходились.
+function bestWeekCap(rows){
+  const W=bestWatchSet(), cnt={}, keep=[];
+  const asc=rows.slice().sort((a,b)=>(a.t-b.t)||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
+  for(const t of asc){
+    const w=W.has(t.base+'|'+t.t);
+    if(!w && (bestPoke(t)??0)>BEST_POKE) continue;   // большой хвост прокола относительно стопа — убираем (кроме отслеживаемых)
+    const k=isoWeekKey(t.t);
+    if(!w && (cnt[k]||0)>=BEST_WEEK) continue;
+    cnt[k]=(cnt[k]||0)+1; keep.push(t);
+  }
+  return keep.sort(orderRows);
+}
+// 6.93: ЕДИНЫЙ конвейер The best — одна функция и для кнопки (Сигналы, Бэктест), и для шаблона в тестировщике.
+// Фильтры панели НЕ используются (всегда «авто»), мин. оценка и недельный лимит панели — тоже: иначе результат
+// зависел бы от того, что выставлено в панели, а у шаблона панели нет.
+function bestF(){
+  const f=readFFromObj({});
+  const nn=el('#noNight'); if(nn&&!nn.checked) f.hours='0-24';   // как «авто» в панели
+  f.side=0;   // ЛП — только SHORT
+  return f;
+}
+function bestPipeline(list,Lov){
+  const f=bestF();
+  const ok=bestSource(byStrat(list,'fbo')).filter(s=>passes(s,f))
+    .map(s=>({...s, score:signalScore(s)}))
+    .map(s=>recompute(s,f)).filter(Boolean)
+    .filter(s=>s.rp*100<=f.maxrisk);
+  const seq=applySequential(capCluster(applyCoinLimit(ok), f.cap||3), f, !Lov, Lov);
+  return bestWeekCap(seq);
+}
+function isBestFBO(s){ return bestVerdict(s)===null; }
+function bestDiag(list){
+  const c={notshort:0,low:0,nodata:0,spike:0,d1:0,vol:0}; let total=0,pass=0,poke=0,noNew=0;
+  for(const s of list){ if(s.type!=='fbo') continue; total++; const v=bestVerdict(s);
+    if(v===null){ const pr=bestPoke(s); if(pr!=null&&pr>BEST_POKE) poke++; else pass++; if(s.g_spk==null||s.pk_ext==null||(BEST_MODE==='edge'&&s.vtr==null)) noNew++; }
+    else if(c[v]!==undefined) c[v]++; }
+  if(BEST_MODE==='edge') return `The best (тест): ${pass}/${total} ЛП-сигналов · отсеяно: не шорт:${c.notshort} | D1 серия <${EDGE.d1}:${c.d1} | объём не затухал (>${EDGE.vtr}):${c.vol} | шип:${c.spike} | хвост >${BEST_POKE} стопов:${poke} | нет полей (пересканируйте):${c.nodata}`+
+    ` · это сигналы с оценкой 8–10; в прошлом (март–окт.) ~31% тейков при 3R против 24% у всех; отслеживаемые — всегда; проверяем вперёд`;
+  return `The best (тест): ${pass}/${total} ЛП-сигналов (${total?Math.round(pass/total*100):0}%) · отсеяно: не шорт:${c.notshort} | низкая оценка вкуса:${c.low} | дёрганая монета (шип H1 ≥${BEST_SPK}× обычного):${c.spike} | хвост прокола >${BEST_POKE} стопов:${poke}`+
+    (c.nodata?` | нет признаков:${c.nodata}`:'')+(noNew?` · ⚠ ${noNew} сигналов без новых полей (шип/хвост) — пересканируйте или «Обновить всё», чтобы фильтры заработали`:'')+` · не больше ${BEST_WEEK}/нед · отбор по вашему вкусу, на исход не влияет`;
+}
+function bestBtnState(btn,on){
+  btn.style.fontWeight=on?'700':'';
+  btn.style.outline=on?'2px solid var(--take)':'';
+  btn.textContent=on?'The best ✓ (тест)':'The best (тест)';
 }
 
+document.querySelectorAll('.bestModeSel').forEach(x=>{ x.value=BEST_MODE; x.addEventListener('change',()=>{
+  BEST_MODE=x.value==='edge'?'edge':'taste'; try{ localStorage.setItem('hw_best_mode',BEST_MODE); }catch(e){}
+  document.querySelectorAll('.bestModeSel').forEach(y=>y.value=BEST_MODE);
+  if(BT_BEST){ renderBt(); setStatus(bestDiag(byStrat(btPeriodCut(BT),'fbo'))); }
+  if(SC_BEST&&LAST&&LAST.length){ renderScan(); setStatus(bestDiag(byStrat(LAST.filter(s=>s.t>=Date.now()-windowHours()*3600000),'fbo'))); }
+}); });
 el('#btBest').addEventListener('click',()=>{
   BT_BEST=!BT_BEST;
-  el('#btBest').style.fontWeight=BT_BEST?'700':'';
-  el('#btBest').style.outline=BT_BEST?'2px solid var(--take)':'';
-  el('#btBest').textContent=BT_BEST?'The best ✓':'The best';
+  bestBtnState(el('#btBest'),BT_BEST);
   renderBt();
-  if(BT_BEST){
-    // Диагностика по трём ключевым признакам (исследование: p<0.05)
-    const fboAll=byStrat(btPeriodCut(BT),'fbo');
-    const total=fboAll.length;
-    let notShort=0,crossCut=0,accCut=0,apprCut=0,atrCut=0,passed=0;
-    for(const s of fboAll){
-      const side=s.side||(s.d===0?'short':'long');
-      if(side!=='short'){notShort++;continue;}
-      if((s.crosses||0)>4){crossCut++;continue;}
-      if(s.acc===1||s.acc==='1'){accCut++;continue;}
-      const ap=s.approach_atr??s.appr??null; if(ap!=null&&ap<2.5){apprCut++;continue;}
-      if(s.e>0&&s.atrD>0&&s.atrD/s.e<0.010){atrCut++;continue;}
-      passed++;
-    }
-    setStatus(`The best: ${passed}/${total} FBO-шортов (${total?Math.round(passed/total*100):0}%) · отсеяно: не шорт:${notShort} | crosses>4:${crossCut} | acc=1:${accCut} | appr<2.5:${apprCut} | ATR:${atrCut}`);
-  }
+  if(BT_BEST) setStatus(bestDiag(byStrat(btPeriodCut(BT),'fbo')));
+});
+el('#scBest').addEventListener('click',()=>{
+  SC_BEST=!SC_BEST;
+  bestBtnState(el('#scBest'),SC_BEST);
+  if(LAST&&LAST.length){
+    renderScan();
+    if(SC_BEST) setStatus(bestDiag(byStrat(LAST.filter(s=>s.t>=Date.now()-windowHours()*3600000),'fbo')));
+  } else if(SC_BEST) setStatus('The best (тест) включён — запустите скан, и в списке останутся только ЛП-шорты, похожие на ваши отметки.');
 });
 
 el('#btRecalc').addEventListener('click',renderBt);
@@ -3838,7 +4231,8 @@ el('#btSplit').addEventListener('click',()=>{
 });
 el('#btCopyScan').addEventListener('click',()=>{copyF('sc','bt');renderBt();});
 el('#btClear').addEventListener('click',()=>{ if(confirm('Очистить бэктест?')){BT=[];BT_META=null;renderBt();} });
-el('#refreshWatch').addEventListener('click',refreshWatch);
+el('#refreshWatch').addEventListener('click',()=>refreshWatch(false));
+el('#refreshWatchAll').addEventListener('click',()=>refreshWatch(true));
 el('#clearWatch').addEventListener('click',()=>{ if(confirm('Убрать все отслеживаемые?')){saveWatch([]);renderWatch();} });
 el('#watchOnePos').addEventListener('change',()=>renderWatch());
 
@@ -3972,6 +4366,9 @@ for(const [b,p] of TABS){
 // Встроенный шаблон один — сброс всех фильтров в «авто». Свои наборы сохраняй кнопкой ниже.
 const BUILTIN_TPL = {
   'Авто — все фильтры сброшены': {},
+  // The best (тест) как шаблон: фильтры в «авто» + отбор The best (вкус, без дёрганых монет и больших хвостов, ≤14/нед).
+  // В тестировщике применяется к каждому новому сигналу; на вкладках включает кнопку The best.
+  'The best (тест)': {__best:1},
 };
 function tplKey(){ return MKT==='ru'?'hw_fbo_tpl_ru':MKT==='algo'?'hw_fbo_tpl_algo':'hw_fbo_tpl'; }
 function loadTpl(){ try{return JSON.parse(localStorage.getItem(tplKey())||'{}');}catch(e){return {};} }
@@ -4009,6 +4406,9 @@ function applyTpl(pfx,val){
   for(const id of FIDS){
     const e=el('#'+pfx+'_'+id); if(!e) continue;
     e.value = (src[id]!==undefined) ? src[id] : 'auto';
+  }
+  if(src.__best){
+    if(pfx==='sc'){ SC_BEST=true; bestBtnState(el('#scBest'),true); } else { BT_BEST=true; bestBtnState(el('#btBest'),true); }
   }
   if(pfx==='sc'){ if(LAST.length) renderScan(); } else renderBt();
 }
@@ -4135,6 +4535,7 @@ function testerPassesSignal(sig, tplParams){
   try{
     const f=readFFromObj(tplParams);
     if(!passes(sig,f)) return false;
+    if(tplParams&&tplParams.__best&&!isBestFBO(sig)) return false;   // шаблон The best
     const rs=recompute(sig,f);
     if(!rs) return false;
     if(rs.rp*100>f.maxrisk) return false;
@@ -4218,7 +4619,8 @@ function renderTesterCard(stratObj, idx){
       <td class="muted">${(s.type||'fbo').toUpperCase()} · ${s.k||''}</td>
       <td>${fmt(s.lv)}</td>
       <td>${fmt(s.e)}${s.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(s.ewM)+'</span>':''}</td>
-      <td class="stop">${fmt(s.st)}</td>
+      <td class="stop">${fmtStop(s)}</td>
+      <td class="muted">${fmtBE(s)}</td>
       <td class="take">${fmt(s.tk)}</td>
       <td>${s._now!=null?fmt(s._now):'—'}</td>
       <td>${scoreEl(s.score!=null?s.score:signalScore(s))}</td>
@@ -4289,9 +4691,24 @@ function renderTesterCard(stratObj, idx){
     return `<div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--line)">
       <div class="note" style="margin-bottom:6px"><b>Устойчивость (1 позиция)</b>${fewNote} — ${RUNS} прогонов, ~${Math.round(DROP*100)}% монет. Мин … <b>медиана</b> … макс:</div>
       <div class="kpi">
-        <div><label>Винрейт</label><b>${wrArr.length?fmtRange(mmm(wrArr),'wr'):'—'}</b></div>
-        <div><label>Макс. стопов подряд</label><b>${msArr.length?fmtRange(mmm(msArr),'ms'):'—'}</b></div>
-        <div><label>Итог</label><b>${totArr.length?fmtRange(mmm(totArr),'tot'):'—'}</b></div>
+        ${(()=>{
+          if(!wrArr.length) return '<div>—</div>';
+          const sc=wrArr.map((_,i)=>({wr:wrArr[i],ms:msArr[i],tot:totArr[i]})).sort((a,b)=>a.tot-b.tot);
+          const N=sc.length, mi=Math.floor((N-1)/2);
+          const cWr2=v=>`<span class="${v>=0.5?'take':v>=0.33?'muted':'stop'}">${(v*100).toFixed(0)}%</span>`;
+          const cMs2=v=>`<span class="${v<=3?'take':v<=6?'muted':'stop'}">${v}</span>`;
+          const cTot2=v=>`<span class="${v>=0?'take':'stop'}">${(v>=0?'+':'')+v.toFixed(0)}R</span>`;
+          const cWr3=v=>`<span class="${v>=0.5?'take':v>=0.33?'muted':'stop'}">${(v*100).toFixed(0)}%</span>`;
+          const cMs3=v=>`<span class="${v<=3?'take':v<=6?'muted':'stop'}">${v}</span>`;
+          const cTot3=v=>`<span class="${v>=0?'take':'stop'}">${(v>=0?'+':'')+v.toFixed(0)}R</span>`;
+          const sep=`<span class="muted"> … </span>`;
+          const bst=sc[N-1],med2=sc[mi],wst=sc[0];
+          return `<div class="kpi">`+
+            `<div><label>Винрейт: лучший … медиана … худший</label><b style="font-size:16px">${cWr3(bst.wr)}${sep}<b>${cWr3(med2.wr)}</b>${sep}${cWr3(wst.wr)}</b></div>`+
+            `<div><label>Макс. стопов подряд</label><b style="font-size:16px">${cMs3(bst.ms)}${sep}<b>${cMs3(med2.ms)}</b>${sep}${cMs3(wst.ms)}</b></div>`+
+            `<div><label>Итог (R)</label><b style="font-size:16px">${cTot3(bst.tot)}${sep}<b>${cTot3(med2.tot)}</b>${sep}${cTot3(wst.tot)}</b></div>`+
+            `</div>`;
+        })()}
       </div>
       <div style="display:flex;gap:8px;margin-top:8px">
         <button class="ghost testerScenBtn" data-cardid="${cardId}" data-scen="best" data-bal="${bestSub?toBal(bestSub):''}" data-ores="${bestSub?toEqPts(bestSub):''}" data-wr="${bestWrT.toFixed(2)}" style="padding:4px 10px;font-size:12px">▸ Лучший сценарий</button>
@@ -4306,7 +4723,7 @@ function renderTesterCard(stratObj, idx){
     <div class="testerTradesBox" id="ttrades_${cardId}" style="display:${TESTER_TRADES_HIDDEN?'none':''}">
       <div class="scroll" style="margin-top:6px"><table><thead><tr>
         <th></th><th>Тикер</th><th>Дата</th><th>Сторона</th><th>Стратегия</th>
-        <th>Уровень</th><th>Вход</th><th>Стоп</th><th>Тейк</th><th>Сейчас</th><th>Оценка</th><th>Длит.</th><th>Результат</th>
+        <th>Уровень</th><th>Вход</th><th>Стоп</th><th>Безубыток</th><th>Тейк</th><th>Сейчас</th><th>Похожесть</th><th>Длит.</th><th>Результат</th>
       </tr></thead><tbody>${rows}</tbody></table></div>
     </div>
   </div>
@@ -4571,7 +4988,7 @@ el('#testerRefreshAll').addEventListener('click', async()=>{
       }
     }catch(e){}
     done++; el('#testerProg').value=done/uniq.length*100;
-    await new Promise(r=>setTimeout(r,0));
+    await yieldNow();
   }
   saveTesterStrategies(arr); renderTester();
   el('#testerProg').style.display='none'; el('#testerProgLabel').textContent='';
@@ -4579,7 +4996,87 @@ el('#testerRefreshAll').addEventListener('click', async()=>{
 });
 
 /* Кнопка «Скан» — ищет новые сигналы за последние 24ч по всем добавленным стратегиям */
+// Сделка для тестировщика — та же запись, что и раньше; окно входа считается сразу, пока есть fwd и m5
+function testerRow(sig,stV,tkV,riskV){
+  let ewMval=null;
+  if(sig.fwd&&sig.fwd.length){
+    const ewLo=sig.e-0.3*riskV, ewHi=sig.e+0.3*riskV;
+    let m=0;
+    for(const b of sig.fwd){
+      const bars5=sig.m5&&Array.isArray(sig.m5[b[0]])?sig.m5[b[0]]:null;
+      if(bars5){let ok=true;for(const x of bars5){if(x[2]>=ewLo&&x[3]<=ewHi)m+=5;else if(x[2]>=ewLo||x[3]<=ewHi){m+=2.5;ok=false;break;}else{ok=false;break;}}if(!ok)break;}
+      else{if(b[2]>=ewLo&&b[3]<=ewHi)m+=60;else if(b[2]>=ewLo||b[3]<=ewHi){m+=30;break;}else break;}
+    }
+    ewMval=m;
+  }
+  return hwCopyFeat({
+    type:sig.type||'fbo',base:sig.base,sym:sig.sym,t:sig.t,d:sig.d,
+    side:sig.side,lv:sig.lv,k:sig.k,p:sig.p,
+    e:sig.e,st:stV,tk:tkV,rp:riskV/sig.e,atrD:sig.atrD,
+    strength:sig.strength,crosses:sig.crosses,
+    vol_mult:sig.vol_mult,vol5mAvg:sig.vol5mAvg,posMax:sig.posMax,score:sig.score!=null?sig.score:signalScore(sig),
+    ewM:ewMval
+  },sig);
+}
+// Обычный шаблон: проверка каждого сигнала по фильтрам шаблона (как было)
+function testerAddPlain(strat,sig){
+  const key=testerSignalKey(sig);
+  if((strat.signals||[]).some(s=>testerSignalKey(s)===key)) return false;
+  if(!testerPassesSignal(sig, strat.tplParams)) return false;
+  const fTpl=readFFromObj(strat.tplParams);
+  const riskV=Math.max((fTpl.stop/100)*sig.atrD, 0.02*sig.e);
+  if(!(riskV>0)||riskV/sig.e>MAXRISK) return false;
+  const long=sig.d===1;
+  const stV=long?sig.e-riskV:sig.e+riskV;
+  const tkV=long?sig.e+fTpl.tgt*riskV:sig.e-fTpl.tgt*riskV;
+  if(isNaN(stV)||isNaN(tkV)) return false;
+  strat.signals.push(testerRow(sig,stV,tkV,riskV));
+  return true;
+}
+/* Кнопка «Скан» — ищет новые сигналы по всем добавленным стратегиям.
+   6.93 (крипта): сбор сигналов — ТОЙ ЖЕ функцией, что и кнопка «Скан» во вкладке «Сигналы» (scanUniverse, то же окно
+   «Окно скана», та же глубина D1/H1, тот же фильтр оборота), а шаблон The best отбирается ТЕМ ЖЕ конвейером, что и
+   кнопка The best (bestPipeline): авто-фильтры, монета 12ч, сигналов в час, отслеживаемые, хвост прокола, 14/нед.
+   Новые сигналы The best добавляются с момента прошлого скана тестировщика (не меньше 24 ч) — без пропусков. */
 el('#testerScanAll').addEventListener('click', async()=>{
+  if(MKT!=='crypto') return testerScanLegacy();
+  const arr=loadTesterStrategies();
+  if(!arr.length){ setStatus('добавь хотя бы одну стратегию в тестировщик'); return; }
+  const btn=el('#testerScanAll'); btn.disabled=true;
+  const prog=el('#testerProg'), lbl=el('#testerProgLabel');
+  prog.style.display=''; prog.value=0; lbl.textContent='подключаюсь…';
+  try{
+    const {ex,tk}=await pickSource(el('#src').value); EX=ex;
+    const winH=windowHours(), now=Date.now();
+    const U=await scanUniverse(ex,tk,winH,(n)=>{ lbl.textContent=`${ex.name}: сканирую ${n} инструментов (окно ${winH}ч — как во вкладке «Сигналы»)…`; },
+      (i,n,base)=>{ prog.value=i/n*100; if(i%10===0) lbl.textContent=`${i}/${n} — ${base}`; });
+    const raw=U.raw;
+    const fresh=raw.filter(s=>s.t>=now-24*3600000);
+    let newTotal=0, bestRows=null;
+    for(const strat of arr){
+      strat.signals=strat.signals||[];
+      if(strat.tplParams&&strat.tplParams.__best){
+        if(!bestRows) bestRows=bestPipeline(raw.filter(s=>s.t>=now-winH*3600000));   // ровно то, что показывает кнопка The best на этом окне
+        const from=Math.max(now-winH*3600000, Math.min(now-24*3600000, strat.bestScanT||Infinity));
+        const have=new Set(strat.signals.map(testerSignalKey));
+        for(const r of bestRows){
+          if(r.t<from||have.has(testerSignalKey(r))) continue;
+          strat.signals.push(testerRow(r,r.st,r.tk,Math.abs(r.st-r.e))); newTotal++;
+        }
+        strat.bestScanT=now;
+      } else {
+        for(const sig of fresh) if(testerAddPlain(strat,sig)) newTotal++;
+      }
+    }
+    saveTesterStrategies(arr); renderTester();
+    prog.style.display='none'; lbl.textContent='';
+    setStatus(`тестировщик: скан завершён — найдено ${newTotal} новых сигналов`);
+  }catch(e){ setStatus('ошибка скана: '+e.message); prog.style.display='none'; lbl.textContent=''; }
+  finally{ btn.disabled=false; }
+});
+
+/* Мосбиржа — прежний скан тестировщика без изменений */
+async function testerScanLegacy(){
   const arr=loadTesterStrategies();
   if(!arr.length){ setStatus('добавь хотя бы одну стратегию в тестировщик'); return; }
   const btn=el('#testerScanAll'); btn.disabled=true;
@@ -4619,6 +5116,11 @@ el('#testerScanAll').addEventListener('click', async()=>{
             const stV=long?sig.e-riskV:sig.e+riskV;
             const tkV=long?sig.e+fTpl.tgt*riskV:sig.e-fTpl.tgt*riskV;
             if(isNaN(stV)||isNaN(tkV)) continue;
+            if(strat.tplParams&&strat.tplParams.__best){
+              // The best: большой хвост прокола относительно стопа — пропуск; не больше BEST_WEEK сигналов в неделю
+              if(sig.pk_ext!=null&&Math.abs(sig.pk_ext-sig.e)/Math.abs(stV-sig.e)>BEST_POKE) continue;
+              const wk=isoWeekKey(sig.t); if((strat.signals||[]).filter(x=>isoWeekKey(x.t)===wk).length>=BEST_WEEK) continue;
+            }
             // Вычисляем окно входа прямо сейчас, пока есть fwd и m5
             let ewMval=null;
             if(sig.fwd&&sig.fwd.length){
@@ -4631,26 +5133,26 @@ el('#testerScanAll').addEventListener('click', async()=>{
               }
               ewMval=m;
             }
-            strat.signals.push({
+            strat.signals.push(hwCopyFeat({
               type:sig.type||'fbo',base:sig.base,sym:sig.sym,t:sig.t,d:sig.d,
               side:sig.side,lv:sig.lv,k:sig.k,p:sig.p,
               e:sig.e,st:stV,tk:tkV,rp:riskV/sig.e,atrD:sig.atrD,
               strength:sig.strength,crosses:sig.crosses,
-              vol_mult:sig.vol_mult,score:sig.score!=null?sig.score:signalScore(sig),
+              vol_mult:sig.vol_mult,vol5mAvg:sig.vol5mAvg,posMax:sig.posMax,score:sig.score!=null?sig.score:signalScore(sig),
               ewM:ewMval
-            });
+            },sig));
             newTotal++;
           }
         }
       }catch(e){}
-      await new Promise(r=>setTimeout(r,0));
+      await yieldNow();
     }
     saveTesterStrategies(arr); renderTester();
     prog.style.display='none'; lbl.textContent='';
     setStatus(`тестировщик: скан завершён — найдено ${newTotal} новых сигналов`);
   }catch(e){ setStatus('ошибка скана: '+e.message); prog.style.display='none'; lbl.textContent=''; }
   finally{ btn.disabled=false; }
-});
+}
 
 /* ===== конец ТЕСТИРОВЩИКА ===== */
 
@@ -4679,6 +5181,9 @@ function saveScanUi(){ try{ const o={}; for(const e of scUiEls()) o[e.id]=e.type
 /* РУ-профиль фильтров — применяется автоматически при первом переключении на Мосбиржу */
 const RU_DEFAULTS={
   sc_strat:'brk',        // только пробой
+  sc_side:'0',           // 6.91: только SHORT (пробой вниз). Аудит март–окт. 2026, 669 пробоев после RU-фильтров:
+                         // SHORT 39.6% тейков (+0.51R/сделку), LONG 17.7% (−0.20R) — лонги в минусе в каждом из 8 месяцев (6–26%).
+                         // Можно вернуть «авто» вручную, если рынок развернётся вверх.
   sc_str:'5',            // уровень не слабее 5 — только сильные, очевидные уровни
                          // (твои лучшие сделки: ALRS+4.71%, MTLR+5.51%, RUAL+5.09% — все str≥5)
   sc_cross:'1',          // не более 1 касания уровня
@@ -4690,18 +5195,20 @@ const RU_DEFAULTS={
   sc_smooth:'null',
   sc_body:'0.4',         // тело свечи ≥ 40% диапазона — сила пробойного импульса
   sc_thr:'0.15',
-  sc_rusqueeze:'1',      // squeeze обязателен — сжатая пружина перед пробоем
-  sc_ruclose:'1',        // закрытие свечи в своей трети — сила импульса
+  sc_rusqueeze:'auto',   // 6.92: фильтр раньше не работал (баг); по данным март–окт. squeeze не помогает (30% против 33%) → авто
+  sc_ruclose:'auto',     // 6.92: не работал (баг); по данным без разницы (32% / 32%) → авто
   sc_ruimoex:'auto',     // IMOEX — авто (можно включить вручную)
-  sc_rurelstr:'1',       // акция сильнее/слабее рынка — обязательно
+  sc_rurelstr:'auto',    // 6.92: не работал (баг); по данным мешает (29% против 34%) → авто
+  sc_rubase:'4',         // 6.92: база у уровня ≥4 из 8 ч — как в ваших сделках
 };
 function applyRuDefaults(){
   for(const [id,val] of Object.entries(RU_DEFAULTS)){
     const e=el('#'+id); if(!e) continue;
     if(e.type==='checkbox') e.checked=!!val; else e.value=val;
   }
-  // Максимум 3 сделки в неделю для РУ — как в ручном трейдинге
-  const wm=el('#sc_weekmax'); if(wm&&(+wm.value>3||+wm.value===20)) wm.value=3;
+  // 6.91: недельный лимит для РУ — 15 (было принудительно 3). Отбор «топ по оценке» на Мосбирже не помогает: оценка обучена
+  // на крипте и выбирала в основном лонги (из 3/нед — 51 лонг на 17 шортов, лонги 25% против 53% у шортов).
+  const wm=el('#sc_weekmax'); if(wm&&(+wm.value<=3||+wm.value===20)) wm.value=15;
   el('#sc_strat').dispatchEvent(new Event('change'));
 }
 function restoreScanUi(m){ try{ const o=JSON.parse(localStorage.getItem('hw_scan_ui_'+m)||'null');
@@ -5017,7 +5524,7 @@ async function algoLoad(topN,hours,progress){
              ind_volAbove:ind.volAbove, ind_emaSlope:ind.emaSlope},
         o:[S.o,L.o], r:[S.r,L.r], xt:[S.xt,L.xt], st:[S.st,L.st], tkp:[S.tk,L.tk]});
     }
-    if(c%5===4){ progress(`считаю индикаторы: ${c+1} из ${coins.length} монет`, 0.8+0.2*(c+1)/coins.length); await new Promise(r=>setTimeout(r,0)); }
+    if(c%5===4){ progress(`считаю индикаторы: ${c+1} из ${coins.length} монет`, 0.8+0.2*(c+1)/coins.length); await yieldNow(); }
   }
   rows.sort((a,b)=>(a.t-b.t)||(a.c-b.c));   // по времени: биты маски идут в хронологическом порядке
   const D={at:Date.now(),coins,rows,uniN:uni.length,hours,B:null};
@@ -5104,7 +5611,7 @@ async function runAlgoSearch(kind){
         log(`<b>${pct.toFixed(1)}%</b> &nbsp; перебор комбинаций индикаторов (до ${en.depth} одновременно) · ${D.coins.length} монет · ${D.rows.length.toLocaleString('ru-RU')} баров · мест в рынке ${slots}<br>`+
           `проверено ${evals.toLocaleString('ru-RU')} из ${BUDGET.toLocaleString('ru-RU')} · найдено подходящих ${found.toLocaleString('ru-RU')} · `+
           `${Math.round(rate).toLocaleString('ru-RU')} комб/сек · осталось ~${left<60?Math.ceil(left)+' сек':Math.ceil(left/60)+' мин'}`+bar(pct/100));
-        await new Promise(r=>setTimeout(r,0));
+        await yieldNow();
       }
       if(!more||evals>=BUDGET) break;
     }
@@ -5122,7 +5629,7 @@ async function runAlgoSearch(kind){
         const r=pool[q];
         const ec=equityCurve(algoMaterialize(D,r.sel,r.side,r.pairs,false),slots,START,pnl);
         r.stab=algoSmooth(ec.pts); r.ddS=Math.max(0,1-Math.min(...ec.pts.map(p=>p.eq))/START); r.fin=ec.final;
-        if(q%50===49){ log(`<b>оцениваю ровность роста капитала: ${q+1} из ${pool.length}</b>`+bar((q+1)/pool.length)); await new Promise(r=>setTimeout(r,0)); }
+        if(q%50===49){ log(`<b>оцениваю ровность роста капитала: ${q+1} из ${pool.length}</b>`+bar((q+1)/pool.length)); await yieldNow(); }
       }
       top=pool.filter(r=>r.ddS<=STAB_MAX_DD_START&&r.fin>START).sort((a,b)=>b.stab-a.stab||b.lb-a.lb).slice(0,10);
       if(!top.length){ log(`Стабильных комбинаций не найдено: нужно ≥${STAB_MIN_TPW} реальных сделок/нед при 1 месте в рынке, не больше ${STAB_MAX_STREAK} стопов подряд и капитал в плюсе. Снизь минимум сделок или возьми больше монет/недель.`); return; }
@@ -5268,7 +5775,7 @@ function applyMarket(m,init){
   el('#fldStocks').style.display=(ru||algo)?'none':'';
   // Скан-панель: в алго-режиме показываем индикаторные фильтры, скрываем технические
   const scFilters=el('#sc_filters'),algoPanel=el('#sc_algo_panel');
-  if(scFilters) scFilters.style.display=algo?'none':'';
+  // scFilters visibility controlled only by toggle button — don't change on market switch
   if(algoPanel) algoPanel.style.display=algo?'':'none';
   // Кнопка «Сканировать» в алго-режиме запускает runAlgoScan
   const runBtn=el('#run');
@@ -5460,19 +5967,20 @@ function stabEval(rows,t0,t1){
   let st=0,ms=0,cum=0,peak=0,dd=0; const eq=[0];
   for(const t of c){ if(t.o==='stop'){ st++; if(st>ms) ms=st; } else if(t.o==='take') st=0;
     cum+=(t.nr!=null?t.nr:(t.r||0)); eq.push(cum); if(cum>peak) peak=cum; if(peak-cum>dd) dd=peak-cum; }
-  if(ms>STAB_MAX_STREAK||cum<=0) return null;
+  if(ms>STAB_MAX_STREAK) return null;   // только серия стопов — жёсткий фильтр
+  // cum и growth — мягкие: отрицательные сильно снижают оценку, но не блокируют поиск
   // Деньги: тот же расчёт, что у графика капитала (1 место в рынке, старт $50 / 20 000 ₽).
   // Капитал ни в одной точке не должен опускаться ниже 30% от старта (просадка от старта ≤ 70%).
   const RU=MKT==='ru', START=RU?20000:50, pnl=RU?(t=>(t.r||0)*(t.rp||0)):(t=>(t.r||0)/3);
   const ec=equityCurve(rows,STAB_CONC,START,pnl), minEq=Math.min(...ec.pts.map(p=>p.eq));
   const ddStart=Math.max(0,1-minEq/START);
   if(ddStart>STAB_MAX_DD_START) return null;
-  if(ec.final<=START) return null;   // в R плюс, но деньгами (сложный процент) ниже старта — не стабильно
+  // ec.final <= START: не делаем жёсткой отсечкой — мягкий штраф через growth
   // Ровность считается по КАПИТАЛУ В ЛОГАРИФМИЧЕСКОЙ ШКАЛЕ — ровно так, как его рисует график.
   // При сложном проценте «лестница вверх» — это прямая линия именно в логарифме денег
   // (каждый тейк ×2, каждый стоп −33%), а не в сумме R.
   const lp=ec.pts.map(p=>Math.log(Math.max(p.eq,1e-9))), N=lp.length-1, growth=lp[N]-lp[0];
-  if(N<6||growth<=0) return null;
+  if(N<6) return null;
   // ===== РОВНОСТЬ роста капитала (всё в логарифме денег — как на графике) =====
   // 1) Прямая по сделкам: R² линии «номер сделки → капитал». Лестница вверх ≈ 1.
   const lin=r2line(lp);
@@ -5495,7 +6003,9 @@ function stabEval(rows,t0,t1){
   let lastHi=t0, hiV=lp[0], stag=0;
   for(let i=1;i<=N;i++){ const tt=ec.pts[i].t||t0; if(lp[i]>hiV){ stag=Math.max(stag,tt-lastHi); hiV=lp[i]; lastHi=tt; } }
   stag=Math.max(stag,t1-lastHi); const fresh=Math.max(0,1-stag/Math.max(t1-t0,1));
-  const smooth=Math.pow(Math.max(lin,1e-6)*Math.max(linW,1e-6)*Math.max(even,1e-6)*shallow*Math.max(fresh,1e-6),1/5);
+  // Если growth ≤ 0 — стратегия убыточна. Сильный штраф, но не полный ноль (чтобы beam мог стартовать)
+  const growthFactor=growth>0?1:Math.exp(growth*2);   // growth=-0.5 → factor≈0.37
+  const smooth=growthFactor*Math.pow(Math.max(lin,1e-6)*Math.max(linW,1e-6)*Math.max(even,1e-6)*shallow*Math.max(fresh,1e-6),1/5);
   let upW=0; for(let w=1;w<wl.length;w++) if(wl[w]>wl[w-1]) upW++;
   const ts=c.filter(t=>t.o==='take').length, ss=c.filter(t=>t.o==='stop').length;
   return {n:c.length,tpw,wr:(ts+ss)?ts/(ts+ss):0,streak:ms,tot:cum,dd,r2t:lin,r2w:linW,even,shallow,fresh,smooth,growth,
@@ -5542,27 +6052,67 @@ async function runStableCore(){
     const MSC=['auto','3','5','6','7','8','9'];
     // Этап 1: одно изменение (или без изменений) × порог оценки. Этап 2: к 40 лучшим добавляется
     // второе изменение — так находятся связки, которые дают и ровную лестницу, и большой рост денег.
-    const BEAM=40, total=(variants.length+1)*MSC.length+BEAM*variants.length; let done=0, found=0;
+    const BEAM=80;
+    let done=0, found=0;
     const res=[], seenC=new Set();
-    const tryC=(c,ch,ms)=>{ const key=JSON.stringify(c); if(seenC.has(key)) return; seenC.add(key);
-      const rows=evalC(c), e=stabEval(rows,t0,t1); if(e){ found++; res.push({...e,c,ch,ms,rows}); } };
-    const tick=async()=>{ const p=done/total*100, el_=(Date.now()-t0w)/1000, left=p>0?el_*(100-p)/p:0;
-      bar(p,`проверено ${done.toLocaleString('ru-RU')} из ${total.toLocaleString('ru-RU')} · найдено подходящих ${found} · осталось ~${Math.ceil(left)} сек`);
-      await new Promise(r=>setTimeout(r,0)); };
+    // tryC возвращает объект если нашёл стабильную комбо (для beam rounds)
+    const tryC=(c,ch,ms)=>{ const key=JSON.stringify(c); if(seenC.has(key)) return null; seenC.add(key);
+      const rows=evalC(c), e=stabEval(rows,t0,t1); if(e){ found++; const r={...e,c,ch,ms,rows}; res.push(r); return r; } return null; };
+    let _stabTs=0;
+    const MAX_STABLE=()=>100000;   // стабильные: всегда 100K, не связано с «Сколько комбинаций проверять»
+    const tick=async()=>{ if(Date.now()-_stabTs<50) return; _stabTs=Date.now();
+      const mx=MAX_STABLE(), p=Math.min(99,done/mx*100), el_=(Date.now()-t0w)/1000, left=p>0?el_*(100-p)/p:0;
+      bar(p,`проверено ${done.toLocaleString('ru-RU')} из ~${mx.toLocaleString('ru-RU')} · найдено подходящих ${found} · осталось ~${Math.ceil(left)} сек`);
+      await yieldNow(); };
     const score=arr=>{ const gMax=Math.max(...arr.map(o=>o.growth),1e-9);
       for(const o of arr) o.stab=Math.pow(o.smooth,0.5)*Math.pow(Math.max(o.growth/gMax,1e-6),0.5); };
     for(const vr of [null,...variants]){
       for(const ms of MSC){ const c={...cBase, msc:ms}; if(vr) c[vr.id]=vr.v; tryC(c,vr?[vr]:[],ms); done++; }
       if(done%35<MSC.length) await tick();
     }
-    score(res);
-    const beam=res.slice().sort((a,b)=>b.stab-a.stab).slice(0,BEAM);
-    for(const b of beam){
-      for(const vr of variants){ done++;
-        if(b.ch.some(x=>x.id===vr.id)) continue;
-        tryC({...b.c,[vr.id]:vr.v},[...b.ch,vr],b.ms);
-        if(done%35===0) await tick();
+    // Если stage1 не нашёл ни одного стабильного — добавляем «почти стабильные»
+    // в качестве стартовых точек для beam (без требования cum>0 и growth>0)
+    if(!res.length){
+      for(const vr of [null,...variants]){
+        for(const ms of MSC){
+          const c={...cBase,msc:ms}; if(vr) c[vr.id]=vr.v;
+          const key=JSON.stringify(c); if(seenC.has(key)) continue;
+          const rows=evalC(c), closed=rows.filter(isClosed);
+          if(!closed.length) continue;
+          const weeks_=Math.max(1,(t1-t0)/(7*864e5)), tpw_=closed.length/weeks_;
+          if(tpw_<STAB_MIN_TPW) continue;
+          let st_=0,ms_=0,cum_=0;
+          for(const tx of closed.sort((a,b)=>a.t-b.t)){
+            if(tx.o==='stop'){st_++;if(st_>ms_)ms_=st_;}else if(tx.o==='take')st_=0;
+            cum_+=(tx.nr??tx.r??0);
+          }
+          if(ms_>STAB_MAX_STREAK) continue;
+          // добавляем как fallback-старт для beam (не в res — только в начальный beam)
+          const tk_=closed.filter(x=>x.o==='take').length,ss_=closed.filter(x=>x.o==='stop').length;
+          res.push({n:closed.length,tpw:tpw_,wr:(tk_+ss_)?tk_/(tk_+ss_):0,streak:ms_,tot:cum_,
+            dd:0,r2t:0,r2w:0,even:0,shallow:0,fresh:0,smooth:0.01,growth:Math.max(cum_,0.01),
+            ddStart:0,minEq:0,final:0,START:0,stab:0.01,eq:[0],upW:0,ddMax:0,
+            c,ch:vr?[vr]:[],ms,rows});
+          found++;
+        }
       }
+    }
+    // Многораундовый beam search до достижения бюджета
+    score(res);
+    let beamArr=res.slice().sort((a,b)=>b.stab-a.stab).slice(0,BEAM);
+    let round=0;
+    while(done<MAX_STABLE() && round<15 && beamArr.length){
+      round++;
+      for(const b of beamArr){
+        if(done>=MAX_STABLE()) break;
+        for(const vr of variants){ if(done>=MAX_STABLE()) break;
+          if(b.ch.some(x=>x.id===vr.id)) continue;
+          done++; tryC({...b.c,[vr.id]:vr.v},[...b.ch,vr],b.ms);
+          if((done&63)===0) await tick();
+        }
+      }
+      score([...res]);
+      beamArr=res.slice().sort((a,b)=>b.stab-a.stab).slice(0,BEAM);
     }
     const seen=new Set(), uniq=res.filter(o=>{ const k=o.n+'|'+o.tot.toFixed(3)+'|'+o.streak+'|'+o.final.toFixed(2); if(seen.has(k)) return false; seen.add(k); return true; });
     // Итоговая стабильность: ровность лестницы и денежный рост — поровну (оба важны; рост в логарифме,
@@ -5576,8 +6126,41 @@ async function runStableCore(){
     }
     cand.sort((a,b)=>b.stab-a.stab||b.growth-a.growth);
     const top=cand.slice(0,10);
-    if(!top.length){ box.innerHTML=`<div class="note">Не нашлось ни одной комбинации, где при 1 сделке в рынке было бы от ${STAB_MIN_TPW} сделок в неделю, не больше ${STAB_MAX_STREAK} стопов подряд, просадка от старта не больше ${Math.round(STAB_MAX_DD_START*100)}% и итог выше старта. Попробуй окно скана побольше или ослабь фильтры бэктеста.</div>`; return; }
-    bar(99,'считаю устойчивость для десятки…'); await new Promise(r=>setTimeout(r,0));
+    if(!top.length){
+      // Диагностика: показываем почему не нашлось
+      const diagAll=[]; const seenD=new Set();
+      for(const vr of [null,...variants.slice(0,20)]){
+        for(const ms of MSC.slice(0,3)){
+          const c={...cBase,msc:ms}; if(vr) c[vr.id]=vr.v;
+          const key=JSON.stringify(c); if(seenD.has(key)) continue; seenD.add(key);
+          const rows=evalC(c), closed=rows.filter(isClosed);
+          if(!closed.length) continue;
+          const weeks_=Math.max(1,(t1-t0)/(7*864e5)), tpw_=closed.length/weeks_;
+          let st_=0,ms_=0,cum_=0;
+          for(const tx of closed.sort((a,b)=>a.t-b.t)){
+            if(tx.o==='stop'){st_++;if(st_>ms_)ms_=st_;}else if(tx.o==='take')st_=0;
+            cum_+=(tx.nr??tx.r??0);
+          }
+          diagAll.push({tpw_,ms_,cum_,n:closed.length});
+        }
+      }
+      const failTpw=diagAll.filter(d=>d.tpw_<STAB_MIN_TPW).length;
+      const failStreak=diagAll.filter(d=>d.tpw_>=STAB_MIN_TPW&&d.ms_>STAB_MAX_STREAK).length;
+      const failCum=diagAll.filter(d=>d.tpw_>=STAB_MIN_TPW&&d.ms_<=STAB_MAX_STREAK&&d.cum_<=0).length;
+      const passed=diagAll.filter(d=>d.tpw_>=STAB_MIN_TPW&&d.ms_<=STAB_MAX_STREAK&&d.cum_>0).length;
+      const maxTpw=diagAll.length?Math.max(...diagAll.map(d=>d.tpw_)).toFixed(1):'0';
+      box.innerHTML=`<div class="note">Не нашлось ни одной стабильной комбинации.<br><br>`+
+        `<b>Диагностика</b> (выборка из ${diagAll.length} вариантов):<br>`+
+        `• не хватает сделок (< ${STAB_MIN_TPW}/нед): <b>${failTpw}</b> из ${diagAll.length} — макс. ${maxTpw}/нед<br>`+
+        `• слишком много стопов подряд (> ${STAB_MAX_STREAK}): <b>${failStreak}</b><br>`+
+        `• итог в минусе: <b>${failCum}</b><br>`+
+        `• прошло все условия: <b>${passed}</b><br><br>`+
+        (failTpw>diagAll.length*0.7?`Совет: снизь «Мин. сделок в неделю» — сейчас их не хватает.<br>`:'')+ 
+        (failStreak>diagAll.length*0.5?`Совет: серии стопов слишком длинные — это рыночный период, а не настройки.<br>`:'')+ 
+        (failCum>diagAll.length*0.5?`Совет: большинство вариантов убыточны на этом периоде — попробуй другой период или добавь больше сигналов.<br>`:'')+ 
+        `</div>`; return;
+    }
+    bar(99,'считаю устойчивость для десятки…'); await yieldNow();
     const drops=dropSets(BTS.map(s=>s.base));
     for(const o of top){
       Object.assign(o,stabStats(o.rows), {perWk:o.tpw, maxStopsRaw:o.streak, slots:STAB_CONC, L});
@@ -5594,7 +6177,7 @@ async function runStableCore(){
     const chg=o=>{ const p=o.ch.map(x=>`<b>${nm[x.id]||x.id}:${x.v}</b>`); if(o.ms!=='auto') p.push(`<b>оценка от:${o.ms}</b>`); return p.join(', ')||'без изменений'; };
     const pc=v=>(v*100).toFixed(0)+'%';
     let h=`<h3>10 самых стабильных комбинаций</h3>`+
-      `<div class="note" style="margin-bottom:8px">Проверено <b>${total.toLocaleString('ru-RU')}</b> комбинаций за ${((Date.now()-t0w)/1000).toFixed(0)} сек, подходящих под условия: ${found}. `+
+      `<div class="note" style="margin-bottom:8px">Проверено <b>${done.toLocaleString('ru-RU')}</b> комбинаций за ${((Date.now()-t0w)/1000).toFixed(0)} сек, подходящих под условия: ${found}. `+
       `Встроено всегда: 1 сделка в рынке, от ${STAB_MIN_TPW} сделок/нед, не больше ${STAB_MAX_STREAK} стопов подряд, просадка от старта не больше ${Math.round(STAB_MAX_DD_START*100)}%, итог выше старта. `+
       `База — твои текущие фильтры бэктеста, меняются до двух фильтров (включая стоп) плюс порог оценки. Нажми на строку — откроется график роста капитала (1 место в рынке).</div>`+
       '<div class="scroll"><table style="font-size:13px"><thead><tr><th>#</th><th></th><th>Стаб.</th><th>Кривая</th><th>Винрейт<br><span class="muted">1-я / 2-я пол.</span></th>'+
@@ -5826,7 +6409,7 @@ async function runBoth(kind){
   } finally { SEARCH_TYPE=null; SEARCH_DIV=1; MINWK_OVR=null; STAB_MIN_TPW=stabMin; }
   const box=el('#btMonth');
   if(!res.fbo.length||!res.brk.length){ box.innerHTML=`<div class="note">Не удалось подобрать ${!res.fbo.length?'ложный пробой':'пробой'} под условия — «Оба» не собрать. Попробуй отдельно в режимах «Ложный пробой» и «Пробой».</div>`; return; }
-  box.innerHTML='<div class="note">склеиваю лучшие наборы ЛП и пробоя в режиме «Оба»…</div>'; await new Promise(r=>setTimeout(r,0));
+  box.innerHTML='<div class="note">склеиваю лучшие наборы ЛП и пробоя в режиме «Оба»…</div>'; await yieldNow();
   const src=byStrat(btPeriodCut(BT),'both'); let t0=Infinity,t1=-Infinity; for(const s of src){ if(s.t<t0)t0=s.t; if(s.t>t1)t1=s.t; }
   const weeks=Math.max(1,(t1-t0)/(7*864e5)), L=kind==='stable'?{conc:STAB_CONC,dayMax:btLimits().dayMax}:undefined;
   const slots=kind==='stable'?STAB_CONC:(+(el('#bt_conc')?el('#bt_conc').value:0)||1);
@@ -6004,7 +6587,7 @@ function autoNotify(){
   beep();
   if('Notification' in window && Notification.permission==='granted'){
     for(const t of fresh.slice(0,5)) new Notification(`${t.base} ${t.d?'LONG':'SHORT'} · оценка ${t.score!=null?t.score.toFixed(1):'—'}`,
-      {body:`${t.type==='brk'?'Пробой':'Ложный пробой'} · вход ${fmt(t.e)} · стоп ${fmt(t.st)} · тейк ${fmt(t.tk)}`});
+      {body:`${t.type==='brk'?'Пробой':'Ложный пробой'} · вход ${fmt(t.e)} · стоп ${fmtStop(t)} · тейк ${fmt(t.tk)}`});
     if(fresh.length>5) new Notification(`Ещё ${fresh.length-5} новых сигналов`,{body:'Открой вкладку «Сигналы»'});
   }
   setStatus(`автоскан: новых сигналов ${fresh.length} — ${fresh.map(t=>t.base).slice(0,8).join(', ')}`);

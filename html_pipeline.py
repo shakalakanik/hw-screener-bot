@@ -210,3 +210,56 @@ def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
         return seq
     wm = week_max if week_max else 999
     return _weekly_best_cap(seq, wm) if wm < 999 else seq
+
+
+# ═══ The best (HTML 6.93 bestPipeline, режим «edge») ═══════════════════════════
+def is_best_card(card: dict) -> bool:
+    """isBestFBO(): ЛП-шорт, D1-серия вверх ≥2, объём часа перед сигналом ≤ среднего за 3 ч, без шипа H1 ≥8×."""
+    from hwv1 import best_verdict
+    if card.get("strategy", "fbo") != "fbo":
+        return False
+    feat = dict(card.get("feat") or {})
+    feat["type"] = "fbo"
+    feat.setdefault("side", "short" if card.get("side") == "SHORT" else "long")
+    return best_verdict(feat) is None
+
+
+def _best_week_cap(rows):
+    """bestWeekCap(): по времени; хвост прокола > BEST_POKE стопов — пропуск; ≤ BEST_WEEK за ISO-неделю."""
+    from hwv1 import BEST_POKE, BEST_WEEK, best_poke
+    asc = sorted(rows, key=lambda s: (s["signal_ts"], -s["score"], _base(s)))
+    cnt, keep = {}, []
+    for t in asc:
+        feat = t.get("feat") or {}
+        pr = best_poke({"pk_ext": feat.get("pk_ext"), "st": t.get("stop"), "e": t.get("last")})
+        if (pr or 0) > BEST_POKE:
+            continue
+        k = iso_week_key(t["signal_ts"])
+        if cnt.get(k, 0) >= BEST_WEEK:
+            continue
+        cnt[k] = cnt.get(k, 0) + 1
+        keep.append(t)
+    return sorted(keep, key=_prio_key)
+
+
+def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False) -> list[dict]:
+    """1:1 bestPipeline(): фильтры всегда «авто» (часы 0-24 при выключенном «без ночи», только SHORT),
+    источник — только The best ЛП, затем монета 12ч → cap/час (cap||3) → серии → ≤14/нед."""
+    from screener import _f_from_template, passes_html
+    f = _f_from_template({} if no_night else {"hours": "0-24"}, "crypto", "fbo")
+    rows = [c for c in cards if c["signal_ts"] >= cutoff_ms and c.get("strategy", "fbo") == "fbo"
+            and c.get("market", "crypto") == "crypto" and is_best_card(c)]
+    ok = []
+    for c in rows:
+        if not passes_html(c["feat"], f):
+            continue
+        r = recompute(c, f)
+        if r is None or r["rp"] * 100 > f["maxrisk"]:
+            continue
+        ok.append(r)
+    seq = _apply_sequential(_cap_cluster(_apply_coin_limit(ok), f["cap"] or 3), f)
+    return _best_week_cap(seq)
+
+
+def best_key(c: dict) -> tuple:
+    return (c["ticker"], c.get("strategy"), c["signal_ts"], c["side"], round(float(c["level"]), 10))

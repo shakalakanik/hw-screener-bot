@@ -2068,6 +2068,7 @@ _JOURNAL_FIELDS = (
     "ticker", "side", "market", "strategy", "matched_template", "level", "kind",
     "last", "stop", "take", "score", "strength", "prob", "dist_atr", "d1_bias",
     "signal_ts", "crosses", "vol_mult", "level_age_h", "atr_d", "atr_h1", "risk",
+    "is_best",
 )
 
 
@@ -2103,6 +2104,9 @@ def _ensure_signal_journal(c: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_journal_chat_mkt "
         "ON signal_journal(chat_id, market, sent_ts)"
     )
+    if not _column_exists(c, "signal_journal", "is_best"):
+        # The best (HTML 6.93): флаг «сигнал прошёл отбор The best»
+        c.execute("ALTER TABLE signal_journal ADD COLUMN is_best INTEGER NOT NULL DEFAULT 0")
 
 
 def _journal_snapshot(card: dict) -> dict:
@@ -2135,6 +2139,7 @@ def _journal_row_to_dict(row: sqlite3.Row) -> dict:
         "ticker": row["ticker"],
         "signal_ts": int(row["signal_ts"] or 0),
         "sent_ts": int(row["sent_ts"] or 0),
+        "is_best": bool(row["is_best"]) if "is_best" in row.keys() else bool(card.get("is_best")),
         "card": card,
     }
 
@@ -2151,10 +2156,10 @@ def add_signal_journal(chat_id: int, card: dict) -> tuple[int, list[int]]:
         _ensure_signal_journal(c)
         cur = c.execute(
             """INSERT INTO signal_journal
-               (chat_id, market, ticker, signal_ts, sent_ts, card_json)
-               VALUES (?,?,?,?,?,?)""",
+               (chat_id, market, ticker, signal_ts, sent_ts, card_json, is_best)
+               VALUES (?,?,?,?,?,?,?)""",
             (int(chat_id), market, ticker, signal_ts, sent_ts,
-             json.dumps(snap, ensure_ascii=False)),
+             json.dumps(snap, ensure_ascii=False), 1 if card.get("is_best") else 0),
         )
         new_id = int(cur.lastrowid)
         rows = c.execute(
@@ -2224,3 +2229,38 @@ def list_signal_journal(chat_id: int, market: str | None = None, limit: int = JO
                 (int(chat_id), limit * 3),
             ).fetchall()
     return [_journal_row_to_dict(r) for r in rows]
+
+
+# ── The best (HTML 6.93): переключатель на чат + недельный счётчик ───────────────
+def _ensure_the_best(c: sqlite3.Connection) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS chat_the_best (
+            chat_id INTEGER PRIMARY KEY,
+            enabled INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
+
+def get_the_best(chat_id: int) -> bool:
+    with _conn() as c:
+        _ensure_the_best(c)
+        row = c.execute("SELECT enabled FROM chat_the_best WHERE chat_id=?", (int(chat_id),)).fetchone()
+    return bool(row["enabled"]) if row else False
+
+
+def set_the_best(chat_id: int, enabled: bool) -> None:
+    with _conn() as c:
+        _ensure_the_best(c)
+        c.execute("INSERT OR REPLACE INTO chat_the_best(chat_id, enabled) VALUES (?,?)",
+                  (int(chat_id), 1 if enabled else 0))
+
+
+def best_sent_ts_since(chat_id: int, since_ms: int) -> list[int]:
+    """signal_ts сигналов The best (крипта), ушедших в чат с since_ms."""
+    with _conn() as c:
+        _ensure_signal_journal(c)
+        rows = c.execute(
+            "SELECT signal_ts FROM signal_journal WHERE chat_id=? AND market='crypto' "
+            "AND is_best=1 AND signal_ts>=?", (int(chat_id), int(since_ms)),
+        ).fetchall()
+    return [int(r["signal_ts"]) for r in rows]

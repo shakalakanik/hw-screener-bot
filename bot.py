@@ -330,17 +330,17 @@ def _format_card(card: dict) -> str:
             f"🕐 Сигнал: {time_str}",
         ])
 
-    return "\n".join([
+    best_line = "⭐ <b>THE BEST</b>" if card.get("is_best") else ""
+    return "\n".join(([best_line] if best_line else []) + [
         f"{side_emoji} <b>{card['ticker']}</b> — {card['side']}",
-        f"{market_label}  ·  {strategy_label}{prob_line}",
+        f"{market_label}  ·  {strategy_label}",
         tpl_line.rstrip("\n"),
-        f"🎯 Уровень: <code>{level:.4f}</code>  [{card['kind']}]",
-        f"📥 Вход: <code>{entry:.4f}</code>  (расст. {dist_pct:.0f}% ATR)",
+        f"🎯 Уровень: <code>{level:.4f}</code>",
+        f"📥 Вход: <code>{entry:.4f}</code>",
         f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
         f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
         f"⭐ Оценка: <b>{card['score']:.1f}</b> / 10" if card.get("score") is not None
         else f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
-        f"📊 Тренд D1: {bias}",
         f"🕐 Сигнал: {time_str}",
     ])
 
@@ -857,6 +857,12 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         text=bo_label,
         callback_data=f"best_only:{market}",
     )])
+    if market == "crypto":
+        tb = storage.get_the_best(chat_id)
+        buttons.append([InlineKeyboardButton(
+            text="⭐ The Best ✓ (только отбор The Best)" if tb else "⭐ The Best (выкл — отметка ⭐ в карточках)",
+            callback_data="the_best:crypto",
+        )])
 
     if not shared_names:
         buttons.append([InlineKeyboardButton(
@@ -1009,6 +1015,16 @@ async def cb_best_only(call: CallbackQuery):
     await call.answer("только лучший: вкл" if not cur else "только лучший: выкл")
 
 
+@dp.callback_query(F.data.startswith("the_best:"))
+async def cb_the_best(call: CallbackQuery):
+    """⭐ The Best (HTML 6.93): ВКЛ — по крипте только сигналы отбора The Best; ВЫКЛ — как обычно, но с отметкой ⭐."""
+    chat_id = call.message.chat.id
+    cur = storage.get_the_best(chat_id)
+    storage.set_the_best(chat_id, not cur)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market="crypto")
+    await call.answer("The Best: вкл" if not cur else "The Best: выкл")
+
+
 @dp.callback_query(F.data.startswith("auto_on:"))
 async def cb_auto_on(call: CallbackQuery):
     """Вкл/выкл встроенный «🤖 Авто» для рынка. Шаблоны пользователя не трогаются."""
@@ -1150,6 +1166,7 @@ def _ai_user_context(chat_id: int) -> dict:
         "auto": storage.get_auto_mode(chat_id),
         "auto_strategy": {m: storage.get_auto_strategy(chat_id, m) for m in _AUTO_MARKETS},
         "best_only": storage.get_best_only(chat_id),
+        "the_best": storage.get_the_best(chat_id),
         "template_strategies": _template_strategies_by_market(chat_id),
     }
 
@@ -1253,6 +1270,8 @@ def _format_proposal(proposal: dict) -> str:
     if action == "set_auto_strategy":
         m = _AI_MKT_RU.get(p.get("market"), "крипта")
         return f"{m}: стратегия 🤖 Авто → <b>{_AI_STRAT_RU.get(p.get('strategy'))}</b>"
+    if action == "set_the_best":
+        return f"крипта: «⭐ The Best» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
     if action == "set_best_only":
         m = _AI_MKT_RU.get(p.get("market"), "крипта")
         return f"{m}: «только лучший сигнал» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
@@ -1320,6 +1339,9 @@ def _apply_ai_one(chat_id: int, proposal: dict) -> str:
         if m not in _AUTO_MARKETS or p.get("strategy") not in _STRAT_CYCLE:
             return "у этого рынка нет 🤖 Авто — ничего не менял."
         storage.set_auto_strategy(chat_id, m, p["strategy"])
+        return "готово."
+    if action == "set_the_best":
+        storage.set_the_best(chat_id, bool(p.get("enabled")))   # = кнопка the_best
         return "готово."
     if action == "set_best_only":
         if p.get("market") not in storage.MARKETS:
