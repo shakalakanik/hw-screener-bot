@@ -46,7 +46,17 @@ MAX_SIGNAL_AGE_H = 12
 # HTML 6.78.x: чекбокс «без ночи» (noNight). У пользователя в десктопном HTML он ВЫКЛЮЧЕН →
 # скан круглосуточно, а «авто» часов входа = 0-24 (readF). Автоскан подписки следует этому.
 THE_BEST_NAME = "⭐ The Best"
-CRYPTO_NO_NIGHT = os.getenv("CRYPTO_NO_NIGHT", "0") == "1"
+# Окно доставки крипты (по показанному времени сигнала = открытие H1 + 1ч, МСК), включительно.
+# Только фильтр отправки — расчёт сигналов (паритет с HTML) не меняется.
+CRYPTO_SEND_FROM = int(os.getenv("CRYPTO_SEND_FROM", "10"))
+CRYPTO_SEND_TO = int(os.getenv("CRYPTO_SEND_TO", "22"))
+
+
+def crypto_send_hour_ok(signal_ts: int) -> bool:
+    """True, если показанное время сигнала (открытие бара + 1ч, МСК) в [FROM, TO] включительно."""
+    h = (time.gmtime((int(signal_ts) + 3_600_000) / 1000).tm_hour + 3) % 24
+    return CRYPTO_SEND_FROM <= h <= CRYPTO_SEND_TO
+CRYPTO_NO_NIGHT = os.getenv("CRYPTO_NO_NIGHT", "1") == "1"   # десктоп HTML: «без ночи» ВКЛ
 MAX_SIGNAL_AGE_MS = MAX_SIGNAL_AGE_H * 3_600_000
 # Lookback детекции = max age (не ищем то, что всё равно не отправим).
 SCAN_LOOKBACK_H = MAX_SIGNAL_AGE_H
@@ -1250,7 +1260,7 @@ async def _deliver_html(
                                    "is_best": mkt == "crypto" and best_key(c) in best_keys}
 
         # Счётчики для прозрачности (ручной «Скан» пишет итог: найдено как в HTML → отправлено).
-        st = {"found": len(chosen), "too_old": 0, "already": 0, "level_dup": 0,
+        st = {"found": len(chosen), "too_old": 0, "night": 0, "already": 0, "level_dup": 0,
               "conc": 0, "best_only": 0, "sent": 0,
               "exchange": ("OKX" if _active_exchange == "okx" else "Bybit")}
         fresh = []
@@ -1258,6 +1268,8 @@ async def _deliver_html(
             if (int(c["signal_ts"]) < min_send_ts if min_send_ts is not None
                     else now_ms - int(c["signal_ts"]) > MAX_SIGNAL_AGE_MS):
                 st["too_old"] += 1
+            elif c.get("market", "crypto") == "crypto" and not crypto_send_hour_ok(c["signal_ts"]):
+                st["night"] += 1   # ночь: не шлём и не помечаем отправленным
             elif storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
                                           c.get("strategy", "brk"), c["side"]):
                 st["already"] += 1
@@ -1305,7 +1317,7 @@ async def _deliver_html(
             storage.mark_sent(c["ticker"], c["side"], c["level"], c.get("strategy", "brk"))
             sent += 1
             st["sent"] += 1
-        if any(st[k] for k in ("too_old", "level_dup", "conc", "best_only")):
+        if any(st[k] for k in ("too_old", "night", "level_dup", "conc", "best_only")):
             logger.info("deliver chat=%s: %s", chat_id, st)
         if stats is not None:
             stats[chat_id] = st

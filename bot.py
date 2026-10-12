@@ -27,6 +27,7 @@ import storage
 import ai_chat
 import journal_charts
 from screener import run_scan, run_manual_scan, check_signal_outcomes, auto_template_entry, MANUAL_SEND_HOURS
+import screener
 
 AUTO_NAME = storage.AUTO_TEMPLATE_NAME
 
@@ -40,7 +41,8 @@ TOKEN           = os.environ["TG_BOT_TOKEN"]
 SCAN_HOUR_DELAY_S = max(5, min(120, int(os.environ.get("SCAN_HOUR_DELAY_S", "40"))))
 SCAN_SEND_DEADLINE_S = 300   # к HH:05 всё должно быть отправлено
 SCAN_SCHEDULE_TEXT = ("раз в час, сразу после закрытия часовой свечи (сигналы в HH:00–HH:05 МСК); "
-                      "приходят только сигналы только что закрывшегося часа")
+                      "приходят только сигналы только что закрывшегося часа; "
+                      f"крипта — только сигналы со временем {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК")
 
 
 def next_scan_ts(now: float, delay_s: int = SCAN_HOUR_DELAY_S) -> float:
@@ -1704,7 +1706,8 @@ def _scan_summary(chat_id: int, st: dict | None) -> str:
     parts = [f"Найдено за 12ч (как HTML): <b>{st['found']}</b>", f"отправлено: <b>{st['sent']}</b>"]
     for key, label in (("already", "уже были"), ("level_dup", "повтор уровня 36ч"),
                        ("conc", "лимит «одновременно»"), ("best_only", "«только лучший»"),
-                       ("too_old", f"старше {MANUAL_SEND_HOURS} ч")):
+                       ("too_old", f"старше {MANUAL_SEND_HOURS} ч"),
+                       ("night", f"крипта вне {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК")):
         if st.get(key):
             parts.append(f"{label}: {st[key]}")
     cfg = storage.get_active_config(chat_id)
