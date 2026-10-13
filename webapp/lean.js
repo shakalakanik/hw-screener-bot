@@ -798,7 +798,9 @@
 
   /* ⭐ The Best (HTML 6.93): в таблице «Сигналы» помечаем строки, которые отобрал бы конвейер The best
      (bestPipeline движка) на том же окне. Только отметка — фильтр/кнопки не меняем. */
+  function nativeBestStar() { /* global nameCell, STAR_CUR */ return typeof nameCell === 'function' && typeof STAR_CUR === 'object'; }
   function installBestStar() {
+    if (nativeBestStar()) return;   // движок 7.0x сам ставит ★ (= отобран конвейером The best) — не дублируем
     if (typeof window.renderScan !== 'function' || window.renderScan.__hwBest) return;
     var orig = window.renderScan;
     var wrapped = function () {
@@ -811,6 +813,7 @@
   }
   function markBestRows() {
     /* global LAST, MKT, bestPipeline, windowHours */
+    if (nativeBestStar()) return;
     if (typeof bestPipeline !== 'function' || typeof LAST === 'undefined' || !LAST || typeof MKT === 'undefined' || MKT !== 'crypto') return;
     var cutoff = Date.now() - windowHours() * 3600000;
     var K = {};
@@ -845,7 +848,8 @@
     fwd: 1, o: 1, _i: 1, mkt: 1, added: 1, score: 1, p: 1 };
   function hwSyncFromScan(t, d1, h1) {
     /* global scanSymbol, lastClosed, atr, approachAtr, d1Streak, signalScore, isBestFBO, bestPoke, BEST_POKE, MKT, HW_FEAT_KEYS */
-    if (typeof scanSymbol !== 'function' || MKT === 'algo') return false;
+    // только крипта: у MOEX признаки индекса (IMOEX) и ruCluster считаются по всему списку — их даёт сам движок
+    if (typeof scanSymbol !== 'function' || MKT !== 'crypto') return false;
     var h1c = lastClosed(h1), idx = -1;
     for (var i = 0; i < h1c.length; i++) if (h1c[i].ts === t.t) { idx = i; break; }
     if (idx < 60) return false;
@@ -913,6 +917,8 @@
         if (!ready()) { console.warn('[lean] screener DOM not ready, giving up'); return; }
         installConcHooks();
         killSaveFileBtn();
+        // автообновление HTML в Mini App выключено (скан только по кнопке / вручную включённой галочке)
+        try { var au = document.getElementById('autoScan'); if (au && !au.__hwTouched) au.checked = false; } catch (e) {}
         try { installBestStar(); markBestRows(); } catch (e) {}
         try { installWatchRefreshFix(); setTimeout(repairWatchOnce, 8000); } catch (e) {}
         hideBacktestRunUI();

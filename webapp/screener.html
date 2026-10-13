@@ -58,6 +58,7 @@ progress{width:100%;height:6px;margin-top:8px}
 .regimeRow b{display:block;font-size:16px;margin-top:2px}
 .sect{border-top:1px dashed var(--line);margin:12px 0 10px;padding-top:10px}
 .sect>span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.bestStar{color:#f5b301;font-weight:700;margin-left:2px}
 </style></head><body><div class="wrap">
 
 <h1>HW FBO — скринер и бэктест</h1>
@@ -104,7 +105,7 @@ progress{width:100%;height:6px;margin-top:8px}
       <input id="sc_weekmax" type="number" value="20" min="1" max="200" step="1" style="width:110px" title="Из всех найденных за окно сигналов в списке ниже остаются только N лучших за каждую неделю — по оценке сигнала (0–10)."></div>
     <div class="field"><button id="run">Сканировать</button></div>
     <div class="field"><button id="scBest" class="ghost" title="ТЕСТОВЫЙ режим. Оставляет ЛП-шорты с оценкой 8–10: перед сигналом 2+ зелёных дневных свечи подряд, объём часа перед сигналом не выше среднего за 3 часа до него, без дёрганых монет и без большого хвоста прокола над стопом. Внутри недели — по похожести на ваш выбор, не больше 14 в неделю; отслеживаемые — всегда. В прошлом (март–октябрь 2026) ~31% тейков при тейке 3R против 24% у всех ЛП-шортов. Кандидат, проверяем вперёд; в алгоритм не встроено.">The best (тест)</button></div>
-    <div class="field"><label title="Вкладка должна быть открыта. Каждый час на 2-й минуте — скан и уведомление о новых сигналах"><input id="autoScan" type="checkbox"> автоскан каждый час + уведомления</label></div>
+    <div class="field"><label title="При открытии файла и в начале каждого часа — скан с базовыми настройками («авто», окно — с начала текущего дня по МСК), уведомление о новых сигналах. Крипта — в первую минуту часа, Мосбиржа — через 16 минут (биржа отдаёт свечи с задержкой 15 мин). Работает, пока файл открыт (вкладка может быть свёрнута). Ручной скан выключает автообновление — поставь галочку, чтобы вернуться к базовым настройкам."><input id="autoScan" type="checkbox"> автообновление каждый час (базовые настройки, с начала дня)</label></div>
   </div>
   <div class="sect"><span>Фильтры отбора — «авто» значит фильтр выключен</span></div>
   
@@ -344,6 +345,11 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="auto">авто (любая)</option>
             <option value="4">≥4 из 8 ч</option><option value="6">≥6 из 8 ч</option>
           </select></div>
+        <div class="field ru-only" style="display:none"><label title="Только Мосбиржа (крипта всегда 3R). Алгоритм MOEX 2023–2026, 1 позиция одновременно: 3R — 35–41% тейков, больше заработок (+0.8…+1.6R в неделю); 2R — 44–46% тейков, ~3 сделки в неделю, заработок меньше (+0.7…+1.0R в неделю). Действует и на вкладку «Бэктест».">Тейк (Мосбиржа)</label>
+          <select id="sc_rutgt">
+            <option value="3">3R — больше заработок</option>
+            <option value="2">2R — выше винрейт</option>
+          </select></div>
         <div class="field ru-only" style="display:none"><label title="Диапазон H-L за 5 свечей до пробоя должен сужаться — сжатая пружина">Сужение (squeeze)</label>
           <select id="sc_rusqueeze" class="flt">
             <option value="auto">авто (любое)</option>
@@ -354,7 +360,7 @@ progress{width:100%;height:6px;margin-top:8px}
             <option value="auto">авто (любое)</option>
             <option value="1">в своей трети</option>
           </select></div>
-        <div class="field ru-only" style="display:none"><label title="Индекс Мосбиржи (IMOEX) выше/ниже SMA-20 в сторону сделки">IMOEX в сторону</label>
+        <div class="field ru-only" style="display:none"><label title="Индекс Мосбиржи (IMOEX) на момент сигнала выше (лонг) / ниже (шорт) своей 50-дневной средней">IMOEX в сторону</label>
           <select id="sc_ruimoex" class="flt">
             <option value="auto">авто (любой)</option>
             <option value="1">только с IMOEX</option>
@@ -462,7 +468,7 @@ progress{width:100%;height:6px;margin-top:8px}
   <div id="btcBox" style="display:none;margin-top:6px"></div>
   <div class="scroll"><table><thead><tr>
     <th></th><th></th><th>Тикер</th><th title="Когда сигнал появился в сканере — закрытие часовой свечи. В этот момент и вход.">Время сигнала</th><th>Сторона</th><th>Тип уровня</th>
-    <th>Уровень</th><th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала (1% объёма 5м ÷ 16.5×): сколько своих $ вложить, не двигая рынок">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th>
+    <th>Уровень</th><th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала: крипта — 10% объёма 5м ÷ плечо 16.5× (в $); Мосбиржа — 10% объёма 5м в рублях, без плеча. Сколько вложить, не двигая рынок">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th>
   </tr></thead><tbody id="tb"></tbody></table></div>
   <div class="note" style="margin-top:8px">Нажми на строку — графики. Нажми на глаз — в отслеживаемое.</div>
 </div>
@@ -491,7 +497,7 @@ progress{width:100%;height:6px;margin-top:8px}
   <div id="wEq" style="display:none;margin-top:6px"></div>
   <div class="scroll"><table><thead><tr>
     <th></th><th></th><th>Тикер</th><th>Добавлен</th><th>Сторона</th><th>Уровень</th>
-    <th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th>Сейчас</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала (10% объёма 5м ÷ 16.5×)">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th><th>Длит.</th><th>Результат</th>
+    <th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th>Сейчас</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала: крипта — 10% объёма 5м ÷ плечо 16.5× (в $); Мосбиржа — 10% объёма 5м в рублях, без плеча">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th><th>Длит.</th><th>Результат</th>
   </tr></thead><tbody id="wtb"></tbody></table></div>
   <div class="row" style="justify-content:flex-end;margin-top:10px">
     <button id="refreshWatchAll" class="ghost" title="Полный пересчёт всех сделок (открытых и закрытых): статус, признаки уровня, похожесть, объём 5м и вход из капитала. Использовать после смены алгоритма.">Обновить всё</button>
@@ -877,7 +883,7 @@ progress{width:100%;height:6px;margin-top:8px}
   <div id="btMonth"></div>
   <div class="scroll"><table><thead><tr>
     <th></th><th>Тикер</th><th title="Когда сигнал появился в сканере — закрытие часовой свечи. В этот момент и вход.">Время сигнала</th><th>Сторона</th><th>Тип уровня</th><th>Уровень</th>
-    <th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала (10% объёма 5м ÷ 16.5×)">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th><th>Длит.</th><th>Исход</th>
+    <th>Вход</th><th>Стоп</th><th title="Цена, на которой сработает безубыток (+1.5R от входа) — можно поставить на неё уведомление">Безубыток</th><th>Тейк</th><th title="Средний объём пятиминутного бара">Объём 5м</th><th title="Макс. вход из капитала: крипта — 10% объёма 5м ÷ плечо 16.5× (в $); Мосбиржа — 10% объёма 5м в рублях, без плеча">Капитал</th><th title="Оценка 0–10. Ложный пробой: похожесть на эталонные сделки (сила и чистота уровня, нет касаний за 24ч, быстрый подход, цена не стоит у уровня, всплеск объёма, короткий прокол). Шкала по 3 месяцам: медиана 4, верхние 20% — от 7, верхние 7% — от 8.5. Это НЕ прогноз тейка: исход по 3 месяцам не предсказывается ни одним признаком. Пробой — прежняя модель.">Похожесть</th><th>Длит.</th><th>Исход</th>
   </tr></thead><tbody id="bttb"></tbody></table></div>
   <div class="note" style="margin-top:8px">Показаны последние 300. Бэктест и последние сигналы сохраняются на сервере Mini App для вашего Telegram-аккаунта; сброс — только «Очистить бэктест».</div>
 </div>
@@ -1271,7 +1277,8 @@ const COST_PCT=0;
 // Закрытые сделки (с известным результатом): тейк, стоп, безубыток, истёкшая по времени.
 const isClosed=t=>t.o==='take'||t.o==='stop'||t.o==='be'||t.o==='expired';
 function sumNet(rows){ let s=0; for(const t of rows) if(isClosed(t)&&t.nr!=null) s+=t.nr; return s; }
-const HOLD_CRYPTO=168, HOLD_RU=48, LOOKBACK=6, MAXRISK=0.20;
+const HOLD_CRYPTO=168, HOLD_RU=96,   // 6.94: MOEX — 4 суток (было 48 ч): ход 3R при стопе 1% занимает дни
+      LOOKBACK=6, MAXRISK=0.20;
 function getHold(){ return MKT==='ru'?HOLD_RU:HOLD_CRYPTO; }
 const HOLD=168; // fallback — заменяем ниже через getHold() в recompute и scanSymbol
 let LAST=[], BT=[], REGIME=null, EX=null, MKT='crypto';
@@ -1316,12 +1323,27 @@ const DEF={thr:0.20,stop:10,tgt:3,str:0,cross:99,touch:null,acc:null,dist:99,ove
            free:0,wall:0,daypos:null,body:0,wick:0,brkbars:null,volret:0,dow:null,ema:null,
            rusqueeze:null,ruclose:null,ruimoex:null,rurelstr:null,rubase:0,
            appr:null,atrr:null,dens:99,round:null,green:null,streakd:0,atrd:null,minn:8,cov:null,preacc:null,smooth:null,d1ag:null,poke:0,msc:0};
+/* 6.94: на Мосбирже «авто» = алгоритм пробоя для MOEX (проверен на 2023–2026, см. отчёт), а не крипто-умолчания.
+   Значение фильтра, выбранное вручную, по-прежнему важнее. */
+// 6.96: алгоритм MOEX под 1–2 одновременные позиции (больше сделок в неделю при том же винрейте):
+// уровень ≥4 (было 5), объём ≥1.5× (было 2×), 07–19 МСК (было 07–18), без обязательного фильтра IMOEX (можно включить вручную).
+// 6.97–6.98: обе стороны; лонги — встроенный фильтр тренда акции (RU_LONG_SA50)
+// 7.03: под список 73 ликвидных бумаг и ≥4 сигнала в день: до 2 пересечений, без фильтра объёма и тела свечи
+// (на 73 бумагах: 4.2 сигнала/день, 3R 32%/+0.27R, 2R 40%; строгий отбор остаётся в The best)
+const RU_AUTO={str:4, cross:2, acc:1, hours:'7-19', rubase:4};
+// 6.98: лонг на Мосбирже — только если сама акция в восходящем тренде: закрытие прошлого дня ≥ +6% к её SMA50 (D1).
+// 2023–2026: лонги без этого 27–29% тейков (2R) и в минусе; с ним 34–38% и в плюсе. Индекс для лонгов не помогает.
+const RU_LONG_SA50=0.06;
+function ruTgt(){ const e=el('#sc_rutgt'); const v=e?+e.value:3; return v===2?2:3; }
+function ruAuto(id){ return MKT==='ru' && Object.prototype.hasOwnProperty.call(RU_AUTO,id); }
 function readF(pfx){
   const f={};
   for(const id of FIDS){
     const e=el('#'+pfx+'_'+id);
     const v=e?e.value:'auto';
-    if(v==='auto'&&id==='hours'){
+    if(v==='auto'&&MKT==='ru') (f._ra||(f._ra={}))[id]=1;   // 7.05: какие поля в «авто» — их алгоритм MOEX подстраивает по индексу
+    if(v==='auto'&&ruAuto(id)) f[id]=RU_AUTO[id];
+    else if(v==='auto'&&id==='hours'){
       // «авто» для часов входа подчиняется чекбоксу «без ночи»: выключен — сканируем круглосуточно
       const nn=el('#noNight');
       f[id]=(nn&&!nn.checked)?'0-24':DEF[id];
@@ -1335,7 +1357,7 @@ function readF(pfx){
     else if(['touch','acc','bias','side','ema','brkbars','cov','preacc','smooth','d1ag'].includes(id)) f[id]=+v;
     else f[id]=parseFloat(v);
   }
-  f.tgt = TARGET_R;   // та же жёсткая гарантия 3:1, что и в comboToF()
+  f.tgt = MKT==='ru' ? ruTgt() : TARGET_R;   // крипта — жёсткая гарантия 3:1; Мосбиржа — 3R или 2R (6.96, «Тейк (Мосбиржа)»)
   return f;
 }
 function copyF(from,to){ for(const id of FIDS){ const a=el('#'+from+'_'+id), b=el('#'+to+'_'+id); if(a&&b) b.value=a.value; } }
@@ -1348,18 +1370,37 @@ function passes(s,f){
   // Алго-сигналы: только индикаторные фильтры, технические пропускаем
   if(s.type==='algo') return passesAlgoFilters(s,f);
   const isB=s.type==='brk';
+  // 7.05 (MOEX, «авто»): согласование с индексом IMOEX — rx 1: по индексу (уровень/накопление можно слабее), 2: против (строже)
+  const ra=f._ra||null; let rx=0;
+  if(isB&&ra&&ra.side&&s.mkt==='ru'&&s.ru_ixS!=null){
+    if(s.ru_ixExt) return false;                       // индекс уже перегрет в сторону сделки
+    if(s.d===0){
+      if(s.ru_ixS===7){                                // 7.06: шорт по падающему индексу — акция сама ниже SMA50 и рынок тоже пробивает вниз
+        if(!(s.ru_sa50!=null&&s.ru_sa50<0)) return false;
+        if(s.ru_clu!=null&&s.ru_clu<2) return false;
+        rx=1;
+      } else if(s.ru_ixS===0){                         // 7.06: шорт против растущего индекса — строгий пробой и сама акция в нисходящем тренде H1
+        if(!(s.ru_sl200!=null&&s.ru_sl200>=RU_BEST.sl200)) return false;
+        rx=2;
+      } else return false;
+    } else {
+      if(s.ru_ixS===0) return false;                   // лонг при падающем индексе не берём
+      if(s.ru_ixS!==7&&String(s.k||'').startsWith('5d')) return false;   // 7.06: при смешанном индексе лонг на пробое 5-дневного максимума — догонялка (17–24% тейков), не берём
+      rx=1;
+    }
+  }
   // порог модели — только для ложного пробоя (модель обучена на них)
   if(!isB && s.p < f.thr) return false;
   // оценка сигнала (34 признака в одном числе) — самый сильный одиночный фильтр для перебора
   if(f.msc>0 && (s._sc!=null?s._sc:(s._sc=signalScore(s))) < f.msc) return false;
-  if(s.strength < f.str) return false;
-  if(s.crosses > f.cross) return false;
+  if(s.strength < (rx===1&&ra.str?f.str-1:f.str)) return false;
+  if(s.crosses > (rx===2&&ra.cross?Math.min(f.cross,1):f.cross)) return false;
   if(f.touch!==null && s.touched8!==f.touch) return false;
-  if(f.acc!==null && s.acc!==f.acc) return false;
+  if(f.acc!==null && s.acc!==f.acc && !(rx===1&&ra.acc)) return false;
   if(s.dist_atr > f.dist) return false;
   if(!isB && s.overshoot_atr < f.over) return false;
   if(f.vc!==null){ if(f.vc>=99){ if(s.vol_contraction<=1.0) return false; } else if(s.vol_contraction>=f.vc) return false; }
-  if(s.vol_mult < f.vol) return false;
+  if(s.vol_mult < (rx===2&&ra.vol?Math.max(f.vol,1.5):f.vol)) return false;
   if(f.bias!==null && s.bias_ok!==f.bias) return false;
   if(f.side!==null && s.d!==f.side) return false;
   if(s.level_age_h < f.age) return false;
@@ -1432,10 +1473,14 @@ function passes(s,f){
     // 6.92: раньше сравнивалось со строкой '1', а readF отдаёт число → эти 4 фильтра НИКОГДА не работали. Исправлено.
     if(+f.rusqueeze===1&&!s.ru_squeeze) return false;
     if(+f.ruclose===1&&!s.ru_close_pos) return false;
-    if(+f.ruimoex===1&&!s.ru_imoex_ok) return false;
+    // 6.94: «IMOEX в сторону» = индекс относительно SMA50 на момент сигнала (раньше — часовики на момент скана, для истории неверно)
+    if(+f.ruimoex===1&&s.type==='brk'&&!(s.ru_ix50!=null&&s.ru_ix50>0)) return false;
     if(+f.rurelstr===1&&!s.ru_rel_str) return false;
     // 6.92: «база у уровня» — сколько из 8 часов до пробоя цена закрывалась у уровня (±0.3 ATR дня); по сделкам пользователя
-    if(f.rubase&&s.type==='brk'&&(s.ru_base8==null||s.ru_base8<f.rubase)) return false;
+    { const rb=rx===1&&ra.rubase?Math.min(f.rubase,2):f.rubase;
+      if(rb&&s.type==='brk'&&(s.ru_base8==null||s.ru_base8<rb)) return false; }
+    // 6.97: лонги на Мосбирже — по выбору «Лонги (Мосбиржа)»; «при росте индекса» = IMOEX на момент сигнала выше SMA50
+    if(s.type==='brk'&&s.d===1&&MKT==='ru'&&!(s.ru_sa50!=null&&s.ru_sa50>=RU_LONG_SA50)) return false;
   }
   if(f.atrd){
     const a=s.atrD_pct;
@@ -1531,6 +1576,7 @@ function signalScore(s){
   // 9.4–10. Плюс убран признак «сторона сделки» (лонг/шорт): он отражал направление рынка в период
   // обучения, а не качество сигнала.
   // ЛП: новая оценка v3 (похожесть на эталонные сделки). Пробой — прежняя модель.
+  if(s.type==='brk'&&isRuSig(s)){ const v=scoreRU(s); if(v!=null) return Math.round(v*10)/10; }   // 7.02: своя оценка пробоя MOEX
   if((s.type||'fbo')==='fbo'){ const cr=MKT==='crypto'&&s.mkt!=='ru'; const v6=cr?scoreV6(s):null; if(v6!=null) return Math.round(v6*10)/10; /* 6.90: v6 только для крипты; MOEX — прежняя оценка */ const r=hwScore(s); if(r) return Math.round(r.score*10)/10; }
   const M=s.type==='brk'?SCORE_MODEL.B:SCORE_MODEL.F, st=M.st, p=smPredict(M,s);
   let v;
@@ -1624,7 +1670,24 @@ function fboM5Refine(s,m5){
   let ap=96*60; for(let k=bars.length-1;k>=0;k--){ const b=bars[k]; if(b.ts>=bs) continue; if(dr*(L-b.c)>=0.3*s.atrD){ ap=(bs-b.ts)/60000; break; } }
   s.m5t24=t24; s.m5ap=ap; return true;
 }
-const HW_FEAT_KEYS=['g_spk','pk_ext','vtr','lvB','lv_touch','lv_touch24','ap03','near12','mv12','vbrk','lv_prom','brk_run','ret_d','dist_atr','m5t24','m5ap','v6_poke','vol_contraction','atrD','level_age_h','strength','crosses','vol5mAvg','posMax','vol_mult'];
+const HW_FEAT_KEYS=['ru_ixS','ru_ixExt','ru_clu','ru_dm','ru_sl200','ru_e50200','ru_run24','ru_b8w','ru_brng','ru_cpos','ru_ix24','ru_base8','ru_sa50','ru_ix50','d1_streak','g_spk','pk_ext','vtr','lvB','lv_touch','lv_touch24','ap03','near12','mv12','vbrk','lv_prom','brk_run','ret_d','dist_atr','m5t24','m5ap','v6_poke','vol_contraction','atrD','level_age_h','strength','crosses','vol5mAvg','posMax','vol_mult'];
+/* 7.00: звёздочка ★ у сигналов, которые подходят под The Best (только крипта): ЛП-шорт, D1 ≥2 зелёных подряд,
+   объём не разгоняется, без шипа и без большого хвоста прокола. Показывается везде, даже когда The Best выключен. */
+function isBestStar(t){
+  try{
+    if(!t||MKT==='algo') return false;
+    return bestReg().has(t.base+'|'+t.t);
+  }catch(e){ return false; }
+}
+// В «Сигналах» и «Бэктесте» звёздочка = попал в The best ЭТОГО же списка (тот же конвейер, что у кнопки);
+// в остальных разделах — по реестру отобранных The best.
+const STAR_CUR={sc:null,bt:null};
+function starOf(t,scope){
+  const k=t.base+'|'+t.t;
+  if(scope&&STAR_CUR[scope]) return STAR_CUR[scope].has(k);
+  return isBestStar(t);
+}
+function nameCell(t,scope){ return t.base+(starOf(t,scope)?' <span class="bestStar" title="Входит в The Best">★</span>':''); }
 function hwCopyFeat(dst,src){ for(const k of HW_FEAT_KEYS) if(src[k]!==undefined) dst[k]=src[k]; return dst; }
 function scoreColor(v){ return v>=7?'take':v>=4.5?'':'stop'; }
 function scoreEl(v){ return `<b class="${scoreColor(v)}">${v!=null?v.toFixed(1):'—'}</b>`; }
@@ -2153,12 +2216,124 @@ function modelPredict(f){
   return 1/(1+Math.exp(-raw));
 }
 // собираем СЫРЫЕ сигналы со всеми признаками и свечами вперёд — фильтры применяются потом
+/* 6.94 (Мосбиржа): режим индекса на момент сигнала — IMOEX (закрытые дневки до дня сигнала) относительно своей SMA50,
+   со знаком сделки: >0 — индекс на стороне сделки (для шорта — ниже SMA50). Проверка 2023–2026 — см. отчёт по MOEX. */
+function ixSma50Side(d1,ts,brSide){
+  if(!d1||!d1.length) return null;
+  const c=[]; for(const b of d1){ if(b.ts+86400000<=ts) c.push(b.c); else break; }
+  if(c.length<50) return null;
+  const sma=c.slice(-50).reduce((a,v)=>a+v,0)/50, r=c[c.length-1]/sma-1;
+  return brSide==='long'?r:-r;
+}
+/* 7.02: The best и оценка для пробоя на Мосбирже (отдельно от крипты).
+   The best MOEX: (1) индекс IMOEX за 24 часа до сигнала прошёл в сторону сделки меньше +1.1% (вход не вдогонку за рынком)
+   и (2) акция в тренде по H1 в сторону сделки: наклон EMA200 за 40 часов ≥ 0.22 ATR дня.
+   2023–2026, набор «авто» 6.98, тейк 3R: +0.46R на сделку против +0.31R у всех, тейков 38% против 33%; плюс в каждом полугодии.
+   Оценка 0–10 MOEX: оба условия → 8–10, одно → 5–7.9, ни одного → 0–4.9; внутри яруса — похожесть на ваши 40 сделок
+   с Мосбиржи (логистическая модель по 11 полям, AUC 0.78 на кросс-проверке). Похожесть исход не предсказывает — только порядок. */
+function ruBrkFeats(h1c,i,bar,brSide,atrD,E50,E200,ixH1){
+  const sg=brSide==='long'?1:-1, o={};
+  if(atrD>0&&E200&&i>=41){ o.ru_sl200=sg*(E200[i-1]-E200[i-41])/atrD; o.ru_e50200=sg*(E50[i-1]-E200[i-1])/atrD; }
+  if(atrD>0&&i>=25) o.ru_run24=sg*(h1c[i-1].c-h1c[i-25].c)/atrD;
+  if(atrD>0&&i>=8){ const w=h1c.slice(i-8,i); o.ru_b8w=(Math.max(...w.map(b=>b.h))-Math.min(...w.map(b=>b.l)))/atrD; }
+  { const w=h1c.slice(Math.max(0,i-60),i); const aH=w.length?w.reduce((a,b)=>a+(b.h-b.l),0)/w.length:0; o.ru_brng=aH>0?(bar.h-bar.l)/aH:0; }
+  { const r=bar.h-bar.l; o.ru_cpos=r>0?(sg>0?(bar.c-bar.l)/r:(bar.h-bar.c)/r):0.5; }
+  if(ixH1&&ixH1.length){
+    let lo=0,hi=ixH1.length-1,k=-1; while(lo<=hi){ const m=(lo+hi)>>1; if(ixH1[m].ts<=bar.ts){ k=m; lo=m+1; } else hi=m-1; }
+    if(k>=25) o.ru_ix24=sg*(ixH1[k-1].c/ixH1[k-25].c-1);
+  }
+  return o;
+}
+const RU_TASTE={"K": ["sl200", "brk_rng", "base8w", "e50_200", "vm", "run24", "closepos", "base8", "hour", "crosses", "side"], "lo": [-1.038025737945796, 0.0, 0.16473010517364758, -1.815822578958368, 0.024884872187341447, -1.0564795028239458, 0.26348787061994705, 0.0, 7.0, 0.0, -1.0], "hi": [1.1907139663306017, 9.30974964474278, 2.261963263021069, 2.138906420625738, 65.22794167438734, 2.5838564624524722, 1.0, 8.0, 18.0, 21.609999999999673, 1.0], "mu": [0.2020648514571585, 2.139645122848154, 0.7586072126823794, 0.3792492407075831, 6.055146400436682, 0.5670277437951402, 0.7554151599797477, 4.604470198675497, 12.202317880794702, 2.1852996688741713, -0.0870860927152318], "sd": [0.4271853232557977, 1.6774963219721728, 0.4115377255958706, 0.7624609953046249, 9.853957511791414, 0.6345052959598141, 0.18534246557936546, 2.7494153303173534, 3.245138176755639, 4.124857792199145, 0.9962007902265494], "W": [1.1846442021719419, 0.5563859340566047, -0.6095872174546406, -0.5656912370948697, 0.21779796581360242, 0.29388635141630803, 0.3643824338199649, 0.3279786959416778, 0.4965949631887487, -0.5226603147517885, -0.27786766318927597], "B": -0.8595906174828056, "qs": [-2.5536814193620163, -0.5948517430646622, -0.35067588232975216, -0.18327167211210404, -0.0655334445629009, 0.051919536236715524, 0.156633596490708, 0.25810342324374264, 0.3597571813665934, 0.4574990127823927, 0.5292767944279712, 0.6364446167514729, 0.7397980509250295, 0.8426818888467504, 0.9491118943704289, 1.0787409821221898, 1.209306671245752, 1.3449056628098601, 1.5997599776558842, 1.9668372320291465, 5.294001371399869]};
+function ruTasteRaw(s){
+  const side=s.d===1?1:-1, hr=(new Date(s.t).getUTCHours()+3)%24;
+  const x=[s.ru_sl200,s.ru_brng,s.ru_b8w,s.ru_e50200,s.vol_mult,s.ru_run24,s.ru_cpos,s.ru_base8,hr,s.crosses,side];
+  if(x.some(v=>v==null||!isFinite(v))) return null;
+  let z=RU_TASTE.B;
+  for(let j=0;j<x.length;j++){ const v=Math.min(RU_TASTE.hi[j],Math.max(RU_TASTE.lo[j],x[j])); z+=RU_TASTE.W[j]*(v-RU_TASTE.mu[j])/RU_TASTE.sd[j]; }
+  return z;
+}
+function ruTastePct(z){ const q=RU_TASTE.qs, n=q.length-1; if(z<=q[0]) return 0; if(z>=q[n]) return 1;
+  for(let j=1;j<=n;j++) if(z<=q[j]) return ((j-1)+(z-q[j-1])/Math.max(q[j]-q[j-1],1e-12))/n; return 1; }
+const RU_BEST={ix24:0.011, sl200:0.22};
+/* 7.05 (MOEX): согласование сигнала с индексом IMOEX — встроено в алгоритм, отдельных фильтров нет.
+   7 «голосов» индекса в сторону сделки: цена IMOEX к EMA20 и EMA50 дневки, наклон EMA20 дневки за 5 дней,
+   наклон EMA200 часовика за 40 часов, цена к EMA200 часовика, знак MACD(12,26) дневки, RSI14 дневки >50.
+   7 из 7 — индекс полностью за сделку, 0 из 7 — полностью против. «Перегрев» индекса в сторону сделки
+   (MACD часовика >1.5 ATR часа, или индекс за день уже прошёл >1.7%, или RSI дневки >72) — сигнал не берём.
+   Правила (73 бумаги, 2023-09…2026-10, вход как в авто 7.04):
+   • шорт при падающем индексе (7/7) — уровень и накопление можно слабее: уровень от 3, накопление не обязательно,
+     база у уровня ≥2 из 8 ч (такие шорты: 40% тейков 3R на обучении и на проверке, 45% за 6 мес.);
+   • шорт против растущего индекса (0/7) — только строгий: ≤1 пересечения, объём пробоя ≥1.5×;
+   • шорт при смешанном индексе — не берём (2025–2026: 12–23% тейков);
+   • лонг — акция ≥6% над SMA50 (как раньше) и индекс не падает (не 0/7); уровень/накопление — как у шорта по индексу.
+   Итог «авто»: 3.9 сигнала/день (было 2.9), за 6 мес. 5.9 (было 4.2); тейков 3R 34% и 34% (обучение/проверка, было 31/32),
+   за 6 мес. 41% (было 35), за последний месяц 35% (было 21); 2R — 42/42/48% (было 39/41/42). */
+/* 7.06 (MOEX): уточнения «авто» по рынку. Шорт по падающему индексу — только если акция сама ниже SMA50 дневки и за 3 часа
+   по списку бумаг был ещё хотя бы один пробой вниз. Шорт против растущего индекса — строгий (≤1 пересечения, объём ≥1.5×) и
+   при нисходящем тренде самой акции на H1 (наклон EMA200 ≥0.22 ATR). Лонг при смешанном индексе — не на пробое 5-дневного максимума.
+   Итог «авто» 2023-09…2026-10: 3.0 сигнала/день (6 мес. 4.5; 7.05 — 3.6 и 5.6), тейков 3R 37/37% (обучение/проверка),
+   6 мес. 46% (7.05: 34/35/42%); 2R — 44/44/52%; R на сделку +0.41 (7.05: +0.35). */
+const RU_IX={ext_macd:1.5, ext_day:0.017, ext_rsi:72};
+function ruIxPrep(d1,h1){
+  if(!d1||!h1||d1.length<70||h1.length<260) return null;
+  const ema=(x,n)=>{ const a=2/(n+1), e=new Array(x.length); e[0]=x[0]; for(let k=1;k<x.length;k++) e[k]=e[k-1]+a*(x[k]-e[k-1]); return e; };
+  const rsi=(x,n)=>{ const r=new Array(x.length); let au=1e-9, ad=1e-9; r[0]=50; for(let k=1;k<x.length;k++){ const d=x[k]-x[k-1]; au+=((d>0?d:0)-au)/n; ad+=((d<0?-d:0)-ad)/n; r[k]=100-100/(1+au/Math.max(ad,1e-12)); } return r; };
+  const hc=h1.map(b=>b.c), dc=d1.map(b=>b.c);
+  const E12=ema(hc,12),E26=ema(hc,26),E200=ema(hc,200);
+  const tr=h1.map((b,k)=>{ const pc=k?h1[k-1].c:h1[0].c; return Math.max(b.h-b.l,Math.abs(b.h-pc),Math.abs(b.l-pc)); });
+  const ATRH=ema(tr,27), D12=ema(dc,12), D26=ema(dc,26);
+  return {hts:h1.map(b=>b.ts),hc,E200,M:hc.map((_,k)=>E12[k]-E26[k]),ATRH,dts:d1.map(b=>b.ts),dc,D20:ema(dc,20),D50:ema(dc,50),DM:dc.map((_,k)=>D12[k]-D26[k]),DR:rsi(dc,14)};
+}
+function ruIxState(P,ts,sg){
+  if(!P) return null;
+  let lo=0,hi=P.hts.length-1,k=-1; while(lo<=hi){ const m=(lo+hi)>>1; if(P.hts[m]<=ts){k=m;lo=m+1;} else hi=m-1; }
+  if(k<240) return null;
+  let kd=0; lo=0; hi=P.dts.length-1; while(lo<=hi){ const m=(lo+hi)>>1; if(P.dts[m]+86400000<=ts){ kd=m+1; lo=m+1; } else hi=m-1; }
+  if(kd<60) return null;
+  const x=P.hc[k], j=kd-1, rs=sg>0?P.DR[j]:100-P.DR[j];
+  const S=(sg*(x/P.D20[j]-1)>0)+(sg*(x/P.D50[j]-1)>0)+(sg*(P.D20[j]/P.D20[j-5]-1)>0)+(sg*(P.E200[k]/P.E200[k-40]-1)>0)
+         +(sg*(x/P.E200[k]-1)>0)+(sg*P.DM[j]>0)+(rs>50);
+  const ext=(sg*P.M[k]/P.ATRH[k]>RU_IX.ext_macd)||(sg*(x/P.dc[j]-1)>RU_IX.ext_day)||(rs>RU_IX.ext_rsi);
+  return {ru_ixS:S, ru_ixExt:ext?1:0};
+}
+function ruBestConds(s){ return (s.ru_ix24!=null&&s.ru_ix24<RU_BEST.ix24?1:0)+(s.ru_sl200!=null&&s.ru_sl200>=RU_BEST.sl200?1:0); }
+// 7.03: The best MOEX — строгий отбор: оба условия + ≤1 пересечения, объём пробоя ≥1.5×, тело ≥40%, объём не ниже половины медианы
+function ruStrict(s){ return (s.crosses==null||s.crosses<=1)&&(s.vol_mult==null||s.vol_mult>=1.5)&&!s.ru_weak&&!s.ru_lowvol; }
+/* 7.06: The best MOEX — «рынок уже валится сегодня»: шорт из «авто» после 12:00 МСК, и либо за последние 3 часа
+   по рынку (73 бумаги) было ≥4 пробоев вниз (включая этот), либо сама акция уже прошла сегодня вниз ≥0.3 ATR дня.
+   2023-09…2026-10 (тейк 3R): 47% / 48% тейков на обучении/проверке, 58% за 6 мес.; тейк 2R: 55 / 55 / 63%; 0.8 сигнала в день.
+   Лонги в The best не попадают: лучшие их подмножества дают 33–36% (3R). */
+const RU_TB={hour:12, clu:4, dm:0.3};
+function ruHour(s){ return (new Date(s.t).getUTCHours()+3)%24; }
+function isBestRU(s){
+  if(s.type!=='brk'||s.d!==0) return false;
+  if(ruHour(s)<RU_TB.hour) return false;
+  return (s.ru_clu!=null&&s.ru_clu>=RU_TB.clu)||(s.ru_dm!=null&&s.ru_dm>RU_TB.dm);
+}
+// 7.06: сколько пробоев той же стороны было по всему списку бумаг за последние 3 часа (включая этот) — «рынок пробивает вместе»
+function ruCluster(list){
+  for(const d of [0,1]){
+    const ts=list.filter(s=>s.type==='brk'&&s.d===d).map(s=>s.t).sort((a,b)=>a-b);
+    const lb=x=>{ let lo=0,hi=ts.length; while(lo<hi){ const m=(lo+hi)>>1; if(ts[m]<x) lo=m+1; else hi=m; } return lo; };
+    for(const s of list) if(s.type==='brk'&&s.d===d) s.ru_clu=lb(s.t+1)-lb(s.t-2*3600000);
+  }
+}
+function scoreRU(s){ const z=ruTasteRaw(s); if(z==null||s.ru_ix24==null) return null; const p=ruTastePct(z), nc=isBestRU(s)?2:(ruBestConds(s)>=1||(s.d===0&&(s.ru_ixS===7||ruHour(s)>=RU_TB.hour)))?1:0;
+  // 7.06: внутри The best — 9.5–10 для самого сильного случая: после 13:00, индекс 7/7 вниз, ≥7 пробоев вниз за 3 ч (54–57% тейков 3R, 61–62% при 2R)
+  if(nc===2&&ruHour(s)>=13&&s.ru_ixS===7&&s.ru_clu!=null&&s.ru_clu>=7) return 9.5+0.5*p;
+  return nc===2?8+1.45*p:nc===1?5+2.9*p:4.9*p; }
+const isRuSig=s=>s.mkt==='ru'||(s.mkt==null&&MKT==='ru');
 function scanSymbol(base,sym,d1,h1,opt){
   const out=[];
   const d1c=lastClosed(d1), h1c=lastClosed(h1);
+  // 7.02 (MOEX): EMA50/EMA200 по часовикам — тренд акции на H1 для The best и оценки MOEX
+  let E50=null,E200=null;
+  if(MKT==='ru'&&h1c.length){ E50=new Array(h1c.length); E200=new Array(h1c.length); E50[0]=E200[0]=h1c[0].c;
+    for(let k=1;k<h1c.length;k++){ E50[k]=E50[k-1]+2/51*(h1c[k].c-E50[k-1]); E200[k]=E200[k-1]+2/201*(h1c[k].c-E200[k-1]); } }
   if(h1c.length<120||d1c.length<45) return out;
   const fromIdx=Math.max(60,h1c.length-opt.scanBars);
-  let cacheDay=null, levels=[], atrD=0, bias='flat';
+  let cacheDay=null, levels=[], atrD=0, bias='flat', daySa50=null, dayPrevC=null;
   for(let i=fromIdx;i<h1c.length;i++){
     const bar=h1c[i];
     const barDate=new Date(bar.ts);
@@ -2170,6 +2345,8 @@ function scanSymbol(base,sym,d1,h1,opt){
     if(dk!==cacheDay){
       const dayStart=dk*86400000;
       const cut=d1c.filter(b=>b.ts+86400000<=bar.ts);
+      daySa50=cut.length>=50?cut[cut.length-1].c/(cut.slice(-50).reduce((a,b)=>a+b.c,0)/50)-1:null;   // 6.98: тренд акции (D1) для лонгов MOEX
+      dayPrevC=cut.length?cut[cut.length-1].c:null;   // 7.06: закрытие прошлого дня — ход акции за сегодня
       const td=h1c.filter(b=>b.ts>=dayStart&&b.ts<=bar.ts);
       if(td.length) cut.push({ts:dayStart,o:td[0].o,h:Math.max(...td.map(x=>x.h)),
         l:Math.min(...td.map(x=>x.l)),c:bar.c,vol_quote:0,confirmed:true});
@@ -2209,13 +2386,14 @@ function scanSymbol(base,sym,d1,h1,opt){
           // РУ: тело пробойной свечи должно быть сильным (≥40% диапазона свечи)
           // Слабые свечи с длинными хвостами — пробой неуверенный
           const ruWeakBody=MKT==='ru'&&(bar.h-bar.l)>0&&(Math.abs(bar.c-bar.o)/(bar.h-bar.l))<0.40;
-          if(accB&&accB[0] && crossB<=V0.PARAMS.max_crosses && biasOkB && !ruOpenSkip && !ruLowVol && !ruLowAtr && !ruWeakBody){
+          const accOkB=!!(accB&&accB[0]);   // 7.05: на MOEX пробой без накопления тоже записываем (acc:0) — его берёт только «авто» по индексу
+          if((accOkB||MKT==='ru') && crossB<=V0.PARAMS.max_crosses && biasOkB && !ruOpenSkip && !ruLowAtr){   // 7.03: слабое тело и малый объём на MOEX — не отсекаются (нужны ≥4 сигнала/день), а помечаются для The best
             const win8b=h1cut.slice(-9,-1);
             const minRiskB=Math.max(0.10*atrD, 0.02*bar.c);
             out.push({type:'brk',base,sym,t:bar.ts,d:brSide==='long'?1:0,side:brSide,lv:lv.price,k:lv.kind,e:bar.c,atrD,
               strength:lv.strength, crosses:crossB,
               touched8:(win8b.length>=8&&Math.min(...win8b.map(b=>b.l))<=lv.price&&lv.price<=Math.max(...win8b.map(b=>b.h)))?1:0,
-              acc:1, level_age_h:(bar.ts-lv.formedTs)/3600000,
+              acc:accOkB?1:0, level_age_h:(bar.ts-lv.formedTs)/3600000,
               vol_contraction:vc, vol_mult:vMed>0?(bar.vol_quote||0)/vMed:0,
               overshoot_atr:Math.abs(bar.c-lv.price)/aH1, dist_atr:Math.abs(bar.c-lv.price)/aH1,
               bias_ok:1, atrD_pct:atrD/bar.c, aH1_pct:aH1/bar.c, kind:lv.kind, _i:i,
@@ -2235,6 +2413,10 @@ function scanSymbol(base,sym,d1,h1,opt){
               ru_close_pos: MKT==='ru'?((bar.h-bar.l)>0?(brSide==='long'?
                 (bar.c>=(bar.l+(bar.h-bar.l)*2/3)):
                 (bar.c<=(bar.l+(bar.h-bar.l)/3))):0):0,
+              ru_ix50: MKT==='ru'?ixSma50Side(opt.imoexD1,bar.ts,brSide):null, ru_sa50: MKT==='ru'?daySa50:null,
+              ru_dm: MKT==='ru'&&dayPrevC!=null&&atrD>0?(brSide==='long'?1:-1)*(bar.c-dayPrevC)/atrD:null, ru_weak: ruWeakBody?1:0, ru_lowvol: ruLowVol?1:0,
+              ...(MKT==='ru'?ruBrkFeats(h1c,i,bar,brSide,atrD,E50,E200,opt.imoexH1):{}),
+              ...(MKT==='ru'?(ruIxState(opt.ixP,bar.ts,brSide==='long'?1:-1)||{}):{}),
               ru_imoex_ok: opt.imoexAbove!=null?(brSide==='long'?opt.imoexAbove:!opt.imoexAbove)?1:0:0,
               ru_rel_str: opt.imoexRet5!=null?((brSide==='long'?(opt.sym5ret-opt.imoexRet5)>0:(opt.sym5ret-opt.imoexRet5)<0)?1:0):0,
               brk_bars:1, vol_ret_brk:1, dow:new Date(bar.ts).getUTCDay(),
@@ -2393,6 +2575,18 @@ function fmtBE(t){
   const lvl=t.d?e+BE_TRIGGER_R*risk:e-BE_TRIGGER_R*risk;
   return fmt(lvl);
 }
+/* 6.95: Мосбиржа — объём 5м и вход из капитала в рублях: «20 тыс ₽», «1.25 млн ₽». Вход = 10% объёма пятиминутки
+   без деления на крипто-плечо ×16.5 (на акциях оно не применяется). Крипта — как раньше. */
+const isRuRow=t=>t&&(t.mkt==='ru'||(t.mkt==null&&MKT==='ru'));
+function fmtRub(v){
+  if(!v||v<=0) return '—';
+  if(v>=1e9) return (v/1e9).toFixed(2)+' млрд ₽';
+  if(v>=1e6) return (v/1e6).toFixed(v>=1e8?0:2)+' млн ₽';
+  if(v>=1e3) return Math.round(v/1e3)+' тыс ₽';
+  return Math.round(v)+' ₽';
+}
+function vol5Str(t){ return (t.vol5mAvg||0)>0?(isRuRow(t)?fmtRub(t.vol5mAvg):fmtVol(t.vol5mAvg)):'—'; }
+function capStr(t){ return (t.posMax||0)>0?(isRuRow(t)?fmtRub(t.posMax):fmtVol(t.posMax/16.5)):'—'; }
 function fmtVol(v){
   if(!v||v<=0) return '—';
   if(v>=1e6) return '$'+(v/1e6).toFixed(2)+'M';
@@ -2421,33 +2615,81 @@ function outcomeHtml(o){
   if(o==='expired') return '<span class="muted">истекла</span>';
   return '<span class="muted">открыта</span>';
 }
-function drawChart(cv,bars,tr,tfMs){
+/* 7.06: графики сделки. Свеча сигнала (вход) — строго по центру окна: слева и справа одинаковое число свечей
+   (если после сигнала свечей ещё нет — справа пусто). Свечи загружаются вокруг времени сигнала, а не «последние N»,
+   поэтому старые сделки показываются правильно. Масштаб по свечам окна + уровень/вход/стоп; тейк — если не сжимает свечи
+   (иначе подпись у края). Разделители дней с датами; на часовике подсвечена база 8 ч перед пробоем. */
+function drawChart(cv,bars,tr,tfMs,opt){
+  opt=opt||{};
   const dpr=window.devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
   cv.width=W*dpr; cv.height=H*dpr;
   const x=cv.getContext('2d'); x.scale(dpr,dpr); x.clearRect(0,0,W,H);
-  if(!bars||!bars.length){ x.fillStyle=css('--muted');x.font='12px sans-serif';x.textAlign='center';x.fillText('нет данных',W/2,H/2);return; }
+  const msg=s=>{ x.fillStyle=css('--muted');x.font='12px sans-serif';x.textAlign='center';x.fillText(s,W/2,H/2); };
+  if(!bars||!bars.length){ msg('нет данных'); return; }
   const g=b=>Array.isArray(b)?{t:b[0],o:b[1],h:b[2],l:b[3],c:b[4]}:{t:b.t??b.ts,o:b.o,h:b.h,l:b.l,c:b.c};
-  const bb=bars.map(g);
-  const padL=6,padR=64,padT=8,padB=16;
-  const lo=Math.min(...bb.map(b=>b.l),tr.st,tr.tk,tr.lv);
-  const hi=Math.max(...bb.map(b=>b.h),tr.st,tr.tk,tr.lv);
+  const bb=bars.map(g).filter(b=>isFinite(b.o)&&isFinite(b.h)&&isFinite(b.l)&&isFinite(b.c)).sort((a,b)=>a.t-b.t);
+  if(!bb.length){ msg('нет данных'); return; }
+  const cT=opt.center!=null?opt.center:tr.t;
+  let si=bb.findIndex(b=>b.t<=cT&&cT<b.t+tfMs);
+  const exact=si>=0;
+  if(si<0) si=bb.findIndex(b=>b.t>cT);
+  if(si<0) si=bb.length-1;
+  const N=opt.half||Math.max(10,Math.floor(bb.length/2)), slots=2*N+1, k0=si-N;
+  const vis=[]; for(let s=0;s<slots;s++){ const k=k0+s; if(k>=0&&k<bb.length) vis.push([s,bb[k]]); }
+  if(!vis.length){ msg('нет свечей около сигнала'); return; }
+  const padL=6,padR=70,padT=10,padB=18;
+  let lo=Math.min(...vis.map(v=>v[1].l)), hi=Math.max(...vis.map(v=>v[1].h));
+  for(const v of [tr.lv,tr.e,tr.st]) if(v!=null&&isFinite(v)){ lo=Math.min(lo,v); hi=Math.max(hi,v); }
+  let tkOut=0; const br=(hi-lo)||Math.abs(hi)*0.01||1;
+  if(tr.tk!=null&&isFinite(tr.tk)){
+    if(tr.tk>hi){ if(tr.tk-lo<=1.6*br) hi=tr.tk; else tkOut=1; }
+    else if(tr.tk<lo){ if(hi-tr.tk<=1.6*br) lo=tr.tk; else tkOut=-1; }
+  }
+  const pad=(hi-lo)*0.04||br*0.04; lo-=pad; hi+=pad;
   const rng=(hi-lo)||1, y=v=>padT+(hi-v)/rng*(H-padT-padB);
-  const cw=(W-padL-padR)/bb.length;
-  for(const [v,c] of [[tr.lv,css('--level')],[tr.e,css('--entry')],[tr.st,css('--red')],[tr.tk,css('--green')]]){
+  const cw=(W-padL-padR)/slots, X=s=>padL+s*cw+cw/2;
+  // разделители дней (часовик, 5м) / месяцев (дневка) с подписями
+  const dk=b=>{ const d=new Date(b.t+3*3600000); return tfMs>=86400000?d.getUTCFullYear()*12+d.getUTCMonth():Math.floor((b.t+3*3600000)/86400000); };
+  const dl=b=>{ const d=new Date(b.t+3*3600000); return tfMs>=86400000?d.toLocaleString('ru-RU',{month:'short',timeZone:'UTC'}):String(d.getUTCDate()).padStart(2,'0')+'.'+String(d.getUTCMonth()+1).padStart(2,'0'); };
+  x.font='10px sans-serif'; x.textAlign='left';
+  for(let i=1;i<vis.length;i++){
+    if(dk(vis[i][1])!==dk(vis[i-1][1])){
+      const xx=padL+vis[i][0]*cw;
+      x.strokeStyle=css('--line'); x.lineWidth=1; x.beginPath(); x.moveTo(xx,padT); x.lineTo(xx,H-padB); x.stroke();
+      x.fillStyle=css('--muted'); x.fillText(dl(vis[i][1]),xx+2,H-5);
+    }
+  }
+  // база 8 ч перед пробоем (только часовик)
+  if(opt.base8&&exact){
+    const bs=vis.filter(v=>v[0]>=N-8&&v[0]<N);
+    if(bs.length){
+      const bl=Math.min(...bs.map(v=>v[1].l)), bh=Math.max(...bs.map(v=>v[1].h)), x0=padL+bs[0][0]*cw, x1=padL+(bs[bs.length-1][0]+1)*cw;
+      x.fillStyle=css('--accent'); x.globalAlpha=0.13; x.fillRect(x0,y(bh),x1-x0,Math.max(2,y(bl)-y(bh))); x.globalAlpha=1;
+      x.fillStyle=css('--muted'); x.font='10px sans-serif'; x.textAlign='left'; x.fillText('база 8ч',x0+2,Math.max(padT+9,y(bh)-3));
+    }
+  }
+  // уровни
+  const lines=[[tr.lv,css('--level'),'уровень'],[tr.e,css('--entry'),'вход'],[tr.st,css('--red'),'стоп']];
+  if(!tkOut) lines.push([tr.tk,css('--green'),'тейк']);
+  for(const [v,c] of lines){
+    if(v==null||!isFinite(v)) continue;
     x.strokeStyle=c;x.lineWidth=1;x.setLineDash(v===tr.lv?[]:[4,3]);
     x.beginPath();x.moveTo(padL,y(v));x.lineTo(W-padR,y(v));x.stroke();x.setLineDash([]);
     x.fillStyle=c;x.font='10px sans-serif';x.textAlign='left';x.fillText(fmt(v),W-padR+4,y(v)+3);
   }
-  for(let i=0;i<bb.length;i++){
-    const b=bb[i], cx=padL+i*cw+cw/2, up=b.c>=b.o, col=up?css('--green'):css('--red');
+  if(tkOut){ x.fillStyle=css('--green'); x.font='10px sans-serif'; x.textAlign='left';
+    x.fillText((tkOut>0?'↑ тейк ':'↓ тейк ')+fmt(tr.tk),W-padR+4,tkOut>0?padT+8:H-padB-2); }
+  // свеча сигнала — вертикаль по центру
+  { const cx=X(N); x.fillStyle=css('--accent'); x.globalAlpha=0.10; x.fillRect(cx-cw/2,padT,cw,H-padT-padB); x.globalAlpha=1;
+    x.strokeStyle=css('--accent');x.lineWidth=1.5;x.setLineDash([2,2]);
+    x.beginPath();x.moveTo(cx,padT);x.lineTo(cx,H-padB);x.stroke();x.setLineDash([]); }
+  // свечи
+  for(const [s,b] of vis){
+    const cx=X(s), up=b.c>=b.o, col=up?css('--green'):css('--red');
     x.strokeStyle=col;x.fillStyle=col;x.lineWidth=1;
     x.beginPath();x.moveTo(cx,y(b.h));x.lineTo(cx,y(b.l));x.stroke();
-    const bw=Math.max(1,cw*0.65), yo=y(b.o), yc=y(b.c);
+    const bw=Math.max(1,cw*0.66), yo=y(b.o), yc=y(b.c);
     x.fillRect(cx-bw/2,Math.min(yo,yc),bw,Math.max(1,Math.abs(yc-yo)));
-    if(Math.abs(b.t-tr.t)<tfMs){
-      x.strokeStyle=css('--accent');x.lineWidth=1.5;x.setLineDash([2,2]);
-      x.beginPath();x.moveTo(cx,padT);x.lineTo(cx,H-padB);x.stroke();x.setLineDash([]);
-    }
   }
 }
 function winAround(bars,ts,before,after){
@@ -2455,6 +2697,36 @@ function winAround(bars,ts,before,after){
   const idx=bars.findIndex(b=>key(b)>=ts);
   if(idx<0) return bars.slice(-before);
   return bars.slice(Math.max(0,idx-before),idx+after);
+}
+// 7.06: свечи для графика сделки — вокруг времени сигнала (а не последние N от «сейчас»)
+async function chartKlines(ex,sym,iv,fromTs,toTs){
+  const now=Date.now(), dur=iv==='1d'?86400000:3600000, mk=(ts,o,h,l,c,v)=>({ts,o,h,l,c,vol_quote:v||0,confirmed:(ts+dur)<=now});
+  try{
+    if(ex&&ex.name==='MOEX'){
+      const rows=await issCandles(`/engines/stock/markets/shares/boards/TQBR/securities/${sym}`,iv==='1d'?24:60,fromTs,Math.min(toTs,now),4);
+      return issBars(rows,iv,now);
+    }
+    if(ex&&ex.name==='Bybit'){
+      const u=`https://api.bybit.com/v5/market/kline?category=linear&symbol=${sym}&interval=${iv==='1d'?'D':'60'}&start=${fromTs}&end=${Math.min(toTs,now)}&limit=1000`;
+      const d=await (await fetch(u)).json();
+      if(d.retCode===0&&d.result.list.length) return d.result.list.map(k=>mk(+k[0],+k[1],+k[2],+k[3],+k[4],+k[6])).sort((a,b)=>a.ts-b.ts);
+    }
+    if(ex&&ex.name==='OKX'){
+      const seen={}; let after=Math.min(toTs,now)+1;
+      for(let p=0;p<8;p++){
+        const u=`https://www.okx.com/api/v5/market/history-candles?instId=${sym}&bar=${iv==='1d'?'1Dutc':'1H'}&limit=100&after=${after}`;
+        const d=await (await fetch(u)).json();
+        if(d.code!=='0'||!d.data.length) break;
+        for(const k of d.data) seen[+k[0]]=mk(+k[0],+k[1],+k[2],+k[3],+k[4],+(k[7]??k[6]));
+        after=Math.min(...d.data.map(k=>+k[0])); if(after<=fromTs) break;
+      }
+      const out=Object.values(seen).filter(b=>b.ts>=fromTs).sort((a,b)=>a.ts-b.ts);
+      if(out.length) return out;
+    }
+  }catch(e){}
+  // запасной путь — как раньше: последние свечи от «сейчас» с запасом до начала окна
+  const lim=Math.ceil((now-fromTs)/dur)+10;
+  return await ex.kline(sym,iv,Math.min(lim,iv==='1d'?1000:9000));
 }
 async function expandRow(tr,t,cols){
   const nx=tr.nextSibling;
@@ -2464,7 +2736,7 @@ async function expandRow(tr,t,cols){
   const td=document.createElement('td'); td.colSpan=cols||12;
   const rr=t.o==='take'?(t.tgtR||3):(t.o==='stop'?-1:0);
   td.innerHTML=`<div class="tradeInfo">
-      <div><span>${MKT==='ru'?'бумага':'монета'}</span> <b>${t.base}</b></div>
+      <div><span>${MKT==='ru'?'бумага':'монета'}</span> <b>${nameCell(t,(window.__SCAN_ROWS__||[]).includes(t)?'sc':null)}</b></div>
       <div><span>сигнал</span> <b>${new Date(t.t+3600000).toLocaleString('ru-RU',{timeZone:'Europe/Moscow'})}</b></div>
       <div><span>сторона</span> <b class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</b></div>
       <div><span>уровень</span> <b>${fmt(t.lv)}</b></div>
@@ -2477,8 +2749,8 @@ async function expandRow(tr,t,cols){
       ${t.type!=='algo'?`<div><span>сила</span> <b>${t.strength}</b></div>
       <div><span>запилов</span> <b>${t.crosses}</b></div>
       <div><span>объём</span> <b>${(t.vol_mult??0).toFixed(1)}×</b></div>
-      ${MKT!=='ru'&&(t.vol5mAvg||0)>0?`<div><span>объём 5м</span> <b>${fmtVol(t.vol5mAvg)}</b></div>
-      <div><span>вход (капитал)</span> <b class="take">${fmtVol((t.posMax||0)/16.5)}</b></div>`:''}`:''}
+      ${(t.vol5mAvg||0)>0?`<div><span>объём 5м</span> <b>${vol5Str(t)}</b></div>
+      <div><span>вход (капитал)</span> <b class="take">${capStr(t)}</b></div>`:''}`:''}
       ${(()=>{ const r=(t.type||'fbo')==='fbo'?hwScore(t):null; if(!r) return '';
         const ap=t.ap03>=200?'>200 ч':(t.ap03<1?'<1 ч':Math.round(t.ap03)+' ч');
         return `<div><span>похожесть</span> <b class="${scoreColor(r.score)}">${r.score.toFixed(1)}</b> <span class="muted" style="font-size:11px">${r.mem>r.model?'почти как эталон '+r.near:'ближе всего: '+r.near}</span></div>
@@ -2492,9 +2764,9 @@ async function expandRow(tr,t,cols){
       ${t.o?`<div><span>исход</span> <b>${outcomeHtml(t.o)}</b></div>`:''}
      </div>
      <div class="charts">
-       <div class="chartBox"><h4>Дневной (1D)</h4><canvas data-tf="d1"></canvas></div>
-       <div class="chartBox"><h4>Часовой (1H)</h4><canvas data-tf="h1"></canvas></div>
-       <div class="chartBox c3"><h4>5-минутный (5M)</h4><canvas data-tf="m5"></canvas></div>
+       <div class="chartBox c3"><h4>Часовой (1H) — свеча сигнала по центру, подсвечена база 8 ч</h4><canvas data-tf="h1" style="height:340px"></canvas></div>
+       <div class="chartBox"><h4>Дневной (1D)</h4><canvas data-tf="d1" style="height:240px"></canvas></div>
+       <div class="chartBox"><h4>5-минутный (5M) — момент входа по центру</h4><canvas data-tf="m5" style="height:240px"></canvas></div>
      </div>
      <div class="legend">
        <span><i style="background:${css('--level')}"></i>уровень</span>
@@ -2507,11 +2779,18 @@ async function expandRow(tr,t,cols){
   const tfMs={d1:86400000,h1:3600000,m5:300000};
   if(!EX){ d.querySelectorAll('canvas').forEach(cv=>drawChart(cv,null,t,3600000)); return; }
   try{
-    const [d1,h1,m5]=await Promise.all([EX.kline(t.sym,'1d',200),EX.kline(t.sym,'1h',400),EX.m5(t.sym,300,t.t+30*300000)]);
+    // 7.06: свечи вокруг сигнала; вход — на закрытии часа сигнала (t+1ч), на 5м он по центру
+    const D=86400000, ru=EX.name==='MOEX', ent=t.t+3600000;
+    const [d1,h1,m5]=await Promise.all([chartKlines(EX,t.sym,'1d',t.t-90*D,t.t+90*D),chartKlines(EX,t.sym,'1h',t.t-(ru?8:5)*D,t.t+(ru?8:5)*D),
+      EX.m5(t.sym,ru?160:200,ent+80*300000).catch(()=>[])]);
+    const wkd=b=>{ const w=new Date((b.ts??b.t)+3*3600000).getUTCDay(); return w===0||w===6; };
+    const sigWkd=wkd({t:t.t});
+    const clean=a=>ru&&!sigWkd?(a||[]).filter(b=>!wkd(b)):(a||[]);   // MOEX: торги выходного дня (редкие тонкие свечи) не показываем
     d.querySelectorAll('canvas').forEach(cv=>{
       const tf=cv.dataset.tf;
-      const src=tf==='d1'?winAround(d1,t.t,45,12):tf==='h1'?winAround(h1,t.t,70,30):winAround(m5,t.t,80,40);
-      drawChart(cv,src,t,tfMs[tf]);
+      if(tf==='d1') drawChart(cv,clean(d1),t,tfMs.d1,{half:40});
+      else if(tf==='h1') drawChart(cv,clean(h1),t,tfMs.h1,{half:ru?45:48,base8:true});
+      else drawChart(cv,clean(m5),t,tfMs.m5,{half:72,center:ent});
     });
   }catch(e){ d.querySelectorAll('canvas').forEach(cv=>drawChart(cv,null,t,3600000)); }
 }
@@ -2586,11 +2865,18 @@ function renderScan(){
   // The best (тест): отбор по профилю ЛП-шортов ДО лимитов «монета 12ч / сигналов в час / недельный кап».
   // Относится только к ложному пробою — для режима «Пробой» не применяется.
   const scBase0=byStrat(LAST.filter(s=>s.t>=cutoff),stratOf('sc'));
-  const scBestOn=SC_BEST&&MKT==='crypto'&&stratOf('sc')!=='brk';   // The best — только крипта
-  const scSrc=scBestOn?bestSource(byStrat(LAST.filter(s=>s.t>=cutoff),'fbo')):scBase0;
-  let rows=scBestOn?bestPipeline(LAST.filter(s=>s.t>=cutoff)):applyAll(scSrc,f,true,undefined,brkF('sc'));
+  const scBestOn=SC_BEST&&((MKT==='crypto'&&stratOf('sc')!=='brk')||(MKT==='ru'&&stratOf('sc')!=='fbo'));   // 7.02: крипта — ЛП, Мосбиржа — пробой
+  const scSrc=scBestOn?bestSource(byStrat(LAST.filter(s=>s.t>=cutoff),MKT==='ru'?'brk':'fbo')):scBase0;
+  const bestRows=(MKT==='crypto'||MKT==='ru')?bestPipeline(LAST.filter(s=>s.t>=cutoff)):null;   // 7.01: всегда — для звёздочек
+  STAR_CUR.sc=bestRows?new Set(bestRows.map(t=>t.base+'|'+t.t)):null;
+  let rows=scBestOn?bestRows:applyAll(scSrc,f,true,undefined,brkF('sc'));
   const minSc=parseFloat(el('#sc_minscore')?el('#sc_minscore').value:'');
   if(!scBestOn&&!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
+  // 7.05 (MOEX): каждый сигнал The best виден в обычном списке со звёздочкой, даже если лимит «бумага 12 ч / в час»
+  // оставил там более ранний сигнал той же бумаги — звёздочки = кнопка = шаблон один в один
+  if(MKT==='ru'&&!scBestOn&&bestRows){ const ks=new Set(rows.map(t=>t.base+'|'+t.t));
+    const add=bestRows.filter(t=>!ks.has(t.base+'|'+t.t)&&(isNaN(minSc)||(t.score||0)>=minSc));
+    if(add.length) rows=rows.concat(add).sort(orderRows); }
   window.__SCAN_ROWS__=rows;
   el('#kpi').innerHTML=kpiSignals(rows);
   // «Воронка» — где именно отсеиваются сигналы. Раньше строка статуса после скана показывала
@@ -2603,7 +2889,7 @@ function renderScan(){
     const wm=scanWeekMax(), seqd=applySequential(capCluster(applyCoinLimit(ok),f.cap),f,true);
     const byW={}; for(const t of rows){ const k=isoWeekKey(t.t); byW[k]=(byW[k]||0)+1; }
     const wv=Object.values(byW), weeks=Math.max(1,windowHours()/168);
-    const bestNote=SC_BEST?(scBestOn?`<b style="color:var(--take)">The best (тест)</b>: ${BEST_MODE==='edge'?'оценка 8–10: D1-серия вверх ≥2, объём не разгонялся, без шипов и больших хвостов + отслеживаемые':'ЛП-шорты с высокой оценкой вкуса + всё из «Отслеживаемого»'}, не больше ${BEST_WEEK}/нед; фильтры панели, мин. оценка и недельный лимит здесь не действуют — так же, как в шаблоне тестировщика — кандидатов <b>${scSrc.length}</b> из <b>${scBase0.length}</b>. `:`The best относится только к ложному пробою — в этом режиме не применяется. `):'';
+    const bestNote=SC_BEST?(scBestOn?`<b style="color:var(--take)">The best (тест)</b>: ${MKT==='ru'?'Мосбиржа, оценка 8–10: шорт после 12:00, когда рынок уже валится — за 3 часа ≥4 пробоев вниз по списку или акция сегодня уже −0.3 ATR + отслеживаемые':BEST_MODE==='edge'?'оценка 8–10: D1-серия вверх ≥2, объём не разгонялся, без шипов и больших хвостов + отслеживаемые':'ЛП-шорты с высокой оценкой вкуса + всё из «Отслеживаемого»'}, не больше ${BEST_WEEK}/нед; фильтры панели, мин. оценка и недельный лимит здесь не действуют — так же, как в шаблоне тестировщика — кандидатов <b>${scSrc.length}</b> из <b>${scBase0.length}</b>. `:(MKT==='ru'?`The best на Мосбирже относится к пробою — переключи стратегию на «Пробой». `:`The best относится только к ложному пробою — в этом режиме не применяется. `)):'';
     el('#scanFunnel').innerHTML=bestNote+`Сигналов за окно: <b>${base.length}</b> → прошли фильтры: <b>${ok.length}</b> → `+
       `после лимитов «монета 12ч / сигналов в час / серии стопов»: <b>${seqd.length}</b> → после лимита ${wm>=999?'(без лимита)':wm+'/нед'} (топ по оценке): <b>${rows.length}</b>`+
       `${isNaN(minSc)?'':' (с учётом оценки от '+minSc+')'}. В среднем <b>${(rows.length/weeks).toFixed(1)}</b>/нед, максимум за одну неделю: <b>${wv.length?Math.max(...wv):0}</b>.`;
@@ -2612,12 +2898,12 @@ function renderScan(){
   for(const t of rows.slice(0,300)){
     const tr=document.createElement('tr'); tr.className='clickable';
     tr.innerHTML=`<td class="muted">▸</td><td><span class="eye ${isWatched(t)?'on':''}" data-base="${t.base}" data-t="${t.t}">👁</span></td>`+
-      `<td>${t.base}</td><td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
+      `<td>${nameCell(t,'sc')}</td><td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
       `<td>${fmt(t.lv)}</td><td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td>`+
       `<td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
-      `<td class="muted">${MKT!=='ru'&&(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
-      `<td class="${MKT!=='ru'&&(t.posMax||0)>0?'take':'muted'}">${MKT!=='ru'&&(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+      `<td class="muted">${vol5Str(t)}</td>`+
+      `<td class="${(t.posMax||0)>0?'take':'muted'}">${capStr(t)}</td>`+
       `<td>${scoreEl(t.score)}</td>`;
     tr.querySelector('.eye').addEventListener('click',ev=>{ev.stopPropagation();toggleWatch(t);syncEyeButtons();});
     tr.addEventListener('click',()=>expandRow(tr,t,12));
@@ -2684,13 +2970,13 @@ async function renderWatch(){
       const r=(t.d?(t._now-t.e):(t.e-t._now))/Math.abs(t.e-t.st);
       res=`<span class="${r>=0?'take':'stop'}">${r>=0?'+':''}${r.toFixed(2)}R</span>`;
     }
-    tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${t.base}</td>`+
+    tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${nameCell(t)}</td>`+
       `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td>`+
       `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
       `<td>${t._now!=null?fmt(t._now):'—'}</td>`+
-      `<td class="muted">${(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
-      `<td class="${(t.posMax||0)>0?'take':'muted'}">${(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+      `<td class="muted">${vol5Str(t)}</td>`+
+      `<td class="${(t.posMax||0)>0?'take':'muted'}">${capStr(t)}</td>`+
       `<td>${scoreEl(t.score!=null?t.score:signalScore(t))}</td><td class="muted">${tradeDur(t)}</td><td>${res}</td>`;
     tr.querySelector('.eye').addEventListener('click',ev=>{ev.stopPropagation();toggleWatch(t);renderWatch();syncEyeButtons();});
     tr.addEventListener('click',()=>expandRow(tr,t,12));
@@ -2702,13 +2988,13 @@ async function renderWatch(){
     for(const t of allW){
       if(shown.has(t.t+'_'+t.base)) continue;
       const tr=document.createElement('tr'); tr.className='clickable'; tr.style.opacity='0.35';
-      tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${t.base}</td>`+
+      tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${nameCell(t)}</td>`+
         `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
         `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td>`+
         `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
         `<td>—</td>`+
-        `<td class="muted">${(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
-        `<td class="muted">${(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+        `<td class="muted">${vol5Str(t)}</td>`+
+        `<td class="muted">${capStr(t)}</td>`+
         `<td>${scoreEl(t.score!=null?t.score:signalScore(t))}</td><td class="muted">—</td><td class="muted">пропущена</td>`;
       tr.querySelector('.eye').addEventListener('click',ev=>{ev.stopPropagation();toggleWatch(t);renderWatch();syncEyeButtons();});
       tr.addEventListener('click',()=>expandRow(tr,t,12));
@@ -3097,8 +3383,9 @@ function renderBt(){
   // The best (тест) — отбор по профилю ЛП-шортов ДО лимитов «монета 12ч / сигналов в час / серии»,
   // чтобы эти правила работали среди уже отобранных сигналов (плохой сигнал не вытесняет хороший).
   // Источник — всегда ЛП (The best описывает только ложный пробой).
-  const btBestOn=BT_BEST&&MKT==='crypto';   // The best — только крипта
-  const btSrc=btBestOn?bestSource(byStrat(btPeriodCut(BT),'fbo')):byStrat(btPeriodCut(BT),stratOf('bt'));
+  const btBestOn=BT_BEST&&(MKT==='crypto'||MKT==='ru');   // 7.02: и Мосбиржа (своё правило)
+  const btSrc=btBestOn?bestSource(byStrat(btPeriodCut(BT),MKT==='ru'?'brk':'fbo')):byStrat(btPeriodCut(BT),stratOf('bt'));
+  STAR_CUR.bt=(MKT==='crypto'||MKT==='ru')?new Set(bestPipeline(btPeriodCut(BT),btLimits()).map(t=>t.base+'|'+t.t)):null;   // 7.01: звёздочки = The best этого бэктеста
   let rows=btBestOn?bestPipeline(btPeriodCut(BT),btLimits()):applyAll(btSrc,f,false,undefined,brkF('bt'));
   const minSc=parseFloat(el('#bt_minscore')?el('#bt_minscore').value:'');
   if(!btBestOn&&!isNaN(minSc)) rows=rows.filter(t=>(t.score||0)>=minSc);
@@ -3144,13 +3431,13 @@ function renderBt(){
   for(const t of rows.slice(0,300)){
     const tr=document.createElement('tr'); tr.className='clickable';
     const oc=outcomeHtml(t.o);
-    tr.innerHTML=`<td class="muted">▸</td><td>${t.base}</td>`+
+    tr.innerHTML=`<td class="muted">▸</td><td>${nameCell(t,'bt')}</td>`+
       `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
       `<td>${fmt(t.lv)}</td><td title="В скобках: окно входа ±0.3R">${fmt(t.e)}${t.ewM!=null?'<span class="muted"> ('+ewStr(t.ewM)+')</span>':''}</td>`+
       `<td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
-      `<td class="muted">${(t.vol5mAvg||0)>0?fmtVol(t.vol5mAvg):'—'}</td>`+
-      `<td class="${(t.posMax||0)>0?'take':'muted'}">${(t.posMax||0)>0?fmtVol(t.posMax/16.5):'—'}</td>`+
+      `<td class="muted">${vol5Str(t)}</td>`+
+      `<td class="${(t.posMax||0)>0?'take':'muted'}">${capStr(t)}</td>`+
       `<td>${scoreEl(t.score)}</td><td class="muted">${tradeDur(t)}</td><td>${oc}${t.m5used?' <span class="muted" title="исход уточнён по 5-минуткам" style="font-size:11px">5м</span>':t.ambH?' <span class="muted" title="стоп и тейк в одном часе — не уточнено" style="font-size:11px">?</span>':''}</td>`;
     tr.addEventListener('click',()=>expandRow(tr,t,12));
     tb.appendChild(tr);
@@ -3180,12 +3467,20 @@ function renderRegime(){
 /* ===== сканирование ===== */
 /* 6.93: общий сбор сигналов по рынку — им пользуются и кнопка «Скан» (Сигналы), и «Скан» тестировщика (крипта),
    чтобы глубина истории (D1/H1), список инструментов и фильтр оборота были одинаковыми → одинаковые сигналы. */
+// 7.03: Мосбиржа — только бумаги из списка пользователя (ликвидные), без отбора по обороту
+const RU_LIST_DEFAULT='LKOH,GAZP,YDEX,ROSN,SBER,OZON,VTBR,T,PLZL,NVTK,SIBN,TATN,VKCO,SPBE,MGNT,GMKN,TRNFP,SNGSP,X5,ALRS,TATNP,SNGS,CHMF,MAGN,RNFT,FLOT,AFLT,MTSS,SMLT,RAGR,NLMK,SVCB,AFKS,MOEX,SELG,IRAO,SBERP,RUAL,MTLR,DOMRF,PHOR,RTKM,HEAD,CNRU,UPRO,POSI,FEES,BANEP,BELU,UGLD,FESH,SGZH,ASTR,WUSH,NMTP,LSRG,ENPG,MSNG,HYDR,EUTR,MTLRP,ROLO,SFIN,PIKK,UNAC,LENT,RASP,LSNGP,FIXR,BANE,TRMK,IRKT,SOFL';
+function ruListSet(){ const L=RU_LIST_DEFAULT.split(','); const n=+el('#nInst').value||L.length; return L.slice(0,Math.max(1,n)); }   // 7.04: «Инструментов» на Мосбирже = бумаг из списка
 async function scanUniverse(ex,tk,winH,onStart,onProg){
-    const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
+    const ru=MKT==='ru';
+    const minVol=ru?0:(+el('#minVol').value)*1e6, nInst=ru?9999:+el('#nInst').value;
     const noStocks=MKT==='crypto'&&el('#noStocks').checked;
-    let list=tk.filter(t=>t.turn>=minVol*0.5&&t.last>0);
+    let list;
+    if(ru){ const want=ruListSet(), by={}; for(const t of tk) by[t.base]=t; list=want.map(b=>by[b]).filter(Boolean); }
+    else{
+    list=tk.filter(t=>t.turn>=minVol*0.5&&t.last>0);
     if(noStocks) list=list.filter(t=>!isStock(t.base));
     list=list.sort((a,b)=>b.turn-a.turn).slice(0,nInst);
+    }
     const perCoin={};   // base -> {avg, sig}
     const need=Math.min(9100,winH+280);
     const estMin=Math.ceil(list.length*(need/1000)*(ex.name==='OKX'?3:ex.name==='MOEX'?1.6:1)/40);
@@ -3194,6 +3489,16 @@ async function scanUniverse(ex,tk,winH,onStart,onProg){
                imoexAbove:null,imoexRet5:null,sym5ret:null};
     // Для РУ: загружаем IMOEX один раз и вычисляем его направление
     if(MKT==='ru'){
+      // 6.94: дневки IMOEX за весь период — режим рынка считается на момент КАЖДОГО сигнала (а не на момент скана)
+      try{
+        const now=Date.now(), days=Math.ceil(winH/24)+560;   // 7.05: дневки с запасом — EMA50/MACD/RSI индекса
+        const rows=await issCandles('/engines/stock/markets/index/boards/SNDX/securities/IMOEX',24,now-days*86400000,null,6);
+        opt.imoexD1=lastClosed(issBars(rows,'1d',now));
+        // 7.02: часовики IMOEX — для The best MOEX (ход индекса за 24 часа до сигнала)
+        const hrows=await issCandles('/engines/stock/markets/index/boards/SNDX/securities/IMOEX',60,now-(winH+24*100)*3600000,null,Math.ceil((winH/24+100)*17/500)+3);   // 7.05: 100 дней прогрева EMA200 часовика
+        opt.imoexH1=issBars(hrows,'1h',now);
+        opt.ixP=ruIxPrep(opt.imoexD1,opt.imoexH1.filter(b=>b.confirmed));
+      }catch(e){ opt.imoexD1=null; }
       try{
         const im=await MOEX.bench(30);
         const iml=im.filter(b=>b.confirmed);
@@ -3206,8 +3511,8 @@ async function scanUniverse(ex,tk,winH,onStart,onProg){
       }catch(e){}
     }
     let raw=[],i=0,brk=0,rev=0;
-    for(const it of list){
-      i++; if(onProg) onProg(i,list.length,it.base,raw.length);
+    // 6.99: инструменты загружаются параллельно (раньше — по одному), результат тот же
+    const doOne=async(it)=>{
       try{
         const d1n=Math.min(450, Math.ceil(winH/24)+60);
         const [d1,h1]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need)]);
@@ -3236,15 +3541,20 @@ async function scanUniverse(ex,tk,winH,onStart,onProg){
           }
         }
       }catch(e){}
-      await yieldNow();
-    }
+      i++; if(onProg) onProg(i,list.length,it.base,raw.length);
+    };
+    const conc=ex.name==='OKX'?3:ex.name==='MOEX'?6:10;
+    let qi=0;
+    await Promise.all(Array.from({length:Math.min(conc,list.length)},async()=>{ while(qi<list.length){ const it=list[qi++]; await doOne(it); await yieldNow(); } }));
     // окончательный список: по среднему дневному обороту за период
     const kept=Object.entries(perCoin).filter(([,v])=>v.avg>=minVol).sort((a,b)=>b[1].avg-a[1].avg).slice(0,nInst);
     raw=[]; for(const [,v] of kept) raw=raw.concat(v.sig);
+    if(MKT==='ru') ruCluster(raw);
     return {raw, nList:list.length, nKept:kept.length, brk, rev};
 }
 el('#run').addEventListener('click',async()=>{
   if(MKT==='algo'){ runAlgoScan(); return; }
+  if(!AUTO_RUN&&el('#autoScan').checked){ el('#autoScan').checked=false; try{ localStorage.setItem('hw_auto_on','0'); }catch(e){} }
   const btn=el('#run'); btn.disabled=true;
   const prog=el('#prog'); prog.style.display=''; prog.value=0;
   try{
@@ -4132,6 +4442,7 @@ const EDGE={d1:2, vtr:1.0};
 function bestPoke(t){ if(t.pk_ext==null||t.st==null||t.e==null) return null; const d=Math.abs(t.st-t.e); return d>0?Math.abs(t.pk_ext-t.e)/d:null; }
 function bestScore(s){ return scoreV5raw(s); }   // 6.88: The best и оценка — одна модель (v5)
 function bestVerdict(s){
+  if(isRuSig(s)) return isBestRU(s)?null:'ru';   // 7.02: Мосбиржа — своё правило
   if(s.type!=='fbo') return 'notfbo';
   const side=s.side||(s.d===0?'short':'long');
   if(side!=='short') return 'notshort';
@@ -4155,9 +4466,24 @@ function bestSource(list){ const W=bestWatchSet(); return list.filter(s=>W.has(s
 // 6.93: недельный отбор — по времени (как в живой торговле): в каждой ISO-неделе берутся сигналы по порядку,
 // пока их меньше BEST_WEEK; отслеживаемые остаются всегда. Раньше — топ по оценке за неделю, но это зависело от
 // сигналов, которых ещё не было, и кнопка с шаблоном в тестировщике расходились.
+/* 7.01: реестр The best — какие сигналы конвейер The best уже отобрал (крипта). Звёздочка ★ = сигнал есть в реестре,
+   поэтому звёздочки, кнопка и шаблон всегда совпадают. Реестр же даёт недельному лимиту счёт отобранных раньше в этой
+   неделе, если окно скана начинается с середины недели (например, автообновление «с начала дня»). */
+const BEST_REG_KEY='hw_best_reg';   // крипта; Мосбиржа — отдельный реестр hw_best_reg_ru
+const BEST_REGS={};
+function bestRegKey(){ return MKT==='ru'?BEST_REG_KEY+'_ru':BEST_REG_KEY; }
+function bestReg(){ const k=bestRegKey(); if(!BEST_REGS[k]){ try{ BEST_REGS[k]=new Map(JSON.parse(localStorage.getItem(k)||'[]')); }catch(e){ BEST_REGS[k]=new Map(); } } return BEST_REGS[k]; }
+function bestRegAdd(rows){
+  const R=bestReg(); let ch=false;
+  for(const t of rows){ const k=t.base+'|'+t.t; if(!R.has(k)){ R.set(k,t.t); ch=true; } }
+  if(!ch) return;
+  const lim=Date.now()-150*86400000; for(const [k,v] of R) if(v<lim) R.delete(k);
+  try{ localStorage.setItem(bestRegKey(),JSON.stringify([...R].slice(-20000))); }catch(e){}
+}
 function bestWeekCap(rows){
   const W=bestWatchSet(), cnt={}, keep=[];
   const asc=rows.slice().sort((a,b)=>(a.t-b.t)||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
+  if(asc.length){ const t0=asc[0].t; for(const [k,v] of bestReg()) if(v<t0){ const wk=isoWeekKey(v); if(wk===isoWeekKey(t0)) cnt[wk]=(cnt[wk]||0)+1; } }
   for(const t of asc){
     const w=W.has(t.base+'|'+t.t);
     if(!w && (bestPoke(t)??0)>BEST_POKE) continue;   // большой хвост прокола относительно стопа — убираем (кроме отслеживаемых)
@@ -4171,6 +4497,7 @@ function bestWeekCap(rows){
 // Фильтры панели НЕ используются (всегда «авто»), мин. оценка и недельный лимит панели — тоже: иначе результат
 // зависел бы от того, что выставлено в панели, а у шаблона панели нет.
 function bestF(){
+  if(MKT==='ru') return readFFromObj({});   // 7.02: Мосбиржа — алгоритм MOEX в «авто» (обе стороны, лонги по тренду акции)
   const f=readFFromObj({});
   const nn=el('#noNight'); if(nn&&!nn.checked) f.hours='0-24';   // как «авто» в панели
   f.side=0;   // ЛП — только SHORT
@@ -4178,12 +4505,14 @@ function bestF(){
 }
 function bestPipeline(list,Lov){
   const f=bestF();
-  const ok=bestSource(byStrat(list,'fbo')).filter(s=>passes(s,f))
+  const ok=bestSource(byStrat(list,MKT==='ru'?'brk':'fbo')).filter(s=>passes(s,f))
     .map(s=>({...s, score:signalScore(s)}))
     .map(s=>recompute(s,f)).filter(Boolean)
     .filter(s=>s.rp*100<=f.maxrisk);
   const seq=applySequential(capCluster(applyCoinLimit(ok), f.cap||3), f, !Lov, Lov);
-  return bestWeekCap(seq);
+  const out=bestWeekCap(seq);
+  if(MKT==='crypto'||MKT==='ru') bestRegAdd(out);
+  return out;
 }
 function isBestFBO(s){ return bestVerdict(s)===null; }
 function bestDiag(list){
@@ -4377,6 +4706,7 @@ function windowHours(){
 el('#win').addEventListener('change',()=>{ if(LAST.length) renderScan(); });
 el('#winUnit').addEventListener('change',()=>{ if(LAST.length) renderScan(); });
 el('#sc_weekmax').addEventListener('change',()=>{ if(LAST.length) renderScan(); });
+el('#sc_rutgt').addEventListener('change',()=>{ try{ saveScanUi(); }catch(e){} if(LAST.length) renderScan(); try{ renderBt(); }catch(e){} });
 el('#sc_minscore').addEventListener('input',()=>{ if(LAST.length) renderScan(); });
 const TABS=[['#tabScan','#paneScan'],['#tabWatch','#paneWatch'],['#tabBt','#paneBt'],['#tabTester','#paneTester'],['#tabRegime','#paneRegime']];
 for(const [b,p] of TABS){
@@ -4548,12 +4878,14 @@ function readFFromObj(obj){
   const f={};
   for(const id of FIDS){
     const v=(obj&&obj[id]!==undefined)?String(obj[id]):'auto';
-    if(v==='auto') f[id]=DEF[id];
+    if(v==='auto'&&MKT==='ru') (f._ra||(f._ra={}))[id]=1;
+    if(v==='auto'&&ruAuto(id)) f[id]=RU_AUTO[id];
+    else if(v==='auto') f[id]=DEF[id];
     else if(['kind','hours','daypos','dow','appr','atrr','round','green','atrd'].includes(id)) f[id]=v;
     else if(['touch','acc','bias','side','ema','brkbars','cov','preacc','smooth','d1ag'].includes(id)) f[id]=+v;
     else f[id]=parseFloat(v);
   }
-  f.tgt=TARGET_R;
+  f.tgt=MKT==='ru'?ruTgt():TARGET_R;
   return f;
 }
 
@@ -4640,7 +4972,7 @@ function renderTesterCard(stratObj, idx){
     }
     rows+=`<tr class="clickable" data-tidx="${idx}" data-sig-t="${s.t}" data-sig-base="${s.base}">
       <td class="muted">▸</td>
-      <td>${s.base}</td>
+      <td>${nameCell(s)}</td>
       <td class="muted">${new Date(s.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</td>
       <td class="${s.d?'take':'stop'}">${s.d?'LONG':'SHORT'}</td>
       <td class="muted">${(s.type||'fbo').toUpperCase()} · ${s.k||''}</td>
@@ -5051,7 +5383,7 @@ function testerAddPlain(strat,sig){
   if((strat.signals||[]).some(s=>testerSignalKey(s)===key)) return false;
   if(!testerPassesSignal(sig, strat.tplParams)) return false;
   const fTpl=readFFromObj(strat.tplParams);
-  const riskV=Math.max((fTpl.stop/100)*sig.atrD, 0.02*sig.e);
+  const riskV=Math.max((fTpl.stop/100)*sig.atrD, ((sig.mkt==='ru'||MKT==='ru')?0.01:0.02)*sig.e);   // 7.02: MOEX — 1%, как в движке
   if(!(riskV>0)||riskV/sig.e>MAXRISK) return false;
   const long=sig.d===1;
   const stV=long?sig.e-riskV:sig.e+riskV;
@@ -5066,7 +5398,7 @@ function testerAddPlain(strat,sig){
    кнопка The best (bestPipeline): авто-фильтры, монета 12ч, сигналов в час, отслеживаемые, хвост прокола, 14/нед.
    Новые сигналы The best добавляются с момента прошлого скана тестировщика (не меньше 24 ч) — без пропусков. */
 el('#testerScanAll').addEventListener('click', async()=>{
-  if(MKT!=='crypto') return testerScanLegacy();
+  if(MKT!=='crypto'&&MKT!=='ru') return testerScanLegacy();   // 7.02: Мосбиржа — тоже общий конвейер (The best = кнопка)
   const arr=loadTesterStrategies();
   if(!arr.length){ setStatus('добавь хотя бы одну стратегию в тестировщик'); return; }
   const btn=el('#testerScanAll'); btn.disabled=true;
@@ -5208,26 +5540,22 @@ function saveScanUi(){ try{ const o={}; for(const e of scUiEls()) o[e.id]=e.type
 /* РУ-профиль фильтров — применяется автоматически при первом переключении на Мосбиржу */
 const RU_DEFAULTS={
   sc_strat:'brk',        // только пробой
-  sc_side:'0',           // 6.91: только SHORT (пробой вниз). Аудит март–окт. 2026, 669 пробоев после RU-фильтров:
-                         // SHORT 39.6% тейков (+0.51R/сделку), LONG 17.7% (−0.20R) — лонги в минусе в каждом из 8 месяцев (6–26%).
-                         // Можно вернуть «авто» вручную, если рынок развернётся вверх.
-  sc_str:'5',            // уровень не слабее 5 — только сильные, очевидные уровни
-                         // (твои лучшие сделки: ALRS+4.71%, MTLR+5.51%, RUAL+5.09% — все str≥5)
-  sc_cross:'1',          // не более 1 касания уровня
-  sc_acc:'1',            // только с накоплением — обязательно
-  sc_preacc:'1',         // зона до уровня должна быть чистой
-  sc_dist:'0.3',         // цена не дальше 0.3 ATR от уровня
-  sc_hours:'7-18',        // 07–18 МСК в будни, пятница до 13 — жёсткий алгоритм. фильтр
-  sc_kind:'prev high,prev low,swing D1 high,swing D1 low',
-  sc_smooth:'null',
-  sc_body:'0.4',         // тело свечи ≥ 40% диапазона — сила пробойного импульса
-  sc_thr:'0.15',
-  sc_rusqueeze:'auto',   // 6.92: фильтр раньше не работал (баг); по данным март–окт. squeeze не помогает (30% против 33%) → авто
-  sc_ruclose:'auto',     // 6.92: не работал (баг); по данным без разницы (32% / 32%) → авто
-  sc_ruimoex:'auto',     // IMOEX — авто (можно включить вручную)
-  sc_rurelstr:'auto',    // 6.92: не работал (баг); по данным мешает (29% против 34%) → авто
-  sc_rubase:'4',         // 6.92: база у уровня ≥4 из 8 ч — как в ваших сделках
+  // 6.94: все фильтры профиля РФ — «авто»: на Мосбирже «авто» само означает алгоритм MOEX (RU_AUTO):
+  // 6.98: шорт; лонг только при восходящем тренде самой акции (≥6% над SMA50 D1), уровень ≥4, ≤1 касания, накопление, 07–19 МСК, база у уровня ≥4 из 8 ч, объём пробоя ≥1.5×.
+  sc_vol:'auto', sc_side:'auto', sc_str:'auto', sc_cross:'auto', sc_acc:'auto', sc_hours:'auto', sc_rubase:'auto', sc_ruimoex:'auto',
+  sc_preacc:'auto', sc_dist:'auto', sc_kind:'auto', sc_smooth:'auto', sc_body:'auto', sc_thr:'auto',
+  sc_rusqueeze:'auto', sc_ruclose:'auto', sc_rurelstr:'auto',
 };
+// 6.94: подписи «авто» на Мосбирже показывают, что именно включено алгоритмом MOEX
+const RU_AUTO_LBL={side:'авто (MOEX: по индексу и рынку; лонг — акция ≥6% над SMA50)',str:'авто (MOEX: от 4, по индексу от 3)',cross:'авто (MOEX: до 2, против индекса до 1)',acc:'авто (MOEX: обязательно, по индексу — нет)',
+  hours:'авто (MOEX: 07–19)',rubase:'авто (MOEX: ≥4 из 8 ч, по индексу ≥2)',vol:'авто (MOEX: любой, против индекса ≥1.5×)'};
+function syncAutoLabels(){
+  for(const pfx of ['sc','bt']) for(const id in RU_AUTO_LBL){
+    const e=el('#'+pfx+'_'+id); if(!e) continue; const o=[...e.options].find(x=>x.value==='auto'); if(!o) continue;
+    if(o.dataset.lbl==null) o.dataset.lbl=o.textContent;
+    o.textContent=MKT==='ru'?RU_AUTO_LBL[id]:o.dataset.lbl;
+  }
+}
 function applyRuDefaults(){
   for(const [id,val] of Object.entries(RU_DEFAULTS)){
     const e=el('#'+id); if(!e) continue;
@@ -5235,12 +5563,14 @@ function applyRuDefaults(){
   }
   // 6.91: недельный лимит для РУ — 15 (было принудительно 3). Отбор «топ по оценке» на Мосбирже не помогает: оценка обучена
   // на крипте и выбирала в основном лонги (из 3/нед — 51 лонг на 17 шортов, лонги 25% против 53% у шортов).
-  const wm=el('#sc_weekmax'); if(wm&&(+wm.value<=3||+wm.value===20)) wm.value=15;
+  // 6.96: на Мосбирже ~15–20 сигналов в неделю; отбор «топ по оценке» тут не работает (оценка обучена на крипте) → лимит 40.
+  const wm=el('#sc_weekmax'); if(wm&&(+wm.value<=20)) wm.value=40;
   el('#sc_strat').dispatchEvent(new Event('change'));
 }
 function restoreScanUi(m){ try{ const o=JSON.parse(localStorage.getItem('hw_scan_ui_'+m)||'null');
   if(m==='ru') applyRuDefaults(); // РУ-профиль всегда при переключении
   if(!o) return;
+  if(m==='ru'){ try{ if(!localStorage.getItem('hw_ru_704')){ delete o.sc_weekmax; delete o.nInst; delete o.ruList; for(const k in RU_DEFAULTS) delete o[k]; localStorage.setItem('hw_ru_704','1'); } }catch(e){} }
   for(const e of scUiEls()) if(e.id in o){ if(e.type==='checkbox') e.checked=!!o[e.id]; else e.value=o[e.id]; } }catch(e){} }
 async function saveScanData(){ try{ await scIdbSet('scan_'+MKT,{LAST, meta:LAST_SCAN_META, regime:REGIME, note:UNIVERSE_NOTE,
   ex:EX&&EX.name, t:Date.now()}); }catch(e){} }
@@ -5792,9 +6122,9 @@ function algoSetBudget(on){
 }
 
 function applyMarket(m,init){
-  if(!init){ const s=MKT_STATE[MKT]; s.LAST=LAST; s.BT=BT; s.BT_META=BT_META; s.EX=EX; s.REGIME=REGIME; s.vol=el('#minVol').value; }
-  MKT=m;
-  const s=MKT_STATE[m]; LAST=s.LAST; BT=s.BT; BT_META=s.BT_META||null; EX=s.EX; REGIME=s.REGIME; el('#minVol').value=s.vol;
+  if(!init){ const s=MKT_STATE[MKT]; s.LAST=LAST; s.BT=BT; s.BT_META=BT_META; s.EX=EX; s.REGIME=REGIME; s.vol=el('#minVol').value; s.ninst=el('#nInst').value; }
+  MKT=m; try{ syncAutoLabels(); }catch(e){}
+  const s=MKT_STATE[m]; LAST=s.LAST; BT=s.BT; BT_META=s.BT_META||null; EX=s.EX; REGIME=s.REGIME; el('#minVol').value=s.vol; el('#nInst').value=s.ninst||(m==='ru'?RU_LIST_DEFAULT.split(',').length:300);
   const ru=m==='ru', algo=m==='algo';
   el('#fldSrc').style.display=(ru||algo)?'none':'';
   el('#fldSrcRu').style.display=ru?'':'none';
@@ -6602,13 +6932,18 @@ el('#btcBtn').addEventListener('click',()=>{ BTC_OPEN=!BTC_OPEN; el('#btcBtn').t
 // Вкладка должна оставаться открытой (можно свернуть). В начале каждого часа (через 2 минуты после
 // закрытия часовой свечи) запускается «Сканировать»; о НОВЫХ сигналах, прошедших фильтры, приходит
 // уведомление Windows/macOS и короткий звук.
-let AUTO_LAST_HOUR=-1;
+// 6.99: автообновление. При открытии файла и каждый час — скан с базовыми настройками текущего рынка
+// (все фильтры «авто», окно — с начала текущего дня МСК, поэтому пропущенные часы досканируются сами).
+// Крипта — в первую минуту часа (свеча закрылась), Мосбиржа — с 16-й минуты (ISS отдаёт свечи с задержкой 15 мин).
+// Таймер — в Web Worker: в свёрнутой/фоновой вкладке обычные таймеры браузер замедляет до раза в минуту и реже.
+let AUTO_RUN=false, AUTO_DONE='', AUTO_FIRST=true;
 function autoSeenKey(){ return 'hw_auto_seen_'+MKT; }
 function autoSeen(){ try{ return new Set(JSON.parse(localStorage.getItem(autoSeenKey())||'[]')); }catch(e){ return new Set(); } }
 function autoMarkAll(){ const s=autoSeen(); for(const t of (window.__SCAN_ROWS__||[])) s.add(t.base+'|'+t.t); try{ localStorage.setItem(autoSeenKey(),JSON.stringify([...s].slice(-3000))); }catch(e){} }
 function beep(){ try{ const a=new (window.AudioContext||window.webkitAudioContext)(), o=a.createOscillator(), g=a.createGain(); o.frequency.value=880; g.gain.value=0.08; o.connect(g); g.connect(a.destination); o.start(); setTimeout(()=>{ o.stop(); a.close(); },250); }catch(e){} }
 function autoNotify(){
   if(!el('#autoScan')||!el('#autoScan').checked) return;
+  if(AUTO_FIRST){ AUTO_FIRST=false; autoMarkAll(); return; }   // первый скан после открытия — без уведомлений о старых сигналах
   const seen=autoSeen(), fresh=(window.__SCAN_ROWS__||[]).filter(t=>!seen.has(t.base+'|'+t.t)&&Date.now()-t.t<3*36e5);
   autoMarkAll(); if(!fresh.length) return;
   beep();
@@ -6617,22 +6952,50 @@ function autoNotify(){
       {body:`${t.type==='brk'?'Пробой':'Ложный пробой'} · вход ${fmt(t.e)} · стоп ${fmtStop(t)} · тейк ${fmt(t.tk)}`});
     if(fresh.length>5) new Notification(`Ещё ${fresh.length-5} новых сигналов`,{body:'Открой вкладку «Сигналы»'});
   }
-  setStatus(`автоскан: новых сигналов ${fresh.length} — ${fresh.map(t=>t.base).slice(0,8).join(', ')}`);
+  setStatus(`автообновление: новых сигналов ${fresh.length} — ${fresh.map(t=>t.base).slice(0,8).join(', ')}`);
+}
+function autoDefaults(){
+  // базовые настройки: стратегия рынка по умолчанию, все фильтры «авто», без мин. оценки и The best, окно — с начала дня (МСК)
+  const strat=MKT==='ru'?'brk':'fbo';
+  if(el('#sc_strat').value!==strat){ el('#sc_strat').value=strat; try{ fsStratChanged('sc'); }catch(e){} }
+  for(const id of FIDS){ const e=el('#sc_'+id); if(e&&[...(e.options||[])].some(o=>o.value==='auto')) e.value='auto'; }
+  if(MKT==='ru'){ for(const [id,val] of Object.entries(RU_DEFAULTS)){ const e=el('#'+id); if(e&&id!=='sc_strat') e.value=val; } }
+  const ms=el('#sc_minscore'); if(ms) ms.value='';
+  const wm=el('#sc_weekmax'); if(wm) wm.value=MKT==='ru'?40:20;
+  if(SC_BEST){ SC_BEST=false; try{ bestBtnState(el('#scBest'),false); }catch(e){} }
+  const nowMsk=Date.now()+3*3600000, h=Math.ceil((nowMsk%86400000)/3600000)+1;   // +1 ч — чтобы в 00:00 попала последняя свеча прошлого дня
+  el('#win').value=h; el('#winUnit').value='1';
+  try{ fsNote('sc'); syncAutoLabels(); }catch(e){}
+}
+function autoDueKey(){
+  // ключ часа, скан которого уже пора делать (крипта — с 0:20 минуты, MOEX — с 16:00)
+  const d=new Date(), m=d.getMinutes(), sec=d.getSeconds();
+  const ready = MKT==='ru' ? (m>=16) : (m>0||sec>=20);
+  if(!ready) return null;
+  return MKT+'|'+d.toISOString().slice(0,13);
+}
+function autoRun(force){
+  const e=el('#autoScan'); if(!e||!e.checked||MKT==='algo') return;
+  if(el('#run').disabled) return;
+  const k=autoDueKey();
+  if(!force&&(!k||k===AUTO_DONE)) return;
+  AUTO_DONE=k||(MKT+'|'+new Date().toISOString().slice(0,13));
+  autoDefaults();
+  AUTO_RUN=true; try{ el('#run').click(); } finally { AUTO_RUN=false; }
 }
 el('#autoScan').addEventListener('change',async()=>{
+  try{ localStorage.setItem('hw_auto_on',el('#autoScan').checked?'1':'0'); }catch(e){}
   if(el('#autoScan').checked){
     if('Notification' in window && Notification.permission==='default'){ try{ await Notification.requestPermission(); }catch(e){} }
-    autoMarkAll(); AUTO_LAST_HOUR=new Date().getHours();
-    setStatus('автоскан включён: каждый час на 2-й минуте. Держи вкладку открытой.'+('Notification' in window&&Notification.permission!=='granted'?' Уведомления браузер не разрешил — будет только звук и строка статуса.':''));
+    AUTO_FIRST=true; autoRun(true);
+    setStatus('автообновление включено: базовые настройки, окно с начала дня, каждый час.'+('Notification' in window&&Notification.permission!=='granted'?' Уведомления браузер не разрешил — будет только звук и строка статуса.':''));
   }
   saveScanUi();
 });
-setInterval(()=>{
-  const e=el('#autoScan'); if(!e||!e.checked) return;
-  const d=new Date(); if(d.getMinutes()<2||d.getMinutes()>10||d.getHours()===AUTO_LAST_HOUR) return;
-  if(el('#run').disabled) return;
-  AUTO_LAST_HOUR=d.getHours(); el('#run').click();
-},30000);
+/* [hw-bot] Mini App: автообновление HTML (Web Worker, автозапуск при открытии, keepalive) отключено.
+   Скан — только по кнопке; галочка «автообновление» работает, лишь если её включить вручную. */
+setInterval(()=>autoRun(false),30000);
+try{ el('#autoScan').checked=false; localStorage.setItem('hw_auto_on','0'); }catch(e){}
 
 // ===== Уточнение исхода сделок по 5-минуткам =====
 // Бэктест идёт по часовым свечам. Если в ОДНОЙ часовой свече задеты и стоп, и тейк, по часовику
