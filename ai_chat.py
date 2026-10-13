@@ -125,8 +125,9 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
     — встроенный шаблон «🤖 Авто» рынка и его стратегия. У «Крипта (Алго)» (algo) Авто НЕТ —
     не предлагай, объясни что нужен алго-шаблон.
 - set_auto_strategy: {"market":"crypto"|"ru","strategy":"fbo"|"brk"|"both"}
-- set_the_best: {"enabled":true|false} — «⭐ The Best» (только крипта): вкл — слать только сигналы отбора
-    The Best (ЛП-шорты: D1 ≥2 зелёных подряд, объём не разгонялся, без шипов/хвостов, ≤14/нед);
+- set_the_best: {"enabled":true|false,"market":"crypto"|"ru"} — «⭐ The Best» (отдельно для крипты и Мосбиржи,
+    по умолчанию crypto): вкл — слать только сигналы отбора The Best (крипта: ЛП-шорты, D1 ≥2 зелёных подряд,
+    объём не разгонялся, без шипов/хвостов; Мосбиржа: шорт-пробой после 12:00, рынок валится; ≤14/нед);
     выкл — как обычно, но такие сигналы помечаются ⭐.
 - set_templates: {"market":..,"names":["..."]}  — полная замена активных шаблонов рынка (выключает Авто)
 - add_templates / remove_templates: {"market":..,"names":["..."]}
@@ -331,7 +332,8 @@ def _sanitize_one(item: dict, notes: list[str]) -> dict | None:
     clean: dict[str, Any] = {"action": action, "params": {}, "summary": str(item.get("summary") or action)}
     market = params.get("market")
     if action == "set_the_best":
-        clean["params"] = {"enabled": _as_bool(params.get("enabled"))}
+        clean["params"] = {"enabled": _as_bool(params.get("enabled")),
+                           "market": "ru" if market == "ru" else "crypto"}
         return clean
     if action == "set_market":
         if market not in _MKTS:
@@ -473,11 +475,14 @@ def parse_rules(user_text: str) -> list[dict] | None:
     # «the best вкл/выкл» — отдельный переключатель ⭐ The Best (крипта), не «только лучший»
     if _R_THE_BEST.search(text):
         rest = _R_THE_BEST.sub(" ", text)
-        if _R_SPLIT.sub(" ", rest).strip() and (_seg_markets(rest) and _seg_markets(rest) != ["crypto"]):
+        sm = _seg_markets(rest) if _R_SPLIT.sub(" ", rest).strip() else []
+        if sm and sm not in (["crypto"], ["ru"]):
             return None
         on, off = bool(_R_ONV.search(rest)), bool(_R_OFFV.search(rest))
         if on and off:
             return None
+        if sm == ["ru"]:
+            return [{"action": "set_the_best", "params": {"enabled": not off, "market": "ru"}}]
         return [{"action": "set_the_best", "params": {"enabled": not off}}]
     m_only = re.search(r"(?i)\bтолько\b", text)
     segs = [x for x in _R_SPLIT.split(text) if x and x.strip()]

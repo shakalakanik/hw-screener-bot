@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from screener import _f_from_template, passes_html
 
 HOLD = 168
-HOLD_RU = 48
+HOLD_RU = 96   # HTML 6.94: MOEX — 4 суток
 SHORT_WINDOW_H = 168   # окно скана < недели → «не более 10 сигналов в час» без недельного/score-капа
 MAXRISK = 0.20
 BE_TRIGGER_R = 1.5
@@ -68,7 +68,7 @@ def recompute(card: dict, f: dict) -> dict | None:
     e = card["last"]
     atr_d = card.get("atr_d") or 0
     is_ru = card.get("market") == "ru"
-    # новый HTML: стоп не меньше 1% для акций РФ (2% крипта), удержание 48ч РФ / 168ч крипта
+    # новый HTML: стоп не меньше 1% для акций РФ (2% крипта), удержание 96ч РФ / 168ч крипта
     risk = max((f["stop"] / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e)
     hold = HOLD_RU if is_ru else HOLD
     if risk <= 0 or risk / e > MAXRISK:
@@ -224,11 +224,19 @@ def is_best_card(card: dict) -> bool:
     return best_verdict(feat) is None
 
 
-def _best_week_cap(rows):
-    """bestWeekCap(): по времени; хвост прокола > BEST_POKE стопов — пропуск; ≤ BEST_WEEK за ISO-неделю."""
+def _best_week_cap(rows, reg_ts=None):
+    """bestWeekCap(): по времени; хвост прокола > BEST_POKE стопов — пропуск; ≤ BEST_WEEK за ISO-неделю.
+    HTML 7.01: счёт недели начинается с уже отобранных раньше (реестр The best) — те, что раньше первого
+    сигнала списка и в той же неделе. reg_ts — время сигналов из реестра этого рынка."""
     from hwv1 import BEST_POKE, BEST_WEEK, best_poke
     asc = sorted(rows, key=lambda s: (s["signal_ts"], -s["score"], _base(s)))
     cnt, keep = {}, []
+    if asc and reg_ts:
+        t0 = asc[0]["signal_ts"]
+        w0 = iso_week_key(t0)
+        for v in reg_ts:
+            if v < t0 and iso_week_key(v) == w0:
+                cnt[w0] = cnt.get(w0, 0) + 1
     for t in asc:
         feat = t.get("feat") or {}
         pr = best_poke({"pk_ext": feat.get("pk_ext"), "st": t.get("stop"), "e": t.get("last")})
@@ -242,13 +250,25 @@ def _best_week_cap(rows):
     return sorted(keep, key=_prio_key)
 
 
-def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False) -> list[dict]:
-    """1:1 bestPipeline(): фильтры всегда «авто» (часы 0-24 при выключенном «без ночи», только SHORT),
-    источник — только The best ЛП, затем монета 12ч → cap/час (cap||3) → серии → ≤14/нед."""
+def is_best_ru_card(card: dict) -> bool:
+    from hwv1 import is_best_ru
+    return card.get("strategy") == "brk" and is_best_ru(card.get("feat") or {})
+
+
+def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False,
+                  market: str = "crypto", reg_ts=None) -> list[dict]:
+    """1:1 bestPipeline(). Крипта: фильтры «авто» (часы 0-24 при выключенном «без ночи», только SHORT),
+    источник — The best ЛП. Мосбиржа (HTML 7.02): фильтры = алгоритм MOEX «авто», источник — isBestRU.
+    Затем бумага/монета 12ч → cap/час (cap||3) → серии → ≤14/нед (с учётом реестра reg_ts)."""
     from screener import _f_from_template, passes_html
-    f = _f_from_template({} if no_night else {"hours": "0-24"}, "crypto", "fbo")
-    rows = [c for c in cards if c["signal_ts"] >= cutoff_ms and c.get("strategy", "fbo") == "fbo"
-            and c.get("market", "crypto") == "crypto" and is_best_card(c)]
+    if market == "ru":
+        f = _f_from_template({}, "ru", None)
+        rows = [c for c in cards if c["signal_ts"] >= cutoff_ms and c.get("strategy") == "brk"
+                and c.get("market") == "ru" and is_best_ru_card(c)]
+    else:
+        f = _f_from_template({} if no_night else {"hours": "0-24"}, "crypto", "fbo")
+        rows = [c for c in cards if c["signal_ts"] >= cutoff_ms and c.get("strategy", "fbo") == "fbo"
+                and c.get("market", "crypto") == "crypto" and is_best_card(c)]
     ok = []
     for c in rows:
         if not passes_html(c["feat"], f):
@@ -258,7 +278,12 @@ def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False) -> 
             continue
         ok.append(r)
     seq = _apply_sequential(_cap_cluster(_apply_coin_limit(ok), f["cap"] or 3), f)
-    return _best_week_cap(seq)
+    return _best_week_cap(seq, reg_ts)
+
+
+def best_reg_key(c: dict) -> str:
+    """Ключ реестра The best, как в HTML: base|t."""
+    return f"{_base(c)}|{int(c['signal_ts'])}"
 
 
 def best_key(c: dict) -> tuple:

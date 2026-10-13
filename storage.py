@@ -2039,8 +2039,9 @@ def get_auto_strategy(chat_id: int, market: str) -> str:
             "SELECT value FROM chat_settings WHERE chat_id=? AND key=?",
             (chat_id, f"auto_strat_{market}"),
         ).fetchone()
-    v = row["value"] if row else "fbo"
-    return v if v in _AUTO_STRATS else "fbo"
+    dflt = "brk" if market == "ru" else "fbo"   # HTML RU_DEFAULTS: на Мосбирже «авто» — только пробой
+    v = row["value"] if row else dflt
+    return v if v in _AUTO_STRATS else dflt
 
 
 def set_auto_strategy(chat_id: int, market: str, strategy: str):
@@ -2231,35 +2232,74 @@ def list_signal_journal(chat_id: int, market: str | None = None, limit: int = JO
 
 
 # ── The best (HTML 6.93): переключатель на чат + недельный счётчик ───────────────
-def _ensure_the_best(c: sqlite3.Connection) -> None:
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS chat_the_best (
+def _the_best_table(market: str = "crypto") -> str:
+    return "chat_the_best_ru" if market == "ru" else "chat_the_best"
+
+
+def _ensure_the_best(c: sqlite3.Connection, market: str = "crypto") -> None:
+    c.execute(f"""
+        CREATE TABLE IF NOT EXISTS {_the_best_table(market)} (
             chat_id INTEGER PRIMARY KEY,
             enabled INTEGER NOT NULL DEFAULT 0
         )
     """)
 
 
-def get_the_best(chat_id: int) -> bool:
+def get_the_best(chat_id: int, market: str = "crypto") -> bool:
+    """⭐ The Best чата: крипта (chat_the_best) или Мосбиржа (chat_the_best_ru) — отдельные переключатели."""
+    t = _the_best_table(market)
     with _conn() as c:
-        _ensure_the_best(c)
-        row = c.execute("SELECT enabled FROM chat_the_best WHERE chat_id=?", (int(chat_id),)).fetchone()
+        _ensure_the_best(c, market)
+        row = c.execute(f"SELECT enabled FROM {t} WHERE chat_id=?", (int(chat_id),)).fetchone()
     return bool(row["enabled"]) if row else False
 
 
-def set_the_best(chat_id: int, enabled: bool) -> None:
+def set_the_best(chat_id: int, enabled: bool, market: str = "crypto") -> None:
+    t = _the_best_table(market)
     with _conn() as c:
-        _ensure_the_best(c)
-        c.execute("INSERT OR REPLACE INTO chat_the_best(chat_id, enabled) VALUES (?,?)",
+        _ensure_the_best(c, market)
+        c.execute(f"INSERT OR REPLACE INTO {t}(chat_id, enabled) VALUES (?,?)",
                   (int(chat_id), 1 if enabled else 0))
 
 
-def best_sent_ts_since(chat_id: int, since_ms: int) -> list[int]:
-    """signal_ts сигналов The best (крипта), ушедших в чат с since_ms."""
+# Реестр The best (HTML 7.01 hw_best_reg / hw_best_reg_ru): какие сигналы конвейер The best уже отобрал.
+# Нужен недельному лимиту (14/нед), когда окно скана начинается с середины недели. Общий для всех чатов.
+def _ensure_best_registry(c: sqlite3.Connection) -> None:
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS best_registry (
+            market TEXT NOT NULL,
+            k TEXT NOT NULL,
+            signal_ts INTEGER NOT NULL,
+            PRIMARY KEY (market, k)
+        )
+    """)
+
+
+def best_registry_ts(market: str, since_ms: int) -> list[int]:
+    with _conn() as c:
+        _ensure_best_registry(c)
+        rows = c.execute("SELECT signal_ts FROM best_registry WHERE market=? AND signal_ts>=?",
+                         (market, int(since_ms))).fetchall()
+    return [int(r["signal_ts"]) for r in rows]
+
+
+def best_registry_add(market: str, items: list[tuple[str, int]]) -> None:
+    """items: (base|t, signal_ts). Старше 150 дней — удаляются (как в HTML)."""
+    if not items:
+        return
+    with _conn() as c:
+        _ensure_best_registry(c)
+        c.executemany("INSERT OR IGNORE INTO best_registry(market, k, signal_ts) VALUES (?,?,?)",
+                      [(market, k, int(t)) for k, t in items])
+        c.execute("DELETE FROM best_registry WHERE signal_ts<?", (int(time.time() * 1000) - 150 * 86_400_000,))
+
+
+def best_sent_ts_since(chat_id: int, since_ms: int, market: str = "crypto") -> list[int]:
+    """signal_ts сигналов The best (рынок market), ушедших в чат с since_ms."""
     with _conn() as c:
         _ensure_signal_journal(c)
         rows = c.execute(
-            "SELECT signal_ts FROM signal_journal WHERE chat_id=? AND market='crypto' "
-            "AND is_best=1 AND signal_ts>=?", (int(chat_id), int(since_ms)),
+            "SELECT signal_ts FROM signal_journal WHERE chat_id=? AND market=? "
+            "AND is_best=1 AND signal_ts>=?", (int(chat_id), market, int(since_ms)),
         ).fetchall()
     return [int(r["signal_ts"]) for r in rows]

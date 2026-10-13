@@ -16,6 +16,8 @@ from moex import (
     fetch_klines_moex_h1,
     moex_client,
     scan_one_moex,
+    ru_list_tickers,
+    finalize_moex_cards,
     MOEX_MIN_TURN,
 )
 
@@ -403,7 +405,7 @@ _F_DEF = {
     "brkbars": None, "volret": 0.0, "dow": None, "ema": None, "appr": None, "atrr": None,
     "dens": 99.0, "round": None, "green": None, "streakd": 0.0, "atrd": None, "minn": 8,
     "cov": None, "preacc": None, "smooth": None, "d1ag": None, "poke": 0.0, "msc": 0.0,
-    "rusqueeze": None, "ruclose": None, "ruimoex": None, "rurelstr": None,
+    "rusqueeze": None, "ruclose": None, "ruimoex": None, "rurelstr": None, "rubase": 0.0,
 }
 _F_STR = ("kind", "hours", "daypos", "dow", "appr", "atrr", "round", "green", "atrd")
 _F_INT = ("touch", "acc", "bias", "side", "ema", "brkbars", "cov", "preacc", "smooth", "d1ag")
@@ -418,12 +420,19 @@ def _f_from_template(raw: dict, market: str | None = None, strategy: str | None 
     f = {}
     if strategy is None and isinstance(raw, dict):
         strategy = raw.get("_strategy") or raw.get("strat")
+    from hwv1 import RU_AUTO
     for k, dv in _F_DEF.items():
         if k == "hours" and market == "ru":
             dv = "0-24"
         if k == "side" and strategy == "fbo":
             dv = 0.0
         v = raw.get(k, "auto") if isinstance(raw, dict) else "auto"
+        if (v is None or v == "auto") and market == "ru":
+            # HTML 7.05: на Мосбирже «авто» = алгоритм MOEX (RU_AUTO); _ra — какие поля в «авто»
+            f.setdefault("_ra", {})[k] = 1
+            if k in RU_AUTO:
+                f[k] = RU_AUTO[k]
+                continue
         if v is None or v == "auto":
             f[k] = dv
         elif k in _F_STR:
@@ -438,6 +447,9 @@ def _f_from_template(raw: dict, market: str | None = None, strategy: str | None 
                 f[k] = float(v)
             except (TypeError, ValueError):
                 f[k] = dv
+    if market == "ru":
+        from hwv1 import RU_TGT
+        f["tgt"] = RU_TGT   # HTML: f.tgt = ruTgt() (3R по умолчанию)
     return f
 
 
@@ -457,17 +469,43 @@ def _sfx(v: str, x: float, kind: str) -> bool:
 def passes_html(s: dict, f: dict) -> bool:
     """1:1 с passes(s,f) из HW_FBO_scanner_6.html. s — card['feat'], f — из _f_from_template."""
     is_b = s.get("type") == "brk"
+    # HTML 7.05/7.06 (MOEX, «авто»): согласование с индексом IMOEX — rx 1: по индексу, 2: против (строже)
+    ra = f.get("_ra")
+    rx = 0
+    if is_b and ra and ra.get("side") and s.get("mkt") == "ru" and s.get("ru_ixS") is not None:
+        from hwv1 import RU_BEST
+        if s.get("ru_ixExt"):
+            return False
+        if s["d"] == 0:
+            if s["ru_ixS"] == 7:
+                if not (s.get("ru_sa50") is not None and s["ru_sa50"] < 0):
+                    return False
+                if s.get("ru_clu") is not None and s["ru_clu"] < 2:
+                    return False
+                rx = 1
+            elif s["ru_ixS"] == 0:
+                if not (s.get("ru_sl200") is not None and s["ru_sl200"] >= RU_BEST["sl200"]):
+                    return False
+                rx = 2
+            else:
+                return False
+        else:
+            if s["ru_ixS"] == 0:
+                return False
+            if s["ru_ixS"] != 7 and str(s.get("k") or "").startswith("5d"):
+                return False
+            rx = 1
     if not is_b and s.get("p", 0) < f["thr"]:
         return False
     if f["msc"] > 0 and s.get("_sc", 0) < f["msc"]:
         return False
-    if s["strength"] < f["str"]:
+    if s["strength"] < (f["str"] - 1 if (rx == 1 and ra.get("str")) else f["str"]):
         return False
-    if s["crosses"] > f["cross"]:
+    if s["crosses"] > (min(f["cross"], 1) if (rx == 2 and ra.get("cross")) else f["cross"]):
         return False
     if f["touch"] is not None and s["touched8"] != f["touch"]:
         return False
-    if f["acc"] is not None and s["acc"] != f["acc"]:
+    if f["acc"] is not None and s["acc"] != f["acc"] and not (rx == 1 and ra.get("acc")):
         return False
     if s["dist_atr"] > f["dist"]:
         return False
@@ -479,7 +517,7 @@ def passes_html(s: dict, f: dict) -> bool:
                 return False
         elif s["vol_contraction"] >= f["vc"]:
             return False
-    if s["vol_mult"] < f["vol"]:
+    if s["vol_mult"] < (max(f["vol"], 1.5) if (rx == 2 and ra.get("vol")) else f["vol"]):
         return False
     if f["bias"] is not None and s["bias_ok"] != f["bias"]:
         return False
@@ -592,15 +630,29 @@ def passes_html(s: dict, f: dict) -> bool:
     # РУ-фильтры нового HTML — только для акций Мосбиржи (s.mkt==='ru'); «1» = фильтр включён.
     # HTML: if(+f.rusqueeze===1&&!s.ru_squeeze) return false; (readF → parseFloat('1') = 1).
     if s.get("mkt") == "ru":
-        for fk, sk in (("rusqueeze", "ru_squeeze"), ("ruclose", "ru_close_pos"),
-                       ("ruimoex", "ru_imoex_ok"), ("rurelstr", "ru_rel_str")):
-            v = f.get(fk)
+        def _on(v):
             try:
-                on = v is not None and v != "" and float(v) == 1
+                return v is not None and v != "" and float(v) == 1
             except (TypeError, ValueError):
-                on = False
-            if on and not s.get(sk):
                 return False
+        if _on(f.get("rusqueeze")) and not s.get("ru_squeeze"):
+            return False
+        if _on(f.get("ruclose")) and not s.get("ru_close_pos"):
+            return False
+        # HTML 6.94: «IMOEX в сторону» = индекс к SMA50 на момент сигнала (только пробой)
+        if _on(f.get("ruimoex")) and is_b and not (s.get("ru_ix50") is not None and s["ru_ix50"] > 0):
+            return False
+        if _on(f.get("rurelstr")) and not s.get("ru_rel_str"):
+            return False
+        rb = f.get("rubase") or 0
+        if rx == 1 and ra.get("rubase"):
+            rb = min(rb, 2)
+        if rb and is_b and (s.get("ru_base8") is None or s["ru_base8"] < rb):
+            return False
+        # HTML 6.98: лонг-пробой на Мосбирже — только если акция ≥6% над своей SMA50 (D1)
+        from hwv1 import RU_LONG_SA50
+        if is_b and s.get("d") == 1 and not (s.get("ru_sa50") is not None and s["ru_sa50"] >= RU_LONG_SA50):
+            return False
     return True
 
 
@@ -1107,17 +1159,32 @@ async def _deliver_html(
 
     Поверх — только бот-правила: не старше MAX_SIGNAL_AGE_H, без повторов (история отправок
     чата + общий дедуп уровня ±0.5%/36ч), лимит одновременных по шаблону, недельная квота с учётом уже отправленного. Отправка — от старых к новым."""
-    from html_pipeline import apply_all, best_pipeline, best_key, iso_week_key
+    from html_pipeline import apply_all, best_pipeline, best_key, best_reg_key, iso_week_key
 
     cutoff = now_ms - win_h * 3_600_000
     by_market: dict[str, list[dict]] = {}
     for c in all_cards:
         by_market.setdefault(c.get("market", "crypto"), []).append(c)
 
-    # The best (HTML 6.93 bestPipeline) — общий для всех чатов список по крипте
+    # The best (HTML 7.0x bestPipeline) — общий для всех чатов список по рынку (крипта / Мосбиржа).
+    # ⭐ = сигнал реально отобран конвейером; недельный лимит учитывает реестр уже отобранных (HTML 7.01).
     nn_all = CRYPTO_NO_NIGHT if no_night is None else bool(no_night)
-    best_rows = best_pipeline(by_market.get("crypto", []), cutoff, nn_all) if by_market.get("crypto") else []
-    best_keys = {best_key(c) for c in best_rows}
+    best_by: dict[str, list[dict]] = {}
+    for bm in ("crypto", "ru"):
+        if not by_market.get(bm):
+            best_by[bm] = []
+            continue
+        try:
+            reg = storage.best_registry_ts(bm, now_ms - 9 * 86_400_000)
+        except Exception:
+            reg = []
+        best_by[bm] = best_pipeline(by_market[bm], cutoff, nn_all, market=bm, reg_ts=reg)
+        try:
+            storage.best_registry_add(bm, [(best_reg_key(c), c["signal_ts"]) for c in best_by[bm]])
+        except Exception as e:
+            logger.debug("best registry: %s", e)
+    best_rows = best_by["crypto"]
+    best_keys = {best_key(c) for bm in best_by for c in best_by[bm]}
 
     # Дедуп уровня — снимок ДО рассылки, чтобы отправка первому чату не блокировала второй.
     dup_cache: dict[tuple, bool] = {}
@@ -1142,19 +1209,24 @@ async def _deliver_html(
         # фильтр бэктеста HTML. Количество сигналов бота ограничивают только шаблоны/сценарии.
         week_max = 0
         chosen: dict[tuple, dict] = {}
-        try:
-            the_best = storage.get_the_best(chat_id)
-        except Exception:
-            the_best = False
-        if the_best and "crypto" in markets:
-            # ⭐ The best ВКЛ: по крипте уходят только сигналы конвейера The best (шаблоны крипты не применяются)
-            for c in best_rows:
-                chosen[best_key(c)] = {**c, "matched_template": THE_BEST_NAME, "template_thr": None, "is_best": True}
+        tb_on: dict[str, bool] = {}
+        for bm in ("crypto", "ru"):
+            try:
+                tb_on[bm] = storage.get_the_best(chat_id, bm)
+            except Exception:
+                tb_on[bm] = False
+        the_best = tb_on["crypto"]
+        for bm in ("crypto", "ru"):
+            if tb_on[bm] and bm in markets:
+                # ⭐ The best ВКЛ: по рынку уходят только сигналы конвейера The best (шаблоны рынка не применяются)
+                for c in best_by[bm]:
+                    chosen[best_key(c)] = {**c, "matched_template": THE_BEST_NAME, "template_thr": None,
+                                           "is_best": True}
         for tpl in multi:
             mkt = tpl.get("_market", "crypto")
             if mkt not in markets:
                 continue
-            if mkt == "crypto" and the_best:
+            if mkt in ("crypto", "ru") and tb_on[mkt]:
                 continue
             name = tpl.get("_name", "")
             raw = tpl.get("filters") or {}
@@ -1175,6 +1247,15 @@ async def _deliver_html(
                 raw = {**raw, "hours": "0-24"}
             rows = apply_all(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), cutoff, week_max,
                              win_h=win_h, market=mkt)
+            if mkt == "ru" and tpl.get("_strategy", "both") in ("brk", "both") and best_by["ru"]:
+                # HTML 7.05: каждый сигнал The best MOEX виден в обычном списке со звёздочкой, даже если
+                # лимит «бумага 12 ч / в час» оставил там более ранний сигнал той же бумаги
+                have = {best_reg_key(c) for c in rows}
+                f_t = _f_from_template(raw, "ru", tpl.get("_strategy", "both"))
+                add = [c for c in best_by["ru"] if best_reg_key(c) not in have
+                       and (f_t["msc"] <= 0 or (c.get("score") or 0) >= f_t["msc"])]
+                if add:
+                    rows = sorted(rows + add, key=lambda c: (-c["signal_ts"], -c["score"], c["ticker"]))
             thr = raw.get("thr")
             try:
                 thr = float(thr) if thr not in (None, "auto") else None
@@ -1184,7 +1265,7 @@ async def _deliver_html(
                 key = (c["ticker"], c.get("strategy"), c["signal_ts"], c["side"], round(c["level"], 10))
                 if key not in chosen:
                     chosen[key] = {**c, "matched_template": name, "template_thr": thr,
-                                   "is_best": mkt == "crypto" and best_key(c) in best_keys}
+                                   "is_best": mkt in ("crypto", "ru") and best_key(c) in best_keys}
 
         # Счётчики для прозрачности (ручной «Скан» пишет итог: найдено как в HTML → отправлено).
         st = {"found": len(chosen), "too_old": 0, "night": 0, "already": 0, "level_dup": 0,
@@ -1204,20 +1285,24 @@ async def _deliver_html(
                 st["level_dup"] += 1
             else:
                 fresh.append(c)
-        if the_best and fresh:
-            # The best: не больше BEST_WEEK сигналов за ISO-неделю (как bestWeekCap) — с учётом уже отправленных
+        if any(tb_on.values()) and fresh:
+            # The best: не больше BEST_WEEK сигналов за ISO-неделю (как bestWeekCap) — с учётом уже отправленных,
+            # отдельно по рынку
             from hwv1 import BEST_WEEK
-            try:
-                sent_wk = [iso_week_key(t) for t in storage.best_sent_ts_since(chat_id, now_ms - 8 * 86_400_000)]
-            except Exception:
-                sent_wk = []
-            cnt: dict[str, int] = {}
-            for k in sent_wk:
-                cnt[k] = cnt.get(k, 0) + 1
+            cnt: dict[tuple, int] = {}
+            for bm in ("crypto", "ru"):
+                if not tb_on[bm]:
+                    continue
+                try:
+                    for t in storage.best_sent_ts_since(chat_id, now_ms - 8 * 86_400_000, bm):
+                        k = (bm, iso_week_key(t))
+                        cnt[k] = cnt.get(k, 0) + 1
+                except Exception:
+                    pass
             keep = []
             for c in sorted(fresh, key=lambda x: x["signal_ts"]):
                 if c.get("matched_template") == THE_BEST_NAME:
-                    k = iso_week_key(c["signal_ts"])
+                    k = (c.get("market", "crypto"), iso_week_key(c["signal_ts"]))
                     if cnt.get(k, 0) >= BEST_WEEK:
                         continue
                     cnt[k] = cnt.get(k, 0) + 1
@@ -1284,11 +1369,12 @@ async def run_scan(
             return []
         async with moex_client() as client:
             try:
-                tickers_ru = await fetch_tickers_moex(client)
+                tickers_ru = await fetch_tickers_moex(client, min_turn=0, top_n=100_000)
             except Exception as e:
                 logger.warning("MOEX tickers failed: %s", e)
                 tickers_ru = []
-            imoex_ctx = await fetch_imoex_ctx(client)
+            tickers_ru = ru_list_tickers(tickers_ru)   # HTML 7.03: только бумаги из списка
+            imoex_ctx = await fetch_imoex_ctx(client, win_h)
             results = []
             for i in range(0, len(tickers_ru), 6):
                 results += await asyncio.gather(
@@ -1297,7 +1383,7 @@ async def run_scan(
                     return_exceptions=True,
                 )
                 await asyncio.sleep(0.5)
-            cc = _select_universe(results, 10_000, 0)
+            cc = _select_universe(finalize_moex_cards(results), 10_000, 0)
             for c in cc:
                 c["market"] = "ru"
             return cc
@@ -1396,15 +1482,13 @@ async def run_manual_scan(
     else:
         async with moex_client() as client:
             try:
-                tickers_ru = await fetch_tickers_moex(client)
+                tickers_ru = await fetch_tickers_moex(client, min_turn=0, top_n=100_000)
             except Exception as e:
                 logger.warning("MOEX tickers failed (manual): %s", e)
                 tickers_ru = []
-            imoex_ctx = await fetch_imoex_ctx(client)
-            # как HTML: turn ≥ minVol×0.5, топ nInst по обороту
-            tickers_ru = [t for t in tickers_ru if float(t.get("turnover24h") or 0) >= min_vol * 0.5]
-            tickers_ru.sort(key=lambda t: -float(t.get("turnover24h") or 0))
-            tickers_ru = tickers_ru[:n_inst]
+            imoex_ctx = await fetch_imoex_ctx(client, lookback)
+            # HTML 7.03/7.04: список ликвидных бумаг (nInst = сколько бумаг из списка), без отбора по обороту
+            tickers_ru = ru_list_tickers(tickers_ru, n_inst)
             total = max(1, len(tickers_ru))
             results = []
             for i in range(0, len(tickers_ru), 6):
@@ -1416,7 +1500,7 @@ async def run_manual_scan(
                 )
                 await _p(min(i + 6, total), total)
                 await asyncio.sleep(0.5)
-            all_cards = _select_universe(results, n_inst, min_vol)
+            all_cards = _select_universe(finalize_moex_cards(results), 10_000, 0)
             for c in all_cards:
                 c["market"] = "ru"
 

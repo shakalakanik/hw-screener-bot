@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -340,7 +341,7 @@ def _risk_stop_take(entry: float, atr_d: float, side: str, stop_atr_frac: float,
 
 
 # ── Мосбиржа: правила нового HTML (scanSymbol, MKT==='ru') ──────────────────
-HOLD_CRYPTO, HOLD_RU = 168, 48
+HOLD_CRYPTO, HOLD_RU = 168, 96   # HTML 6.94: MOEX — 4 суток
 
 
 def hold_h(market: str) -> int:
@@ -374,6 +375,19 @@ def _ru_brk_reject(h1cut: list, bar, atr_d: float) -> bool:
     return False
 
 
+def _ru_brk_flags(h1cut: list, bar, atr_d: float) -> dict:
+    """Флаги пробоя РФ (HTML 7.03): open — 10:00 МСК, low_atr — ATR D1 <1% (оба отсекают);
+    low_vol — объём <0.5 медианы 20, weak — тело <40% (только пометки)."""
+    hl = (time.gmtime(bar.ts / 1000).tm_hour + 3) % 24
+    vv = sorted((b.vol_quote or 0) for b in h1cut[-21:-1])
+    v_med20 = vv[len(vv) // 2] if vv else 0
+    rng = bar.h - bar.l
+    return {"open": hl == 10,
+            "low_vol": v_med20 > 0 and (bar.vol_quote or 0) < 0.5 * v_med20,
+            "low_atr": atr_d > 0 and (atr_d / bar.c) < 0.01,
+            "weak": rng > 0 and abs(bar.c - bar.o) / rng < 0.40}
+
+
 def _ru_feats(h1cut: list, bar, side: str, ctx: dict) -> dict:
     w = h1cut[-6:-1]
     sq = 0
@@ -390,6 +404,221 @@ def _ru_feats(h1cut: list, bar, side: str, ctx: dict) -> dict:
     im = (1 if (ia if side == "long" else (not ia)) else 0) if ia is not None else 0
     rs = (1 if ((sr - ir) > 0 if side == "long" else (sr - ir) < 0) else 0) if ir is not None else 0
     return {"ru_squeeze": sq, "ru_close_pos": cp, "ru_imoex_ok": im, "ru_rel_str": rs}
+
+
+# ═══ MOEX 7.0x (HTML e32370…): режим индекса IMOEX, признаки тренда, оценка и The best MOEX ═══
+RU_LONG_SA50 = 0.06
+RU_BEST = {"ix24": 0.011, "sl200": 0.22}
+RU_IX = {"ext_macd": 1.5, "ext_day": 0.017, "ext_rsi": 72}
+RU_TB = {"hour": 12, "clu": 4, "dm": 0.3}
+RU_AUTO = {"str": 4.0, "cross": 2.0, "acc": 1.0, "hours": "7-19", "rubase": 4.0}
+RU_TGT = 3.0   # «Тейк (Мосбиржа)» по умолчанию 3R (решение пользователя: без настройки)
+_RU_TASTE = None
+
+
+def _ru_taste() -> dict:
+    global _RU_TASTE
+    if _RU_TASTE is None:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ru_taste.json")) as fh:
+            _RU_TASTE = json.load(fh)
+    return _RU_TASTE
+
+
+def _ema_list(x: list, n: int) -> list:
+    a = 2 / (n + 1)
+    e = [0.0] * len(x)
+    if not x:
+        return e
+    e[0] = x[0]
+    for k in range(1, len(x)):
+        e[k] = e[k - 1] + a * (x[k] - e[k - 1])
+    return e
+
+
+def _rsi_list(x: list, n: int) -> list:
+    r = [0.0] * len(x)
+    au = ad = 1e-9
+    if x:
+        r[0] = 50.0
+    for k in range(1, len(x)):
+        d = x[k] - x[k - 1]
+        au += ((d if d > 0 else 0) - au) / n
+        ad += ((-d if d < 0 else 0) - ad) / n
+        r[k] = 100 - 100 / (1 + au / max(ad, 1e-12))
+    return r
+
+
+def ru_ix_prep(d1: list | None, h1: list | None):
+    """ruIxPrep(): d1 — закрытые дневки IMOEX, h1 — подтверждённые часовики IMOEX."""
+    if not d1 or not h1 or len(d1) < 70 or len(h1) < 260:
+        return None
+    hc = [b.c for b in h1]
+    dc = [b.c for b in d1]
+    e12, e26, e200 = _ema_list(hc, 12), _ema_list(hc, 26), _ema_list(hc, 200)
+    tr = []
+    for k, b in enumerate(h1):
+        pc = h1[k - 1].c if k else h1[0].c
+        tr.append(max(b.h - b.l, abs(b.h - pc), abs(b.l - pc)))
+    d12, d26 = _ema_list(dc, 12), _ema_list(dc, 26)
+    return {"hts": [b.ts for b in h1], "hc": hc, "E200": e200, "M": [e12[k] - e26[k] for k in range(len(hc))],
+            "ATRH": _ema_list(tr, 27), "dts": [b.ts for b in d1], "dc": dc, "D20": _ema_list(dc, 20),
+            "D50": _ema_list(dc, 50), "DM": [d12[k] - d26[k] for k in range(len(dc))], "DR": _rsi_list(dc, 14)}
+
+
+def ru_ix_state(P, ts: int, sg: int):
+    if not P:
+        return None
+    import bisect
+    k = bisect.bisect_right(P["hts"], ts) - 1
+    if k < 240:
+        return None
+    kd = bisect.bisect_right([t + 86_400_000 for t in P["dts"]], ts)
+    if kd < 60:
+        return None
+    x, j = P["hc"][k], kd - 1
+    rs = P["DR"][j] if sg > 0 else 100 - P["DR"][j]
+    S = int(sg * (x / P["D20"][j] - 1) > 0) + int(sg * (x / P["D50"][j] - 1) > 0) \
+        + int(sg * (P["D20"][j] / P["D20"][j - 5] - 1) > 0) + int(sg * (P["E200"][k] / P["E200"][k - 40] - 1) > 0) \
+        + int(sg * (x / P["E200"][k] - 1) > 0) + int(sg * P["DM"][j] > 0) + int(rs > 50)
+    ext = (sg * P["M"][k] / P["ATRH"][k] > RU_IX["ext_macd"]) or (sg * (x / P["dc"][j] - 1) > RU_IX["ext_day"]) \
+        or (rs > RU_IX["ext_rsi"])
+    return {"ru_ixS": S, "ru_ixExt": 1 if ext else 0}
+
+
+def ix_sma50_side(d1: list | None, ts: int, br_side: str):
+    if not d1:
+        return None
+    c = []
+    for b in d1:
+        if b.ts + 86_400_000 <= ts:
+            c.append(b.c)
+        else:
+            break
+    if len(c) < 50:
+        return None
+    sma = sum(c[-50:]) / 50
+    r = c[-1] / sma - 1
+    return r if br_side == "long" else -r
+
+
+def _h1_emas(h1c: list):
+    n = len(h1c)
+    if not n:
+        return None, None
+    e50, e200 = [0.0] * n, [0.0] * n
+    e50[0] = e200[0] = h1c[0].c
+    for k in range(1, n):
+        e50[k] = e50[k - 1] + 2 / 51 * (h1c[k].c - e50[k - 1])
+        e200[k] = e200[k - 1] + 2 / 201 * (h1c[k].c - e200[k - 1])
+    return e50, e200
+
+
+def ru_brk_feats(h1c, i, bar, br_side, atr_d, E50, E200, ix_h1) -> dict:
+    sg = 1 if br_side == "long" else -1
+    o: dict = {}
+    if atr_d > 0 and E200 and i >= 41:
+        o["ru_sl200"] = sg * (E200[i - 1] - E200[i - 41]) / atr_d
+        o["ru_e50200"] = sg * (E50[i - 1] - E200[i - 1]) / atr_d
+    if atr_d > 0 and i >= 25:
+        o["ru_run24"] = sg * (h1c[i - 1].c - h1c[i - 25].c) / atr_d
+    if atr_d > 0 and i >= 8:
+        w = h1c[i - 8:i]
+        o["ru_b8w"] = (max(b.h for b in w) - min(b.l for b in w)) / atr_d
+    w = h1c[max(0, i - 60):i]
+    a_h = (sum(b.h - b.l for b in w) / len(w)) if w else 0
+    o["ru_brng"] = (bar.h - bar.l) / a_h if a_h > 0 else 0
+    r = bar.h - bar.l
+    o["ru_cpos"] = (((bar.c - bar.l) / r) if sg > 0 else ((bar.h - bar.c) / r)) if r > 0 else 0.5
+    if ix_h1:
+        import bisect
+        k = bisect.bisect_right([b.ts for b in ix_h1], bar.ts) - 1
+        if k >= 25:
+            o["ru_ix24"] = sg * (ix_h1[k - 1].c / ix_h1[k - 25].c - 1)
+    return o
+
+
+def _ru_hour(s: dict) -> int:
+    return (time.gmtime(s["t"] / 1000).tm_hour + 3) % 24
+
+
+def is_best_ru(s: dict) -> bool:
+    """isBestRU(): шорт-пробой ≥12:00 МСК и (≥4 пробоев вниз по списку за 3 ч или акция сегодня −0.3 ATR)."""
+    if s.get("type") != "brk" or s.get("d") != 0:
+        return False
+    if _ru_hour(s) < RU_TB["hour"]:
+        return False
+    clu, dm = s.get("ru_clu"), s.get("ru_dm")
+    return (clu is not None and clu >= RU_TB["clu"]) or (dm is not None and dm > RU_TB["dm"])
+
+
+def _ru_best_conds(s: dict) -> int:
+    a, b = s.get("ru_ix24"), s.get("ru_sl200")
+    return int(a is not None and a < RU_BEST["ix24"]) + int(b is not None and b >= RU_BEST["sl200"])
+
+
+def _num(v):
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return None
+    return v if math.isfinite(v) else None
+
+
+def score_ru(s: dict):
+    """scoreRU(): ярус по условиям The best MOEX + похожесть на сделки пользователя (RU_TASTE)."""
+    T = _ru_taste()
+    side = 1 if s.get("d") == 1 else -1
+    hr = _ru_hour(s)
+    x = [_num(s.get(k)) for k in ("ru_sl200", "ru_brng", "ru_b8w", "ru_e50200", "vol_mult", "ru_run24",
+                                  "ru_cpos", "ru_base8")] + [hr, _num(s.get("crosses")), side]
+    if any(v is None for v in x) or s.get("ru_ix24") is None:
+        return None
+    z = T["B"]
+    for j, v in enumerate(x):
+        v = min(T["hi"][j], max(T["lo"][j], v))
+        z += T["W"][j] * (v - T["mu"][j]) / T["sd"][j]
+    q = T["qs"]
+    n = len(q) - 1
+    if z <= q[0]:
+        p = 0.0
+    elif z >= q[n]:
+        p = 1.0
+    else:
+        p = 1.0
+        for j in range(1, n + 1):
+            if z <= q[j]:
+                p = ((j - 1) + (z - q[j - 1]) / max(q[j] - q[j - 1], 1e-12)) / n
+                break
+    nc = 2 if is_best_ru(s) else (1 if (_ru_best_conds(s) >= 1 or (s.get("d") == 0 and (
+        s.get("ru_ixS") == 7 or hr >= RU_TB["hour"]))) else 0)
+    clu = s.get("ru_clu")
+    if nc == 2 and hr >= 13 and s.get("ru_ixS") == 7 and clu is not None and clu >= 7:
+        return 9.5 + 0.5 * p
+    return 8 + 1.45 * p if nc == 2 else (5 + 2.9 * p if nc == 1 else 4.9 * p)
+
+
+def ru_cluster(cards: list[dict]) -> None:
+    """ruCluster(): для каждого пробоя — сколько пробоев той же стороны по всему списку за 3 ч (включая этот).
+    cards — карточки всех бумаг после dedupList (как raw в HTML); пишет feat["ru_clu"]."""
+    import bisect
+    for d in (0, 1):
+        ts = sorted(c["feat"]["t"] for c in cards if c.get("strategy") == "brk" and c["feat"].get("d") == d)
+        for c in cards:
+            if c.get("strategy") == "brk" and c["feat"].get("d") == d:
+                t = c["feat"]["t"]
+                c["feat"]["ru_clu"] = bisect.bisect_left(ts, t + 1) - bisect.bisect_left(ts, t - 2 * 3_600_000)
+
+
+def ru_rescore(card: dict) -> None:
+    """signalScore() для пробоя MOEX — после ruCluster (оценка зависит от ru_clu)."""
+    if card.get("strategy") != "brk":
+        return
+    v = score_ru(card["feat"])
+    if v is None:
+        return
+    sc = math.floor(v * 10 + 0.5) / 10
+    card["score"] = sc
+    card["feat"]["_sc"] = sc
 
 
 def _is_night_msk(ts_ms: int) -> bool:
@@ -944,6 +1173,10 @@ def evaluate_brk(
     pit_atr_d = 0.0
     pit_bias = "flat"
 
+    is_ru = market == "ru"
+    rc = ru_ctx or {}
+    E50, E200 = _h1_emas(h1c) if is_ru else (None, None)
+    day_sa50 = day_prev_c = None
     for i in range(start_idx, len(h1c)):
         bar = h1c[i]
         if no_night and _is_night_msk(bar.ts):
@@ -954,6 +1187,10 @@ def evaluate_brk(
         if dk != cache_day:
             cache_day = dk
             pit_atr_d, pit_levels, pit_bias = _pit_day_state(d1c, h1c, bar)
+            if is_ru:
+                cut_d = [b for b in d1c if b.ts + 86_400_000 <= bar.ts]
+                day_sa50 = (cut_d[-1].c / (sum(b.c for b in cut_d[-50:]) / 50) - 1) if len(cut_d) >= 50 else None
+                day_prev_c = cut_d[-1].c if cut_d else None
         if not pit_levels:
             continue
 
@@ -976,7 +1213,7 @@ def evaluate_brk(
                 continue
 
             acc, acc_why = accumulation(h1_upto[:-1], lv.price, pit_atr_d)
-            if not acc:
+            if not acc and not is_ru:   # HTML 7.05: на MOEX пробой без накопления записывается (acc:0)
                 continue
 
             cross_b = count_close_crosses(
@@ -991,8 +1228,9 @@ def evaluate_brk(
             )
             if not bias_ok:
                 continue
-            if market == "ru" and _ru_brk_reject(h1_upto, bar, pit_atr_d):
-                continue
+            ru_flags = _ru_brk_flags(h1_upto, bar, pit_atr_d) if is_ru else None
+            if is_ru and (ru_flags["open"] or ru_flags["low_atr"]):
+                continue   # HTML 7.03: слабое тело / малый объём — не отсекаются, а помечаются
 
             rst = _risk_stop_take(bar.c, pit_atr_d, side, stop_atr_frac=0.10, target_r=3.0)
             if rst is None:
@@ -1004,7 +1242,7 @@ def evaluate_brk(
             sf = {
                 "strength": lv.strength, "crosses": cross_b,
                 "touched8": 1 if (len(win8b) >= 8 and min(b.l for b in win8b) <= lv.price <= max(b.h for b in win8b)) else 0,
-                "acc": 1,
+                "acc": 1 if acc else 0,
                 "level_age_h": (bar.ts - lv.formed_ts) / 3_600_000,
                 "vol_contraction": _vol_contraction(h1_upto),
                 "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
@@ -1021,7 +1259,16 @@ def evaluate_brk(
                 side == "long", side, [], pit_atr_d, a_h1, d1c,
             ))
             if market == "ru":
-                sf.update(_ru_feats(h1_upto, bar, side, ru_ctx or {}))
+                sf.update(_ru_feats(h1_upto, bar, side, rc))
+                sf["ru_base8"] = sum(1 for b in h1_upto[-9:-1] if abs(b.c - lv.price) <= 0.3 * pit_atr_d)
+                sf["ru_ix50"] = ix_sma50_side(rc.get("imoexD1"), bar.ts, side)
+                sf["ru_sa50"] = day_sa50
+                sf["ru_dm"] = ((1 if side == "long" else -1) * (bar.c - day_prev_c) / pit_atr_d
+                               if (day_prev_c is not None and pit_atr_d > 0) else None)
+                sf["ru_weak"] = 1 if ru_flags["weak"] else 0
+                sf["ru_lowvol"] = 1 if ru_flags["low_vol"] else 0
+                sf.update(ru_brk_feats(h1c, i, bar, side, pit_atr_d, E50, E200, rc.get("imoexH1")))
+                sf.update(ru_ix_state(rc.get("ixP"), bar.ts, 1 if side == "long" else -1) or {})
             score = signal_score(sf, "brk")
 
             cards.append({
@@ -1052,6 +1299,9 @@ def evaluate_brk(
                 "vol_mult": (bar.vol_quote / v_med) if v_med > 0 else 0.0,
                 "why": [acc_why, f"пробой {lv.kind} на закрытии часа", f"запилов после формирования: {cross_b}"],
             })
+            if is_ru:
+                cards[-1]["feat"]["mkt"] = "ru"
+                ru_rescore(cards[-1])   # HTML 7.02: оценка MOEX (до ruCluster — как prioOf в dedupList)
 
     cards.sort(key=lambda c: (-c["signal_ts"], -c["strength"], c["dist_atr"]))
     return cards

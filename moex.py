@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -197,7 +198,7 @@ async def fetch_tickers_moex(
             continue
         turn = max(float(r[1] or 0), prev.get(sym, 0.0))
         last = float(r[2] or 0) or px.get(sym, 0.0)
-        if turn < floor or last <= 0:
+        if turn < floor or (last <= 0 and floor > 0):   # список MOEX (floor=0): как HTML, без отсева
             continue
         out.append({
             "symbol": sym,
@@ -258,9 +259,46 @@ async def fetch_klines_moex_m5(
     return bars[-limit:]
 
 
-async def fetch_imoex_ctx(client: httpx.AsyncClient) -> dict:
-    """HTML: MOEX.bench(30) → IMOEX выше SMA20 и доходность за 5 баров (для РУ-фильтров)."""
+# HTML 7.03/7.04: Мосбиржа — только бумаги из списка пользователя (ликвидные), без отбора по обороту
+RU_LIST_DEFAULT = ("LKOH,GAZP,YDEX,ROSN,SBER,OZON,VTBR,T,PLZL,NVTK,SIBN,TATN,VKCO,SPBE,MGNT,GMKN,TRNFP,SNGSP,X5,"
+                   "ALRS,TATNP,SNGS,CHMF,MAGN,RNFT,FLOT,AFLT,MTSS,SMLT,RAGR,NLMK,SVCB,AFKS,MOEX,SELG,IRAO,SBERP,"
+                   "RUAL,MTLR,DOMRF,PHOR,RTKM,HEAD,CNRU,UPRO,POSI,FEES,BANEP,BELU,UGLD,FESH,SGZH,ASTR,WUSH,NMTP,"
+                   "LSRG,ENPG,MSNG,HYDR,EUTR,MTLRP,ROLO,SFIN,PIKK,UNAC,LENT,RASP,LSNGP,FIXR,BANE,TRMK,IRKT,SOFL").split(",")
+
+
+def ru_list_tickers(tickers: list[dict], n_inst: int | None = None) -> list[dict]:
+    """HTML: list = ruListSet().map(b=>by[b]).filter(Boolean) — порядок списка, только найденные в TQBR."""
+    want = RU_LIST_DEFAULT[:max(1, int(n_inst))] if n_inst else RU_LIST_DEFAULT
+    by = {t["symbol"]: t for t in tickers}
+    return [by[b] for b in want if b in by]
+
+
+async def fetch_imoex_series(client: httpx.AsyncClient, win_h: int, now: int | None = None) -> dict:
+    """HTML 6.94/7.02/7.05: дневки IMOEX (ceil(win/24)+560 дней) и часовики (win+2400 ч) → режим индекса
+    на момент каждого сигнала. Любая ошибка → всё None (как catch в HTML: imoexD1=null)."""
+    from hwv1 import ru_ix_prep, last_closed
+    out = {"imoexD1": None, "imoexH1": None, "ixP": None}
+    now = int(now if now is not None else time.time() * 1000)
+    path = "/engines/stock/markets/index/boards/SNDX/securities/IMOEX"
+    try:
+        days = -(-int(win_h) // 24) + 560
+        rows = await iss_candles(client, path, 24, now - days * 86_400_000, None, 6)
+        d1 = last_closed(iss_bars(rows, "1d", now))
+        pages = math.ceil((win_h / 24 + 100) * 17 / 500) + 3
+        hrows = await iss_candles(client, path, 60, now - (int(win_h) + 2400) * 3_600_000, None, pages)
+        h1 = iss_bars(hrows, "1h", now)
+        out = {"imoexD1": d1, "imoexH1": h1, "ixP": ru_ix_prep(d1, [b for b in h1 if b.confirmed])}
+    except Exception as e:
+        logger.warning("IMOEX series failed: %s", e)
+    return out
+
+
+async def fetch_imoex_ctx(client: httpx.AsyncClient, win_h: int | None = None) -> dict:
+    """HTML: MOEX.bench(30) → IMOEX выше SMA20 и доходность за 5 баров (для РУ-фильтров);
+    win_h задан — плюс ряды IMOEX для режима индекса (fetch_imoex_series)."""
     ctx = {"imoexAbove": None, "imoexRet5": None}
+    if win_h is not None:
+        ctx.update(await fetch_imoex_series(client, win_h))
     try:
         now = int(time.time() * 1000)
         rows = await iss_candles(client, "/engines/stock/markets/index/boards/SNDX/securities/IMOEX",
@@ -308,8 +346,8 @@ async def scan_one_moex(
             fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lookback_hours + 8,
             market="ru", ru_ctx=ru_ctx,
         )
-        from html_pipeline import dedup_list
-        cards = dedup_list(result.get("cards", []))
+        # dedup + ruCluster (пробои по всему списку за 3 ч) — в finalize_moex_cards после скана всех бумаг
+        cards = list(result.get("cards", []))
         for c in cards:
             c["market"] = "ru"
             c.setdefault("feat", {})["mkt"] = "ru"
@@ -320,7 +358,23 @@ async def scan_one_moex(
         w0 = [b for b in closed if b.ts >= now_ms - int(lookback_hours) * 3_600_000]
         w = w0 if len(w0) >= 3 else closed[-3:]
         turn = (sum((b.vol_quote or 0) for b in w) / len(w)) if w else 0.0
-        return {"cards": cards, "turn": turn, "base": symbol}
+        return {"cards": cards, "turn": turn, "base": symbol, "raw": True}
     except Exception as e:
         logger.debug("scan_one_moex %s error: %s", symbol, e)
         return {"cards": [], "turn": 0.0, "base": symbol}
+
+
+def finalize_moex_cards(results: list) -> list:
+    """После скана всего списка: dedupList по бумаге (как внутри scanSymbol) → ruCluster по всем бумагам
+    → оценка MOEX (зависит от ru_clu). Возвращает results в том же формате (cards уже без повторов)."""
+    from hwv1 import ru_cluster, ru_rescore
+    from html_pipeline import dedup_list
+    rows = [r for r in results if isinstance(r, dict)]
+    for r in rows:   # HTML: scanSymbol уже возвращает dedupList по бумаге
+        if r.pop("raw", False):
+            r["cards"] = dedup_list(r.get("cards") or [])
+    allc = [c for r in rows for c in (r.get("cards") or [])]
+    ru_cluster(allc)
+    for c in allc:
+        ru_rescore(c)
+    return rows

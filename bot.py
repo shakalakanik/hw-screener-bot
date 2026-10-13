@@ -720,7 +720,8 @@ async def cmd_status(msg: Message):
         f"📋 <b>Статус</b>\n\n"
         f"Подписка: {'✅ активна' if subscribed else '❌ остановлена'}\n"
         f"Рынки: {mkt_str}\n"
-        f"⭐ The Best (крипта): {'вкл' if storage.get_the_best(chat_id) else 'выкл'}\n\n"
+        f"⭐ The Best: крипта — {'вкл' if storage.get_the_best(chat_id) else 'выкл'}, "
+        f"Мосбиржа — {'вкл' if storage.get_the_best(chat_id, 'ru') else 'выкл'}\n\n"
         f"{tpl_str}\n\n"
         f"Авто-скан: {SCAN_SCHEDULE_TEXT}",
         parse_mode="HTML",
@@ -847,11 +848,11 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         callback_data=f"mkt_on:{market}",
     )])
 
-    if market == "crypto":
-        tb = storage.get_the_best(chat_id)
+    if market in ("crypto", "ru"):
+        tb = storage.get_the_best(chat_id, market)
         buttons.append([InlineKeyboardButton(
             text="⭐ The Best ✓ (только отбор The Best)" if tb else "⭐ The Best (выкл — отметка ⭐ в карточках)",
-            callback_data="the_best:crypto",
+            callback_data=f"the_best:{market}",
         )])
 
     if not shared_names:
@@ -1000,9 +1001,10 @@ async def cb_best_only(call: CallbackQuery):
 async def cb_the_best(call: CallbackQuery):
     """⭐ The Best (HTML 6.93): ВКЛ — по крипте только сигналы отбора The Best; ВЫКЛ — как обычно, но с отметкой ⭐."""
     chat_id = call.message.chat.id
-    cur = storage.get_the_best(chat_id)
-    storage.set_the_best(chat_id, not cur)
-    await _send_filter_menu(chat_id, edit_msg=call.message, market="crypto")
+    mkt = "ru" if (call.data or "").endswith(":ru") else "crypto"   # отдельный переключатель для Мосбиржи
+    cur = storage.get_the_best(chat_id, mkt)
+    storage.set_the_best(chat_id, not cur, mkt)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
     await call.answer("The Best: вкл" if not cur else "The Best: выкл")
 
 
@@ -1147,6 +1149,7 @@ def _ai_user_context(chat_id: int) -> dict:
         "auto": storage.get_auto_mode(chat_id),
         "auto_strategy": {m: storage.get_auto_strategy(chat_id, m) for m in _AUTO_MARKETS},
         "the_best": storage.get_the_best(chat_id),
+        "the_best_ru": storage.get_the_best(chat_id, "ru"),
         "template_strategies": _template_strategies_by_market(chat_id),
     }
 
@@ -1251,7 +1254,8 @@ def _format_proposal(proposal: dict) -> str:
         m = _AI_MKT_RU.get(p.get("market"), "крипта")
         return f"{m}: стратегия 🤖 Авто → <b>{_AI_STRAT_RU.get(p.get('strategy'))}</b>"
     if action == "set_the_best":
-        return f"крипта: «⭐ The Best» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
+        lbl = "Мосбиржа" if p.get("market") == "ru" else "крипта"
+        return f"{lbl}: «⭐ The Best» — <b>{'вкл' if p.get('enabled') else 'выкл'}</b>"
     if action == "set_strategy":
         return (f"стратегия шаблона <b>{p.get('template')}</b> → "
                 f"<b>{_AI_STRAT_RU.get(p.get('strategy'), p.get('strategy'))}</b>")
@@ -1318,7 +1322,8 @@ def _apply_ai_one(chat_id: int, proposal: dict) -> str:
         storage.set_auto_strategy(chat_id, m, p["strategy"])
         return "готово."
     if action == "set_the_best":
-        storage.set_the_best(chat_id, bool(p.get("enabled")))   # = кнопка the_best
+        storage.set_the_best(chat_id, bool(p.get("enabled")),
+                             "ru" if p.get("market") == "ru" else "crypto")   # = кнопка the_best
         return "готово."
     if action == "set_strategy":
         name = p.get("template") or ""
