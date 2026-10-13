@@ -837,6 +837,73 @@
     if (t) { e.preventDefault(); e.stopImmediatePropagation(); }
   }, true);
 
+  /* «Обновить всё» в «Отслеживаемых» (bugfix 13.10): hwRefreshSignal движка пересчитывал не все признаки
+     (нет approach_atr / d1_streak …) → signalScore падал на старую оценку. Теперь после него берём сигнал
+     scanSymbol на том же часе/уровне и копируем ВСЕ его признаки (уровень, накопление, ЛП, v5/v6),
+     оценку — ровно как в списке сигналов (signalScore до recompute), флаг The best — как bestPipeline. */
+  var HW_TRADE_KEYS = { type: 1, base: 1, sym: 1, t: 1, d: 1, side: 1, lv: 1, k: 1, e: 1, st: 1, tk: 1, rp: 1,
+    fwd: 1, o: 1, _i: 1, mkt: 1, added: 1, score: 1, p: 1 };
+  function hwSyncFromScan(t, d1, h1) {
+    /* global scanSymbol, lastClosed, atr, approachAtr, d1Streak, signalScore, isBestFBO, bestPoke, BEST_POKE, MKT, HW_FEAT_KEYS */
+    if (typeof scanSymbol !== 'function' || MKT === 'algo') return false;
+    var h1c = lastClosed(h1), idx = -1;
+    for (var i = 0; i < h1c.length; i++) if (h1c[i].ts === t.t) { idx = i; break; }
+    if (idx < 60) return false;
+    var ty = t.type || 'fbo', m = null;
+    try {
+      // окно скана — с начала UTC-дня сигнала: дневное состояние (ATR/уровни) как у скана, покрывающего весь день
+      var D = 86400000, ds = Math.floor(t.t / D) * D, i0 = idx;
+      while (i0 > 0 && h1c[i0 - 1].ts >= ds) i0--;
+      var sig = scanSymbol(t.base, t.sym, d1, h1, { noNight: false, scanBars: h1c.length - i0 + 1, raw: true })
+        .filter(function (s) { return (s.type || 'fbo') === ty && s.t === t.t; })
+        .sort(function (a, b) { return Math.abs(a.lv - t.lv) - Math.abs(b.lv - t.lv); });
+      if (sig[0] && Math.abs(sig[0].lv / t.lv - 1) <= 0.01) m = sig[0];
+    } catch (e) {}
+    if (m) {
+      Object.keys(m).forEach(function (k) { if (!HW_TRADE_KEYS[k]) t[k] = m[k]; });
+      t.p = m.p;
+      t.score = signalScore(m);                       // как в «Сигналах»: оценка до recompute
+    } else if (ty === 'fbo') {
+      var h1cut = h1c.slice(0, idx + 1);
+      t.approach_atr = approachAtr(h1cut, atr(h1cut.slice(-60)));
+      t.d1_streak = d1Streak(lastClosed(d1), h1c[idx].ts);
+      var tmp = {}; Object.keys(t).forEach(function (k) { tmp[k] = t[k]; }); delete tmp.st;   // stop как в скане
+      t.score = signalScore(tmp);
+    }
+    if (ty === 'fbo' && MKT === 'crypto' && typeof isBestFBO === 'function') {
+      var pr = bestPoke(t);
+      t.is_best = !!(isBestFBO(t) && !((pr || 0) > BEST_POKE));
+    }
+    t._algo = 'v6-6.93';
+    return true;
+  }
+  function installWatchRefreshFix() {
+    if (typeof window.hwRefreshSignal !== 'function' || window.hwRefreshSignal.__hwFix) return;
+    try { if (typeof HW_FEAT_KEYS !== 'undefined') ['approach_atr', 'd1_streak', 'is_best', 'acc', 'touched8', 'strength', 'crosses'].forEach(function (k) { if (HW_FEAT_KEYS.indexOf(k) < 0) HW_FEAT_KEYS.push(k); }); } catch (e) {}
+    var orig = window.hwRefreshSignal;
+    var fixed = async function (t, d1, h1) {
+      var r = await orig.apply(this, arguments);
+      try { if (hwSyncFromScan(t, d1, h1)) r = true; } catch (e) { console.warn('[lean] watch sync', e); }
+      return r;
+    };
+    fixed.__hwFix = true;
+    window.hwRefreshSignal = fixed;
+    window.__hwSyncFromScan = hwSyncFromScan;
+  }
+  /* Одноразовый ремонт: позиции, пересчитанные старой версией «Обновить всё» (нет метки _algo) — полный
+     пересчёт новой. Список/шаблоны не удаляются: refreshWatch только обновляет поля и сохраняет. */
+  function repairWatchOnce() {
+    try {
+      /* global loadWatch, refreshWatch */
+      if (typeof MKT === 'undefined' || MKT !== 'crypto' || typeof refreshWatch !== 'function') return;
+      if (localStorage.getItem('hw_watch_fix_v6') === '1') return;
+      var w = loadWatch();
+      var need = w.some(function (x) { return (x.type || 'fbo') === 'fbo' && x._algo !== 'v6-6.93'; });
+      localStorage.setItem('hw_watch_fix_v6', '1');
+      if (need) refreshWatch(true);
+    } catch (e) {}
+  }
+
   function start() {
     var n = 0;
     var t = setInterval(function () {
@@ -847,6 +914,7 @@
         installConcHooks();
         killSaveFileBtn();
         try { installBestStar(); markBestRows(); } catch (e) {}
+        try { installWatchRefreshFix(); setTimeout(repairWatchOnce, 8000); } catch (e) {}
         hideBacktestRunUI();
         hideOtherTabs();
         renameTemplatesTab();
