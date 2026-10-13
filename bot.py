@@ -720,7 +720,7 @@ async def cmd_status(msg: Message):
         f"📋 <b>Статус</b>\n\n"
         f"Подписка: {'✅ активна' if subscribed else '❌ остановлена'}\n"
         f"Рынки: {mkt_str}\n"
-        f"Режим: {bo_str}\n\n"
+        f"⭐ The Best (крипта): {'вкл' if storage.get_the_best(chat_id) else 'выкл'}\n\n"
         f"{tpl_str}\n\n"
         f"Авто-скан: {SCAN_SCHEDULE_TEXT}",
         parse_mode="HTML",
