@@ -17,3 +17,7 @@ assert bar_open_ok(hs+bot.MOEX_SCAN_DELAY_S*1000), "в HH:16:40 бар подт�
 assert bot.next_scan_ts(hs/1000+1, bot.MOEX_SCAN_DELAY_S)==hs/1000+1000
 assert "ru" not in bot.NON_RU_MARKETS
 print("ok")
+assert bot.MOEX_SEND_HOURS >= 2
+# окно MOEX: бар, закрывшийся 2 часа назад (пропущенный прошлым сканом), всё ещё отправляется
+assert hs-2*H >= screener.send_min_ts(hs+bot.MOEX_SCAN_DELAY_S*1000, bot.MOEX_SEND_HOURS)
+print("ok2")
