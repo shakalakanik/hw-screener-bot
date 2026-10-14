@@ -1379,14 +1379,22 @@ async def run_scan(
                 tickers_ru = []
             tickers_ru = ru_list_tickers(tickers_ru)   # HTML 7.03: только бумаги из списка
             imoex_ctx = await fetch_imoex_ctx(client, win_h)
-            results = []
-            for i in range(0, len(tickers_ru), 6):
-                results += await asyncio.gather(
-                    *[scan_one_moex(client, t, lookback_hours=win_h, no_night=False, imoex_ctx=imoex_ctx)
-                      for t in tickers_ru[i:i + 6]],
-                    return_exceptions=True,
-                )
-                await asyncio.sleep(0.5)
+            # Пул из 6 параллельных бумаг (а не пачки по 6: одна зависшая бумага держала всю пачку);
+            # бумаги с ошибкой загрузки переспрашиваем ещё раз, чтобы не терять сигналы.
+            sem = asyncio.Semaphore(6)
+
+            async def _one(t):
+                async with sem:
+                    return await scan_one_moex(client, t, lookback_hours=win_h, no_night=False, imoex_ctx=imoex_ctx)
+
+            results = list(await asyncio.gather(*[_one(t) for t in tickers_ru], return_exceptions=True))
+            bad = [i for i, r in enumerate(results) if not (isinstance(r, dict) and r.get("raw"))]
+            if bad:
+                again = await asyncio.gather(*[_one(tickers_ru[i]) for i in bad], return_exceptions=True)
+                for i, r in zip(bad, again):
+                    results[i] = r
+                lost = [tickers_ru[i]["symbol"] for i, r in zip(bad, again) if not (isinstance(r, dict) and r.get("raw"))]
+                logger.warning("MOEX: повтор %d бумаг, не загрузились: %s", len(bad), ",".join(lost) or "—")
             cc = _select_universe(finalize_moex_cards(results), 10_000, 0)
             for c in cc:
                 c["market"] = "ru"

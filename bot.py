@@ -2254,7 +2254,12 @@ MOEX_SCAN_DELAY_S = 16 * 60 + 40
 NON_RU_MARKETS = ["crypto", "algo"]
 
 
-async def _scan_pass(markets: list[str], label: str) -> None:
+# MOEX: отправляем все бары за последние 3 закрытых часа, ещё не отправленные (дедуп по журналу):
+# сигнал не теряется, если свеча пришла из ISS позже или прошлый скан не успел/упал.
+MOEX_SEND_HOURS = 3
+
+
+async def _scan_pass(markets: list[str], label: str, send_hours: int = 1) -> None:
     hour_start = (int(time.time()) // 3600) * 3600
     t0 = time.time()
     if not _subscribers:
@@ -2266,7 +2271,7 @@ async def _scan_pass(markets: list[str], label: str) -> None:
             subscribers=list(_subscribers),
             chat_filters=_build_filter_for_chat,
             incremental=True,
-            send_hours=1,   # подписка: только последний подтверждённый бар
+            send_hours=send_hours,   # крипта: только бар HH:00; MOEX: MOEX_SEND_HOURS
             only_markets=markets,
         )
         dur = time.time() - t0
@@ -2303,7 +2308,7 @@ async def scan_loop_ru():
     while True:
         nxt = next_scan_ts(time.time(), MOEX_SCAN_DELAY_S)
         await asyncio.sleep(max(0.0, nxt - time.time()))
-        await _scan_pass(["ru"], "ru")
+        await _scan_pass(["ru"], "ru", MOEX_SEND_HOURS)
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────

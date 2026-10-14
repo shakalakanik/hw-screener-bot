@@ -37,13 +37,15 @@ def _proxy_url() -> str | None:
 def moex_client(**kwargs) -> httpx.AsyncClient:
     """httpx client; proxy from MOEX_PROXY / HTTPS_PROXY if set."""
     proxy = _proxy_url()
-    opts: dict[str, Any] = {"timeout": 30.0, **kwargs}
+    # Короткий таймаут: на Railway отдельные запросы к ISS «зависают» — раньше каждый висел по 30 с
+    # (×3 попытки), скан MOEX шёл ~16 мин и терял бумаги. Лучше быстро переспросить.
+    opts: dict[str, Any] = {"timeout": httpx.Timeout(8.0, connect=5.0), **kwargs}
     if proxy:
         opts["proxy"] = proxy
     return httpx.AsyncClient(**opts)
 
 
-async def iss_fetch(client: httpx.AsyncClient, url: str, tries: int = 3) -> dict:
+async def iss_fetch(client: httpx.AsyncClient, url: str, tries: int = 4) -> dict:
     """Как HTML issFetch: 3 попытки с backoff 300*(i+1) мс."""
     last_err: Exception | None = None
     for i in range(tries):
