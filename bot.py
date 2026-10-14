@@ -42,7 +42,8 @@ SCAN_HOUR_DELAY_S = max(5, min(120, int(os.environ.get("SCAN_HOUR_DELAY_S", "40"
 SCAN_SEND_DEADLINE_S = 300   # к HH:05 всё должно быть отправлено
 SCAN_SCHEDULE_TEXT = ("раз в час, сразу после закрытия часовой свечи (сигналы в HH:00–HH:05 МСК); "
                       "приходят только сигналы только что закрывшегося часа; "
-                      f"крипта — только сигналы со временем {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК")
+                      f"крипта — только сигналы со временем {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК; "
+                      "MOEX — в HH:16 МСК (ISS публикует свечу с задержкой 15 мин)")
 
 
 def next_scan_ts(now: float, delay_s: int = SCAN_HOUR_DELAY_S) -> float:
@@ -2246,6 +2247,39 @@ async def handle_health(request: web.Request) -> web.Response:
 
 
 # ── Фоновый скан ─────────────────────────────────────────────────────────────
+# MOEX: ISS отдаёт свечу с задержкой 15 мин (ISS_DELAY_MS) — в HH:00:40 только что
+# закрывшийся бар ещё не подтверждён, и сигнал на следующем скане уже «too_old».
+# Поэтому MOEX сканируется отдельно в HH:16:40 (как авто-скан MOEX в HTML, :16).
+MOEX_SCAN_DELAY_S = 16 * 60 + 40
+NON_RU_MARKETS = ["crypto", "algo"]
+
+
+async def _scan_pass(markets: list[str], label: str) -> None:
+    hour_start = (int(time.time()) // 3600) * 3600
+    t0 = time.time()
+    if not _subscribers:
+        return
+    logger.info("Авто-скан %s для %d подписчиков", label, len(_subscribers))
+    try:
+        n = await run_scan(
+            on_signal=send_signal,
+            subscribers=list(_subscribers),
+            chat_filters=_build_filter_for_chat,
+            incremental=True,
+            send_hours=1,   # подписка: только последний подтверждённый бар
+            only_markets=markets,
+        )
+        dur = time.time() - t0
+        late = label != "ru" and time.time() - hour_start > SCAN_SEND_DEADLINE_S
+        (logger.warning if late else logger.info)(
+            "Авто-скан %s: отправлено новых карточек=%d, длительность %.1f с, завершён в HH:%s%s",
+            label, n, dur, time.strftime("%M:%S", time.gmtime(time.time())),
+            " — ПОЗЖЕ HH:05!" if late else "",
+        )
+    except Exception:
+        logger.exception("Ошибка авто-скана %s", label)
+
+
 async def scan_loop():
     # Без «догоняющего» скана после рестарта: всегда ждём ближайший HH:00:40.
     while True:
@@ -2253,36 +2287,23 @@ async def scan_loop():
         logger.info("Следующий авто-скан: %s UTC",
                     datetime.fromtimestamp(nxt, timezone.utc).strftime("%H:%M:%S"))
         await asyncio.sleep(max(0.0, nxt - time.time()))
-        hour_start = (int(time.time()) // 3600) * 3600
-        t0 = time.time()
-        if _subscribers:
-            logger.info("Авто-скан для %d подписчиков", len(_subscribers))
-            try:
-                n = await run_scan(
-                    on_signal=send_signal,
-                    subscribers=list(_subscribers),
-                    chat_filters=_build_filter_for_chat,
-                    incremental=True,
-                            send_hours=1,   # подписка: только бар, закрывшийся в HH:00
+        await _scan_pass(NON_RU_MARKETS, "crypto/algo")
+        try:
+            res = await check_signal_outcomes()
+            if res.get("resolved"):
+                logger.info(
+                    "Исходы сигналов: проверено=%d решено=%d",
+                    res.get("checked", 0), res.get("resolved", 0),
                 )
-                dur = time.time() - t0
-                late = time.time() - hour_start > SCAN_SEND_DEADLINE_S
-                (logger.warning if late else logger.info)(
-                    "Авто-скан: отправлено новых карточек=%d, длительность %.1f с, завершён в HH:%s%s",
-                    n, dur, time.strftime("%M:%S", time.gmtime(time.time())),
-                    " — ПОЗЖЕ HH:05!" if late else "",
-                )
-            except Exception:
-                logger.exception("Ошибка авто-скана")
-            try:
-                res = await check_signal_outcomes()
-                if res.get("resolved"):
-                    logger.info(
-                        "Исходы сигналов: проверено=%d решено=%d",
-                        res.get("checked", 0), res.get("resolved", 0),
-                    )
-            except Exception:
-                logger.exception("Ошибка проверки исходов сигналов")
+        except Exception:
+            logger.exception("Ошибка проверки исходов сигналов")
+
+
+async def scan_loop_ru():
+    while True:
+        nxt = next_scan_ts(time.time(), MOEX_SCAN_DELAY_S)
+        await asyncio.sleep(max(0.0, nxt - time.time()))
+        await _scan_pass(["ru"], "ru")
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
@@ -2330,6 +2351,7 @@ async def main():
     logger.info("HTTP сервер запущен на порту %d", PORT)
 
     asyncio.create_task(scan_loop())
+    asyncio.create_task(scan_loop_ru())
     await dp.start_polling(bot)
 
 

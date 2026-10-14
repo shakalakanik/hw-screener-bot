@@ -1337,8 +1337,10 @@ async def run_scan(
     stats: dict | None = None,
     send_hours: int = 1,
     now_ms: int | None = None,
+    only_markets: list[str] | None = None,
 ) -> int:
-    """send_hours: сколько последних закрытых H1-баров отправлять (1 — подписка, 5 — ручной скан).
+    """only_markets: ограничить скан этими рынками (MOEX идёт отдельным проходом в HH:16:40).
+    send_hours: сколько последних закрытых H1-баров отправлять (1 — подписка, 5 — ручной скан).
     Расчёт списка — как HTML за окно 12ч (лимиты/капы идентичны), затем фильтр отправки.
 
     Автоскан: как кнопка «Сканировать» в HTML с окном MAX_SIGNAL_AGE_H (12 ч),
@@ -1350,6 +1352,8 @@ async def run_scan(
     now_ms = int(now_ms if now_ms is not None else time.time() * 1000)
     win_h = MAX_SIGNAL_AGE_H
     needed = _needed_markets(subscribers, chat_filters)
+    if only_markets is not None:
+        needed = {m for m in needed if m in set(only_markets)}
     if not needed:
         logger.info("Скан пропущен: нет рынков с активными шаблонами")
         return 0
