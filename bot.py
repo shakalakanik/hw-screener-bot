@@ -2252,6 +2252,8 @@ def _mount_miniapp_routes(app: web.Application) -> None:
     app.router.add_put("/api/miniapp/state", wa.api_miniapp_state_put)
     app.router.add_get("/api/journal", wa.api_journal_get)
     app.router.add_get("/api/journal/chart/{row_id}/{tf}", wa.api_journal_chart)
+    import mkt_proxy
+    mkt_proxy.setup(app)   # рыночные данные Mini App через сервер (ISS / Bybit / OKX); без этого GET /api/mkt → 405
 
     async def _options(request: web.Request) -> web.Response:
         return web.Response(status=204, headers=wa._cors_headers(request))
@@ -2340,6 +2342,24 @@ async def scan_loop_ru():
 
 
 # ── Запуск ────────────────────────────────────────────────────────────────────
+def build_http_app() -> web.Application:
+    """HTTP-приложение бота (webhook + Mini App) — то же, что запускается в main()."""
+    app = web.Application()
+    app.router.add_post("/sync/{token}", handle_sync)
+    app.router.add_get("/watchlist/{token}", handle_watchlist)
+    app.router.add_post("/api/manual-scan", handle_manual_scan_post)
+    app.router.add_get("/api/manual-scan/{job_id}", handle_manual_scan_get)
+    app.router.add_get("/health", handle_health)
+    app.router.add_get("/", handle_index)
+    app.router.add_get("/app", handle_index)
+    app.router.add_get("/app/watch", handle_index)
+    # Журнал: путь, не query — Telegram иногда отбрасывает query у web_app.
+    app.router.add_get("/app/journal/{market}", handle_index)
+    app.router.add_get("/app/journal/{market}/{sig_id}", handle_index)
+    _mount_miniapp_routes(app)
+    return app
+
+
 async def main():
     storage.init()
     try:
@@ -2364,19 +2384,7 @@ async def main():
     ])
 
     # HTTP-сервер для webhook
-    app = web.Application()
-    app.router.add_post("/sync/{token}", handle_sync)
-    app.router.add_get("/watchlist/{token}", handle_watchlist)
-    app.router.add_post("/api/manual-scan", handle_manual_scan_post)
-    app.router.add_get("/api/manual-scan/{job_id}", handle_manual_scan_get)
-    app.router.add_get("/health", handle_health)
-    app.router.add_get("/", handle_index)
-    app.router.add_get("/app", handle_index)
-    app.router.add_get("/app/watch", handle_index)
-    # Журнал: путь, не query — Telegram иногда отбрасывает query у web_app.
-    app.router.add_get("/app/journal/{market}", handle_index)
-    app.router.add_get("/app/journal/{market}/{sig_id}", handle_index)
-    _mount_miniapp_routes(app)
+    app = build_http_app()
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)

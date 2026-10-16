@@ -18,7 +18,7 @@ from aiohttp import web
 logger = logging.getLogger(__name__)
 
 UPSTREAMS = {
-    "bybit": ("https://api.bybit.com", re.compile(r"^/v5/market/(kline|tickers)$"), 8),
+    "bybit": ("https://api.bybit.com", re.compile(r"^/v5/market/(kline|tickers|time)$"), 8),
     "okx": ("https://www.okx.com", re.compile(r"^/api/v5/market/(candles|history-candles|tickers)$"), 4),
     "iss": ("https://iss.moex.com", re.compile(r"^/iss/(engines|history/engines)/stock/markets/(shares|index)"
                                                r"(/[A-Za-z0-9_.\-]+){1,8}\.json$"), 6),
