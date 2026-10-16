@@ -602,9 +602,10 @@ def ru_cluster(cards: list[dict]) -> None:
     cards — карточки всех бумаг после dedupList (как raw в HTML); пишет feat["ru_clu"]."""
     import bisect
     for d in (0, 1):
-        ts = sorted(c["feat"]["t"] for c in cards if c.get("strategy") == "brk" and c["feat"].get("d") == d)
+        ts = sorted(c["feat"]["t"] for c in cards if c.get("strategy") == "brk" and c["feat"].get("d") == d
+                    and c["feat"].get("sw") != 2)   # 7.37: дневные шорты в «пробоях за 3 ч» не считаются
         for c in cards:
-            if c.get("strategy") == "brk" and c["feat"].get("d") == d:
+            if c.get("strategy") == "brk" and c["feat"].get("d") == d and c["feat"].get("sw") != 2:
                 t = c["feat"]["t"]
                 c["feat"]["ru_clu"] = bisect.bisect_left(ts, t + 1) - bisect.bisect_left(ts, t - 2 * 3_600_000)
 
@@ -612,6 +613,10 @@ def ru_cluster(cards: list[dict]) -> None:
 def ru_rescore(card: dict) -> None:
     """signalScore() для пробоя MOEX — после ruCluster (оценка зависит от ru_clu)."""
     if card.get("strategy") != "brk":
+        return
+    if card["feat"].get("sw") == 2:   # HTML 7.37: дневной шорт — средний сигнал
+        card["score"] = 5
+        card["feat"]["_sc"] = 5
         return
     v = score_ru(card["feat"])
     if v is None:
@@ -1378,7 +1383,7 @@ def evaluate_brk(
                 "ticker": ticker,
                 "version": VERSION,
                 "score": score,
-                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[i + 1: i + 1 + hold_h(market)]],
+                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[i + 1: i + 1 + (RU_HOLD_BARS if market == "ru" else hold_h(market))]],
                 "_ord": (i, li),
                 "feat": _card_feat(sf, "brk", side, bar.ts, lv.kind, 0, score),
                 "strategy": "brk",
@@ -1626,7 +1631,7 @@ def evaluate_fbo(
                 "ticker": ticker,
                 "version": VERSION,
                 "score": score,
-                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[hi_idx + 1: hi_idx + 1 + hold_h(market)]],
+                "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[hi_idx + 1: hi_idx + 1 + (RU_HOLD_BARS if market == "ru" else hold_h(market))]],
                 "_ord": (hi_idx, li),
                 "feat": _card_feat(sf, "fbo", side, bar.ts, lv.kind, p, score_show),
                 "score_show": score_show,
@@ -1883,3 +1888,90 @@ def btc_tag(cards: list[dict], bias: dict | None) -> None:
         v = bias.get(card["signal_ts"])
         if v is not None:
             card.setdefault("feat", {})["btcBias"] = v
+
+
+# ═══ HTML 7.37/7.38: дневные шорты Мосбиржи (режим «Свинг»), ruD1Signals ═══════════════
+RU_SW_D1STR = 4
+RU_SW_IX20 = 0.04
+RU_HOLD_BARS = 200   # ruHoldBars(): свечей вперёд у сигнала MOEX — с запасом под свинг 7 суток
+
+
+def ru_d1_signals(ticker: str, d1c: list, h1: list, h1c: list, from_idx: int, rc: dict | None) -> list[dict]:
+    """1:1 ruD1Signals(): закрытие дня k под уровнем D1 силой ≥4 (вчера — над ним), IMOEX 7/7 вниз и не ниже
+    SMA20 больше 4%. Вход — открытие первого часа следующего торгового дня; t = этот час − 1 ч; стоп 1%."""
+    import bisect
+    rc = rc or {}
+    P, ixd = rc.get("ixP"), rc.get("imoexD1")
+    out: list[dict] = []
+    if not P or not ixd or len(d1c) < 50 or not h1c:
+        return out
+    t_from = h1c[min(from_idx, len(h1c) - 1)].ts
+    h1_ts = [b.ts for b in h1]
+    h1c_ts = [b.ts for b in h1c]
+    for k in range(45, len(d1c)):
+        today, prev = d1c[k], d1c[k - 1]
+        j = bisect.bisect_left(h1_ts, today.ts + 86_400_000)
+        if j >= len(h1):
+            continue
+        eb = h1[j]
+        if eb.ts - today.ts > 5 * 86_400_000:
+            continue
+        t_sig = eb.ts - 3_600_000
+        if t_sig < t_from:
+            continue
+        cut = d1c[: k + 1]
+        a_d = atr(cut)
+        if not (a_d > 0):
+            continue
+        best = None
+        for L in build_levels(cut, []):
+            if _side_of(L.kind) != "short":
+                continue
+            if not (today.c < L.price and prev.c >= L.price):
+                continue
+            if not (L.strength >= RU_SW_D1STR):
+                continue
+            ov = (L.price - today.c) / a_d
+            if best is None or L.strength > best[0].strength or (L.strength == best[0].strength and ov < best[1]):
+                best = (L, ov)
+        if not best:
+            continue
+        st = ru_ix_state(P, t_sig, -1)
+        if not st or st.get("ru_ixS") != 7:
+            continue
+        ic = [b for b in ixd if b.ts <= today.ts]
+        if len(ic) < 20:
+            continue
+        c0 = ic[-1].c
+        sma20 = sum(b.c for b in ic[-20:]) / 20
+        ix20 = 1 - c0 / sma20
+        if ix20 >= RU_SW_IX20:
+            continue
+        jc = bisect.bisect_left(h1c_ts, eb.ts)
+        vw = sorted(v for v in ((b.vol_quote or 0) for b in h1c[max(0, jc - 24):jc]) if v > 0)
+        v_med = vw[len(vw) // 2] if vw else 0
+        L, ov = best
+        k_lbl = "D1-закрытие · " + L.kind
+        feat = {
+            "type": "brk", "sw": 2, "t": t_sig, "d": 0, "side": "short", "lv": L.price, "k": k_lbl, "kind": L.kind,
+            "e": eb.o, "atrD": a_d, "strength": L.strength, "crosses": 0, "touched8": 0, "acc": 0,
+            "level_age_h": (t_sig - L.formed_ts) / 3_600_000, "vol_contraction": 1, "vol_mult": 1,
+            "overshoot_atr": ov, "dist_atr": 0, "bias_ok": 1, "atrD_pct": a_d / eb.o, "aH1_pct": 0,
+            "v6_fresh": 1, "v6_poke": 0, "v6_covers": 1, "v6_preAcc": 0, "v6_smooth": 0, "v6_d1Against": 0,
+            "free_zone_h": 0, "wall_r": 99, "day_pos": 0, "body_ratio": 1, "wick_ratio": 0,
+            "ru_ixS": st.get("ru_ixS"), "ru_ixExt": st.get("ru_ixExt"), "ru_ix20": ix20, "ru_d1close": today.c,
+            "brk_bars": 1, "vol_ret_brk": 1, "dow": (time.gmtime(eb.ts / 1000).tm_wday + 1) % 7, "ema_ok": 1,
+            "approach_atr": 0, "atr_ratio": 0, "lvl_density": 0, "round_dist": 0, "green_ratio": 0, "d1_streak": 0,
+            "turn24": 0, "turnD": turn_day_at(h1c, jc - 1) if jc > 0 else 0, "p": 0,
+            "vol5mAvg": v_med / 12, "posMax": (v_med / 12) * 0.10, "grouped": 1, "mkt": "ru", "_sc": 5,
+        }
+        out.append({
+            "ticker": ticker, "market": "ru", "exchange": "moex", "sw": 2,
+            "score": 5, "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[jc: jc + RU_HOLD_BARS]],
+            "_ord": (jc, 0), "feat": feat, "strategy": "brk", "side": "SHORT", "status": "SIGNAL",
+            "level": L.price, "kind": k_lbl, "strength": L.strength, "last": eb.o, "signal_ts": t_sig,
+            "dist_atr": 0.0, "atr_d": a_d, "atr_h1": 0.0, "stop": eb.o * 1.01, "take": eb.o * 0.97, "risk": eb.o * 0.01,
+            "d1_bias": "flat", "crosses": 0, "prob": None, "level_age_h": feat["level_age_h"], "vol_mult": 1.0,
+            "why": ["дневной шорт (Свинг): закрытие дня под уровнем " + L.kind, "IMOEX 7/7 вниз"],
+        })
+    return out

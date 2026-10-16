@@ -677,7 +677,7 @@ async def cmd_status(msg: Message):
     tpls      = storage.get_html_templates(chat_id)
     subscribed = chat_id in _subscribers
 
-    by_mkt         = cfg.get("names_by_market") or {m: [] for m in storage.MARKETS}
+    by_mkt         = cfg.get("names_by_market") or {m: [] for m in storage.ACTIVE_MARKETS}
     active_markets = cfg["markets"]
 
     mkt_str = " + ".join(
@@ -688,13 +688,13 @@ async def cmd_status(msg: Message):
     auto = cfg.get("auto") or {}
     if not tpls and not any(auto.values()):
         tpl_str = "Шаблоны не синхронизированы.\nИспользуй /syncurl → кнопку 📬 в HTML."
-    elif not any(by_mkt.get(m) or auto.get(m) for m in storage.MARKETS):
+    elif not any(by_mkt.get(m) or auto.get(m) for m in storage.ACTIVE_MARKETS):
         tpl_str = f"Шаблонов загружено: {len(tpls)}\nАктивных: нет — выбери через /filter"
     else:
         overrides = storage.get_template_strategy_overrides(chat_id)
         label = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
         blocks = []
-        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 Мосбиржа"), ("algo", "⚡ Крипта (Алго)")):
+        for m, mlabel in (("crypto", "🌐 Крипта"), ("ru", "🇷🇺 Мосбиржа")):
             names = by_mkt.get(m) or []
             mtpls = storage.get_html_templates(chat_id, m)
             if auto.get(m):
@@ -752,7 +752,7 @@ async def cmd_filter(msg: Message):
 _STRAT_CYCLE = {"fbo": "brk", "brk": "both", "both": "fbo"}
 _STRAT_ICON  = {"fbo": "🔻ЛП", "brk": "📈Проб", "both": "📈🔻Оба"}
 _MKT_TAB     = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа", "algo": "⚡ Крипта (Алго)"}
-_MARKETS     = storage.MARKETS          # crypto | ru | algo
+_MARKETS     = storage.ACTIVE_MARKETS   # crypto | ru (алго убрана)
 _AUTO_MARKETS = ("crypto", "ru")        # «🤖 Авто» — только у ЛП/пробоя (в алго нет шаблона «Авто»)
 
 
@@ -781,8 +781,6 @@ async def _send_filter_root(chat_id: int, edit_msg=None):
     buttons = [[
         InlineKeyboardButton(text="🌐 Крипта", callback_data="filter_mkt:crypto"),
         InlineKeyboardButton(text="🇷🇺 Мосбиржа", callback_data="filter_mkt:ru"),
-    ], [
-        InlineKeyboardButton(text="⚡ Крипта (Алго)", callback_data="filter_mkt:algo"),
     ]]
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -798,8 +796,7 @@ async def _send_filter_root(chat_id: int, edit_msg=None):
         "🎛 <b>Фильтр</b>\n\n"
         "Выбери рынок:\n"
         f"• {_mkt_line('crypto', '🌐 Крипта')}\n"
-        f"• {_mkt_line('ru', '🇷🇺 Мосбиржа')}\n"
-        f"• {_mkt_line('algo', '⚡ Крипта (Алго)')}\n\n"
+        f"• {_mkt_line('ru', '🇷🇺 Мосбиржа')}\n\n"
         "Шаблоны у каждого рынка свои (как в HTML)."
     )
 
@@ -854,6 +851,12 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         buttons.append([InlineKeyboardButton(
             text="⭐ The Best ✓ (только отбор The Best)" if tb else "⭐ The Best (выкл — отметка ⭐ в карточках)",
             callback_data=f"the_best:{market}",
+        )])
+    if market == "ru":   # HTML 7.37/7.38: режим Мосбиржи «Интрадей / Свинг» (у каждого пользователя свой)
+        sw = storage.get_ru_mode(chat_id) == "swing"
+        buttons.append([InlineKeyboardButton(
+            text="🕰 Режим: ✅ Интрадей · Свинг" if not sw else "🕰 Режим: Интрадей · ✅ Свинг",
+            callback_data="ru_mode",
         )])
 
     if not shared_names:
@@ -918,6 +921,9 @@ async def _send_filter_menu(chat_id: int, edit_msg=None, market: str | None = No
         "• Стратегия: 🔻ЛП → 📈Проб → 📈🔻Оба\n"
         "• Переименовать шаблон — в HTML (✏️ Переименовать)"
     )
+      if market == "ru":
+        txt += ("\n• 🕰 Режим: «Интрадей» — как раньше; «Свинг» — пробои у бумаг с ATR дня ≥2,5% держатся "
+                "до 7 суток (стоп 50% ATR, 1–2%, без безубытка) + дневные шорты (стоп 1%, тейк 3R, БУ +1,5R, до 4 суток)")
 
     if edit_msg:
         try:
@@ -1007,6 +1013,17 @@ async def cb_the_best(call: CallbackQuery):
     storage.set_the_best(chat_id, not cur, mkt)
     await _send_filter_menu(chat_id, edit_msg=call.message, market=mkt)
     await call.answer("The Best: вкл" if not cur else "The Best: выкл")
+
+
+@dp.callback_query(F.data == "ru_mode")
+async def cb_ru_mode(call: CallbackQuery):
+    """HTML 7.37/7.38: Мосбиржа «Интрадей» ⇄ «Свинг». Свинг: часовые пробои у бумаг с ATR дня ≥2.5% держатся
+    до 7 суток (стоп 50% ATR, 1–2%, без безубытка) + дневные шорты (стоп 1%, тейк 3R, БУ +1.5R, до 4 суток)."""
+    chat_id = call.message.chat.id
+    new = "intraday" if storage.get_ru_mode(chat_id) == "swing" else "swing"
+    storage.set_ru_mode(chat_id, new)
+    await _send_filter_menu(chat_id, edit_msg=call.message, market="ru")
+    await call.answer("Мосбиржа: Свинг" if new == "swing" else "Мосбиржа: Интрадей")
 
 
 @dp.callback_query(F.data.startswith("auto_on:"))
@@ -1142,10 +1159,10 @@ def _ai_user_context(chat_id: int) -> dict:
         "subscribed": chat_id in _subscribers,
         "ai_enabled": storage.get_ai_enabled(chat_id),
         "scan_schedule": SCAN_SCHEDULE_TEXT,
-        "markets": list(cfg.get("markets") or []),
-        "names_by_market": cfg.get("names_by_market") or {m: [] for m in storage.MARKETS},
+        "markets": [m for m in (cfg.get("markets") or []) if m in storage.ACTIVE_MARKETS],
+        "names_by_market": {m: list((cfg.get("names_by_market") or {}).get(m) or []) for m in storage.ACTIVE_MARKETS},
         "templates": storage.get_html_templates(chat_id),
-        "templates_by_market": {m: sorted(storage.get_html_templates(chat_id, m)) for m in storage.MARKETS},
+        "templates_by_market": {m: sorted(storage.get_html_templates(chat_id, m)) for m in storage.ACTIVE_MARKETS},
         "strategy_overrides": storage.get_template_strategy_overrides(chat_id),
         "auto": storage.get_auto_mode(chat_id),
         "auto_strategy": {m: storage.get_auto_strategy(chat_id, m) for m in _AUTO_MARKETS},
@@ -1158,7 +1175,7 @@ def _ai_user_context(chat_id: int) -> dict:
 def _template_strategies_by_market(chat_id: int) -> dict:
     ov = storage.get_template_strategy_overrides(chat_id)
     out = {}
-    for m in storage.MARKETS:
+    for m in storage.ACTIVE_MARKETS:
         tpls = storage.get_html_templates(chat_id, m)
         out[m] = {n: (_effective_strategy(chat_id, n, (e or {}).get("filters") or {}, ov) if m != "algo" else "algo")
                   for n, e in tpls.items()}
@@ -1210,7 +1227,7 @@ def _ai_resolve_names(chat_id: int, proposal: dict) -> dict:
                 continue
             it = {**it, "params": {**p, "names": got}}
         elif a == "set_strategy":
-            mk = [p["market"]] if p.get("market") in storage.MARKETS else list(storage.MARKETS)
+            mk = [p["market"]] if p.get("market") in storage.ACTIVE_MARKETS else list(storage.ACTIVE_MARKETS)
             found = None
             for m in mk:
                 r = _fuzzy_tpl(storage.get_html_templates(chat_id, m), p.get("template") or "")
@@ -1300,7 +1317,7 @@ def _apply_ai_one(chat_id: int, proposal: dict) -> str:
     action = proposal.get("action")
     p = proposal.get("params") or {}
     if action == "set_market":
-        if p.get("market") not in storage.MARKETS:
+        if p.get("market") not in storage.ACTIVE_MARKETS:
             return "Неизвестный рынок — ничего не менял."
         storage.set_market_enabled(chat_id, p["market"], bool(p.get("enabled")))
         if p["market"] == "algo" and p.get("enabled") and not (
@@ -1328,7 +1345,7 @@ def _apply_ai_one(chat_id: int, proposal: dict) -> str:
         return "готово."
     if action == "set_strategy":
         name = p.get("template") or ""
-        tpls = (storage.get_html_templates(chat_id, p["market"]) if p.get("market") in storage.MARKETS
+        tpls = (storage.get_html_templates(chat_id, p["market"]) if p.get("market") in storage.ACTIVE_MARKETS
                 else storage.get_html_templates(chat_id))
         if name not in tpls:
             # prefix match like filter callbacks
@@ -1340,7 +1357,7 @@ def _apply_ai_one(chat_id: int, proposal: dict) -> str:
         return f"Стратегия «{name}» → {p['strategy']}."
     if action in ("set_templates", "add_templates", "remove_templates"):
         market = p.get("market")
-        if market not in storage.MARKETS:
+        if market not in storage.ACTIVE_MARKETS:
             return "Неизвестный рынок — ничего не менял."
         names = list(p.get("names") or [])
         tpls = storage.get_html_templates(chat_id, market)   # шаблоны этого рынка
@@ -1627,7 +1644,7 @@ async def cb_filter_done(call: CallbackQuery):
     by = cfg.get("names_by_market") or {}
     enabled = set(cfg.get("markets") or [])
     parts = []
-    for m, label in (("crypto", "крипта"), ("ru", "мосбиржа"), ("algo", "алго")):
+    for m, label in (("crypto", "крипта"), ("ru", "мосбиржа")):
         if m not in enabled:
             continue
         if (cfg.get("auto") or {}).get(m):
@@ -1707,14 +1724,14 @@ def _build_filter_for_chat(chat_id: int) -> dict:
     Рынок сканируется только если он включён и есть ≥1 активный шаблон.
     """
     cfg  = storage.get_active_config(chat_id)
-    by   = cfg.get("names_by_market") or {m: [] for m in storage.MARKETS}
+    by   = cfg.get("names_by_market") or {m: [] for m in storage.ACTIVE_MARKETS}
     enabled = set(cfg.get("markets") or [])
 
     overrides = storage.get_template_strategy_overrides(chat_id)
     multi = []
     markets = []
 
-    for mkt in storage.MARKETS:
+    for mkt in storage.ACTIVE_MARKETS:   # алго не сканируется (рынок убран)
         if mkt not in enabled:
             continue
         tpls = storage.get_html_templates(chat_id, mkt)   # шаблоны раздельно по рынкам
@@ -2251,7 +2268,7 @@ async def handle_health(request: web.Request) -> web.Response:
 # закрывшийся бар ещё не подтверждён, и сигнал на следующем скане уже «too_old».
 # Поэтому MOEX сканируется отдельно в HH:16:40 (как авто-скан MOEX в HTML, :16).
 MOEX_SCAN_DELAY_S = 16 * 60 + 40
-NON_RU_MARKETS = ["crypto", "algo"]
+NON_RU_MARKETS = ["crypto"]
 
 
 # MOEX: отправляем все бары за последние 3 закрытых часа, ещё не отправленные (дедуп по журналу):
@@ -2275,7 +2292,7 @@ async def _scan_pass(markets: list[str], label: str, send_hours: int = 1) -> Non
             only_markets=markets,
         )
         dur = time.time() - t0
-        late = label == "crypto/algo" and time.time() - hour_start > SCAN_SEND_DEADLINE_S
+        late = label == "crypto" and time.time() - hour_start > SCAN_SEND_DEADLINE_S
         (logger.warning if late else logger.info)(
             "Авто-скан %s: отправлено новых карточек=%d, длительность %.1f с, завершён в HH:%s%s",
             label, n, dur, time.strftime("%M:%S", time.gmtime(time.time())),
@@ -2292,7 +2309,7 @@ async def scan_loop():
         logger.info("Следующий авто-скан: %s UTC",
                     datetime.fromtimestamp(nxt, timezone.utc).strftime("%H:%M:%S"))
         await asyncio.sleep(max(0.0, nxt - time.time()))
-        await _scan_pass(NON_RU_MARKETS, "crypto/algo")
+        await _scan_pass(NON_RU_MARKETS, "crypto")
         try:
             res = await check_signal_outcomes()
             if res.get("resolved"):

@@ -28,9 +28,9 @@ SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20261013b">
-<script src="/bridge.js?v=20261013b"></script>
-<script src="/lean.js?v=20261013b"></script>
+<link rel="stylesheet" href="/mobile.css?v=20261016a">
+<script src="/bridge.js?v=20261016a"></script>
+<script src="/lean.js?v=20261016a"></script>
 """
 
 
@@ -214,6 +214,7 @@ async def api_me(request: web.Request) -> web.Response:
     return web.json_response({
         "user_id": uid,
         "username": user.get("username"),
+        "ru_mode": storage.get_ru_mode(uid),   # HTML 7.37: Мосбиржа «Интрадей/Свинг» (настройка в боте)
     })
 
 
@@ -546,7 +547,9 @@ async def api_journal_get(request: web.Request) -> web.Response:
                 for tf in ("d1", "h1", "m5")
             },
         }
-        (ru if row["market"] == "ru" else algo if row["market"] == "algo" else crypto).append(item)
+        if row["market"] == "algo":
+            continue   # 16.10: «Крипта (Алго)» убрана — строки в БД остаются, в журнале не показываются
+        (ru if row["market"] == "ru" else crypto).append(item)
     return web.json_response({"crypto": crypto, "ru": ru, "algo": algo})
 
 

@@ -25,6 +25,43 @@ HALF_H = 1_800_000
 LONG_HOUR_CAP = 4   # HTML 7.50: не больше 4 ЛП-лонгов крипты в час (самые ликвидные)
 RU_STOP_ATR = 25    # HTML 7.36: MOEX — стоп не меньше 25% ATR дня
 RU_FRI_H = 20       # HTML 7.60: MOEX — выход в пятницу 20:00 МСК
+# HTML 7.37/7.38 RU_SW: режим «Свинг» Мосбиржи
+RU_SW = {"stopH": 50, "stopMaxPct": 0.02, "atrMin": 0.025, "d1Str": 4, "holdH": 168, "beH": 0,
+         "holdD": 96, "beD": 1.5, "ix20": 0.04}
+
+
+def _is_ru_brk(card: dict) -> bool:
+    return card.get("strategy") == "brk" and card.get("market") == "ru"
+
+
+def sw_of(card: dict, f: dict | None) -> int:
+    """HTML swOf(): 0 — интрадей, 1 — часовой пробой со свинг-выходом, 2 — дневной шорт.
+    Сигнал скана следует режиму пользователя (f["_swing"]); сохранённая сделка — своему swm."""
+    if not _is_ru_brk(card):
+        return 0
+    if (card.get("feat") or {}).get("sw") == 2 or card.get("sw") == 2:
+        return 2
+    swm = card.get("swm", (card.get("feat") or {}).get("swm"))
+    if swm is not None:
+        return 1 if swm else 0
+    return 1 if (f or {}).get("_swing") else 0
+
+
+def sw_risk_cap(card: dict, risk: float, f: dict | None) -> float:
+    return min(risk, RU_SW["stopMaxPct"] * card["last"]) if sw_of(card, f) == 1 else risk
+
+
+def swing_gate(card: dict, f: dict):
+    """passes() 7.37/7.38: дневной шорт — только в «Свинге» (+ сторона), прочие фильтры к нему не применяются;
+    в «Свинге» часовые пробои MOEX — только у бумаг с ATR дня ≥2.5%. None — решают обычные фильтры."""
+    feat = card.get("feat") or {}
+    if feat.get("sw") == 2:
+        side = f.get("side")
+        return bool(f.get("_swing")) and (side is None or _d(card) == int(side))
+    if f.get("_swing") and _is_ru_brk(card) and feat.get("swm") != 0 \
+            and feat.get("atrD_pct") is not None and feat["atrD_pct"] < RU_SW["atrMin"]:
+        return False
+    return None
 
 
 def _base(card: dict) -> str:
@@ -72,10 +109,13 @@ def dedup_list(cards: list[dict]) -> list[dict]:
     return out
 
 
-def stop_k(card: dict, k: float) -> float:
-    """HTML stopK(): MOEX (не алго, режим «Интрадей») — стоп не меньше 25% ATR дня."""
+def stop_k(card: dict, k: float, f: dict | None = None) -> float:
+    """HTML stopK(): MOEX — интрадей: стоп не меньше 25% ATR дня; свинг: 50% ATR; дневной шорт: 1% от входа."""
     if card.get("market") == "ru" and card.get("strategy") != "algo":
-        return max(float(k or 0), RU_STOP_ATR)
+        w = sw_of(card, f)
+        if w == 2:
+            return 0
+        return max(float(k or 0), RU_SW["stopH"] if w == 1 else RU_STOP_ATR)
     return k
 
 
@@ -99,15 +139,17 @@ def recompute(card: dict, f: dict) -> dict | None:
     atr_d = card.get("atr_d") or 0
     is_ru = card.get("market") == "ru"
     # новый HTML: стоп не меньше 1% для акций РФ (2% крипта), удержание 96ч РФ / 168ч крипта
-    risk = max((stop_k(card, f["stop"]) / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e)   # HTML 7.36
-    hold = HOLD_RU if is_ru else HOLD
+    sw = sw_of(card, f)   # HTML 7.37
+    risk = sw_risk_cap(card, max((stop_k(card, f["stop"], f) / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e), f)
+    hold = RU_SW["holdH"] if sw == 1 else RU_SW["holdD"] if sw == 2 else (HOLD_RU if is_ru else HOLD)
+    be_r = RU_SW["beH"] if sw == 1 else RU_SW["beD"] if sw == 2 else BE_TRIGGER_R
     fri = ru_fri_cut(card)   # HTML 7.60
     if risk <= 0 or risk / e > MAXRISK:
         return None
     long_ = _d(card) == 1
     stop = e - risk if long_ else e + risk
     take = e + f["tgt"] * risk if long_ else e - f["tgt"] * risk
-    be = e + BE_TRIGGER_R * risk if long_ else e - BE_TRIGGER_R * risk
+    be = e + be_r * risk if long_ else e - be_r * risk
     cur_stop, moved = stop, False
     outcome, exit_t, last_ts = "open", card["signal_ts"], card["signal_ts"]
     for (ts, o, h, l, c) in card.get("fwd") or []:
@@ -126,12 +168,15 @@ def recompute(card: dict, f: dict) -> dict | None:
         if ht:
             outcome = "take"
             break
-        if not moved and ((h >= be) if long_ else (l <= be)):
+        if be_r > 0 and not moved and ((h >= be) if long_ else (l <= be)):
             cur_stop, moved = e, True
         last_ts = ts
     if outcome == "open" and fri is not None and (card.get("fwd") or []) and last_ts + 3_600_000 >= fri:
         outcome, exit_t = "expired", last_ts   # HTML 7.60: пятница 20:00 наступила
-    return {**card, "stop": stop, "take": take, "risk": risk, "rp": risk / e, "o": outcome, "xt": exit_t}
+    out = {**card, "stop": stop, "take": take, "risk": risk, "rp": risk / e, "o": outcome, "xt": exit_t}
+    if _is_ru_brk(card) and sw != 2:
+        out["swm"] = 1 if sw == 1 else 0
+    return out
 
 
 def algo_reject(card: dict, f: dict) -> bool:
@@ -144,7 +189,7 @@ def algo_reject(card: dict, f: dict) -> bool:
         lv, e, a = s.get("lv", card.get("level")), card.get("last"), card.get("atr_d")
         if lv is not None and e is not None and a is not None:
             ru = mkt == "ru"
-            risk = max((stop_k(card, f["stop"]) / 100.0) * a, (0.01 if ru else 0.02) * e)
+            risk = sw_risk_cap(card, max((stop_k(card, f["stop"], f) / 100.0) * a, (0.01 if ru else 0.02) * e), f)
             if _d(card) == 1:
                 if e - risk > lv:
                     return True
@@ -170,7 +215,7 @@ def _apply_coin_limit(rows):
     best = {}
     win = COIN_WINDOW_H * 3_600_000
     for s in rows:
-        k = (_base(s), s["signal_ts"] // win)
+        k = (_base(s), "d1" if (s.get("feat") or {}).get("sw") == 2 else "", s["signal_ts"] // win)   # 7.37
         b = best.get(k)
         if (b is None or s["signal_ts"] < b["signal_ts"]
                 or (s["signal_ts"] == b["signal_ts"] and (s["score"] > b["score"]
@@ -262,7 +307,10 @@ def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
         rows = [c for c in rows if c.get("strategy", "fbo") == strategy]
     ok = []
     for c in rows:
-        if algo_reject(c, f) or not passes_html(c["feat"], f):
+        if algo_reject(c, f):
+            continue
+        g = swing_gate(c, f)
+        if g is False or (g is None and not passes_html(c["feat"], f)):
             continue
         r = recompute(c, f)
         if r is None or r["rp"] * 100 > f["maxrisk"]:
@@ -323,13 +371,13 @@ def is_best_ru_card(card: dict) -> bool:
 
 
 def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False,
-                  market: str = "crypto", reg_ts=None) -> list[dict]:
+                  market: str = "crypto", reg_ts=None, swing: bool = False) -> list[dict]:
     """1:1 bestPipeline(). Крипта: фильтры «авто» (часы 0-24 при выключенном «без ночи», только SHORT),
     источник — The best ЛП. Мосбиржа (HTML 7.02): фильтры = алгоритм MOEX «авто», источник — isBestRU.
     Затем бумага/монета 12ч → cap/час (cap||3) → серии → ≤14/нед (с учётом реестра reg_ts)."""
     from screener import _f_from_template, passes_html
     if market == "ru":
-        f = _f_from_template({}, "ru", None)
+        f = _f_from_template({"_ru_mode": "swing"} if swing else {}, "ru", None)
         rows = [c for c in cards if c["signal_ts"] >= cutoff_ms and c.get("strategy") == "brk"
                 and c.get("market") == "ru" and is_best_ru_card(c)]
     else:
@@ -338,7 +386,10 @@ def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False,
                 and c.get("market", "crypto") == "crypto" and is_best_card(c)]
     ok = []
     for c in rows:
-        if algo_reject(c, f) or not passes_html(c["feat"], f):
+        if algo_reject(c, f):
+            continue
+        g = swing_gate(c, f)
+        if g is False or (g is None and not passes_html(c["feat"], f)):
             continue
         r = recompute(c, f)
         if r is None or r["rp"] * 100 > f["maxrisk"]:

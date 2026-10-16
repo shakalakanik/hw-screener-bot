@@ -509,6 +509,8 @@ def _f_from_template(raw: dict, market: str | None = None, strategy: str | None 
     if market == "ru":
         from hwv1 import RU_TGT
         f["tgt"] = RU_TGT   # HTML: f.tgt = ruTgt() (3R по умолчанию)
+    # HTML 7.37: режим Мосбиржи «Свинг» (настройка пользователя; передаётся ключом _ru_mode)
+    f["_swing"] = market == "ru" and isinstance(raw, dict) and raw.get("_ru_mode") == "swing"
     return f
 
 
@@ -1259,6 +1261,21 @@ async def _deliver_html(
             storage.best_registry_add(bm, [(best_reg_key(c), c["signal_ts"]) for c in best_by[bm]])
         except Exception as e:
             logger.debug("best registry: %s", e)
+    # HTML 7.37: The best MOEX в режиме «Свинг» (другие стоп/удержание/ATR-фильтр) — считаем лениво, без записи в реестр
+    _best_ru_sw: dict[str, list[dict]] = {}
+
+    def _best_ru(swing: bool) -> list[dict]:
+        if not swing:
+            return best_by["ru"]
+        if "v" not in _best_ru_sw:
+            try:
+                reg_sw = storage.best_registry_ts("ru", now_ms - 9 * 86_400_000)
+            except Exception:
+                reg_sw = []
+            _best_ru_sw["v"] = (best_pipeline(by_market["ru"], cutoff, nn_all, market="ru", reg_ts=reg_sw, swing=True)
+                                if by_market.get("ru") else [])
+        return _best_ru_sw["v"]
+
     best_rows = best_by["crypto"]
     best_keys = {best_key(c) for bm in best_by for c in best_by[bm]}
 
@@ -1292,10 +1309,16 @@ async def _deliver_html(
             except Exception:
                 tb_on[bm] = False
         the_best = tb_on["crypto"]
+        try:
+            ru_sw = storage.get_ru_mode(chat_id) == "swing"
+        except Exception:
+            ru_sw = False
+        best_ru_chat = _best_ru(ru_sw) if "ru" in markets else []
+        best_keys_chat = {best_key(c) for c in best_by["crypto"]} | {best_key(c) for c in best_ru_chat}
         for bm in ("crypto", "ru"):
             if tb_on[bm] and bm in markets:
                 # ⭐ The best ВКЛ: по рынку уходят только сигналы конвейера The best (шаблоны рынка не применяются)
-                for c in best_by[bm]:
+                for c in (best_ru_chat if bm == "ru" else best_by[bm]):
                     chosen[best_key(c)] = {**c, "matched_template": THE_BEST_NAME, "template_thr": None,
                                            "is_best": True}
         for tpl in multi:
@@ -1317,18 +1340,20 @@ async def _deliver_html(
                     if key not in chosen:
                         chosen[key] = {**c, "matched_template": name, "template_thr": None}
                 continue
+            if mkt == "ru" and ru_sw:
+                raw = {**raw, "_ru_mode": "swing"}   # HTML 7.37: режим «Свинг» пользователя
             nn = CRYPTO_NO_NIGHT if no_night is None else bool(no_night)
             if mkt == "crypto" and not nn and raw.get("hours") in (None, "auto"):
                 # HTML readF: «авто» часов входа при выключенном «без ночи» = '0-24'
                 raw = {**raw, "hours": "0-24"}
             rows = apply_all(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), cutoff, week_max,
                              win_h=win_h, market=mkt)
-            if mkt == "ru" and tpl.get("_strategy", "both") in ("brk", "both") and best_by["ru"]:
+            if mkt == "ru" and tpl.get("_strategy", "both") in ("brk", "both") and best_ru_chat:
                 # HTML 7.05: каждый сигнал The best MOEX виден в обычном списке со звёздочкой, даже если
                 # лимит «бумага 12 ч / в час» оставил там более ранний сигнал той же бумаги
                 have = {best_reg_key(c) for c in rows}
                 f_t = _f_from_template(raw, "ru", tpl.get("_strategy", "both"))
-                add = [c for c in best_by["ru"] if best_reg_key(c) not in have
+                add = [c for c in best_ru_chat if best_reg_key(c) not in have
                        and (f_t["msc"] <= 0 or (c.get("score") or 0) >= f_t["msc"])]
                 if add:
                     rows = sorted(rows + add, key=lambda c: (-c["signal_ts"], -c["score"], c["ticker"]))
@@ -1341,7 +1366,7 @@ async def _deliver_html(
                 key = (c["ticker"], c.get("strategy"), c["signal_ts"], c["side"], round(c["level"], 10))
                 if key not in chosen:
                     chosen[key] = {**c, "matched_template": name, "template_thr": thr,
-                                   "is_best": mkt in ("crypto", "ru") and best_key(c) in best_keys}
+                                   "is_best": mkt in ("crypto", "ru") and best_key(c) in best_keys_chat}
 
         # HTML 7.58: сигнал с середины часа (30-минутка) — вход в t+30 мин. В Telegram/журнал уходит со
         # signal_ts = t − 30 мин, чтобы показанное время (signal_ts + 1 ч) было моментом входа и ключ отправки
@@ -1442,6 +1467,7 @@ async def run_scan(
     needed = _needed_markets(subscribers, chat_filters)
     if only_markets is not None:
         needed = {m for m in needed if m in set(only_markets)}
+    needed.discard("algo")   # 16.10: рынок «Крипта (Алго)» убран — не сканируется
     if not needed:
         logger.info("Скан пропущен: нет рынков с активными шаблонами")
         return 0

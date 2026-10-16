@@ -120,10 +120,9 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
 [{"action":"<код>","params":{...}}, {"action":"<код>","params":{...}}]
 
 Допустимые action (всё, что можно нажать в /filter):
-- set_market: {"market":"crypto"|"ru"|"algo","enabled":true|false}  — рынок вкл/выкл
+- set_market: {"market":"crypto"|"ru","enabled":true|false}  — рынок вкл/выкл (рынков два: крипта и Мосбиржа)
 - set_auto: {"market":"crypto"|"ru","enabled":true|false,"strategy":"fbo"|"brk"|"both"(необязательно)}
-    — встроенный шаблон «🤖 Авто» рынка и его стратегия. У «Крипта (Алго)» (algo) Авто НЕТ —
-    не предлагай, объясни что нужен алго-шаблон.
+    — встроенный шаблон «🤖 Авто» рынка и его стратегия.
 - set_auto_strategy: {"market":"crypto"|"ru","strategy":"fbo"|"brk"|"both"}
 - set_the_best: {"enabled":true|false,"market":"crypto"|"ru"} — «⭐ The Best» (отдельно для крипты и Мосбиржи,
     по умолчанию crypto): вкл — слать только сигналы отбора The Best (крипта: ЛП-шорты, D1 ≥2 зелёных подряд,
@@ -147,8 +146,7 @@ SYSTEM_PROMPT = """Ты — ИИ-помощник Telegram-бота HW FBO Scree
  {"action":"set_market","params":{"market":"crypto","enabled":false}}]
 «всё выключи кроме крипты» →
 [{"action":"set_market","params":{"market":"crypto","enabled":true}},
- {"action":"set_market","params":{"market":"ru","enabled":false}},
- {"action":"set_market","params":{"market":"algo","enabled":false}}]
+ {"action":"set_market","params":{"market":"ru","enabled":false}}]
 «на крипте авто оба» →
 [{"action":"set_auto","params":{"market":"crypto","enabled":true,"strategy":"both"}}]
 Если просьба неоднозначна (непонятно какой рынок, шаблон или стратегия, «на пробой» без
@@ -312,7 +310,7 @@ _ALLOWED_ACTIONS = {
 }
 
 
-_MKTS = ("crypto", "ru", "algo")
+_MKTS = ("crypto", "ru")   # 16.10: «Крипта (Алго)» убрана
 _STRATS = ("fbo", "brk", "both")
 _ALGO_NO_AUTO = ("У «Крипта (Алго)» нет режима 🤖 Авто — алго сканирует только по выбранному "
                  "алго-шаблону (/filter → ⚡ Алго).")
@@ -433,9 +431,7 @@ _MKT_RU_LABEL = {"crypto": "крипта", "ru": "мосбиржа", "algo": "к
 
 def _seg_markets(seg: str) -> list[str]:
     out = []
-    algo = bool(_R_ALGO.search(seg))
-    if algo:
-        out.append("algo")
+    algo = bool(_R_ALGO.search(seg))   # 16.10: «Крипта (Алго)» убрана — слово «алго» рынок не выбирает
     seg_wo = _R_ALGO.sub(" ", seg)
     if _R_CRYPTO.search(seg_wo) and not (algo and re.search(r"(?i)крипт\w*\s*\(?\s*алг", seg)):
         out.append("crypto")
@@ -551,7 +547,7 @@ def format_user_context(ctx: dict) -> str:
     auto_st = ctx.get("auto_strategy") or {}
     sl = {"fbo": "ЛП", "brk": "Пробой", "both": "Оба"}
     tstr = ctx.get("template_strategies") or {}
-    for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
+    for m, label in (("crypto", "Крипта"), ("ru", "MOEX")):
         names = by.get(m) or []
         a = ("Авто: нет (у алго Авто не бывает)" if m == "algo" else
              f"🤖 Авто: {'вкл' if auto.get(m) else 'выкл'} (стратегия {auto_st.get(m, 'fbo')} = {sl.get(auto_st.get(m, 'fbo'))})")
@@ -561,7 +557,7 @@ def format_user_context(ctx: dict) -> str:
             lines.append(f"  доступные шаблоны [{m}]: " +
                          (", ".join(f"{n}[{st}]" for n, st in list(tstr[m].items())[:40]) or "—"))
     tbm = ctx.get("templates_by_market") or {}
-    for m, label in (("crypto", "Крипта"), ("ru", "MOEX"), ("algo", "Крипта (Алго)")):
+    for m, label in (("crypto", "Крипта"), ("ru", "MOEX")):
         if tbm.get(m) is not None:
             lines.append(f"Шаблоны рынка {label} (у каждого рынка свои): {', '.join(tbm[m][:30]) or '—'}")
     tpls = ctx.get("templates") or {}
@@ -651,8 +647,8 @@ def try_local_intent(user_text: str) -> AiReply | None:
         return None
 
     has_algo = bool(_RE_ALGO.search(text))
-    if has_algo and has_moex:
-        return None
+    if has_algo:
+        return None   # 16.10: «Крипта (Алго)» убрана
     market = "ru" if has_moex else ("algo" if has_algo else "crypto")
     enabled = wants_on
     label = {"ru": "мосбиржу", "algo": "крипту (алго)"}.get(market, "крипту")

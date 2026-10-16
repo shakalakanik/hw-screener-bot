@@ -360,7 +360,15 @@ async def scan_one_moex(
         w0 = [b for b in closed if b.ts >= now_ms - int(lookback_hours) * 3_600_000]
         w = w0 if len(w0) >= 3 else closed[-3:]
         turn = (sum((b.vol_quote or 0) for b in w) / len(w)) if w else 0.0
-        return {"cards": cards, "turn": turn, "base": symbol, "raw": True}
+        # HTML 7.37: дневные шорты режима «Свинг» — после dedupList, в ruCluster не участвуют
+        d1cards = []
+        try:
+            from hwv1 import ru_d1_signals, last_closed as _lc
+            h1c_ = _lc(h1)
+            d1cards = ru_d1_signals(symbol, _lc(d1), h1, h1c_, max(60, len(h1c_) - (lookback_hours + 8)), ru_ctx)
+        except Exception as e:
+            logger.debug("ru_d1_signals %s: %s", symbol, e)
+        return {"cards": cards, "turn": turn, "base": symbol, "raw": True, "d1cards": d1cards}
     except Exception as e:
         logger.debug("scan_one_moex %s error: %s", symbol, e)
         return {"cards": [], "turn": 0.0, "base": symbol}
@@ -375,6 +383,7 @@ def finalize_moex_cards(results: list) -> list:
     for r in rows:   # HTML: scanSymbol уже возвращает dedupList по бумаге
         if r.pop("raw", False):
             r["cards"] = dedup_list(r.get("cards") or [])
+        r["cards"] = list(r.get("cards") or []) + list(r.pop("d1cards", None) or [])
     allc = [c for r in rows for c in (r.get("cards") or [])]
     ru_cluster(allc)
     for c in allc:

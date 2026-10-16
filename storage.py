@@ -673,7 +673,8 @@ def get_watchlist_row(chat_id: int, watch_id: int) -> dict | None:
     return dict(r) if r else None
 
 
-MARKETS = ("crypto", "ru", "algo")   # «Крипта», «Акции РФ (MOEX)», «Крипта (Алго)» — как MKT в HTML
+MARKETS = ("crypto", "ru", "algo")
+ACTIVE_MARKETS = ("crypto", "ru")   # 16.10: «Крипта (Алго)» убрана — строки algo в БД остаются, но игнорируются   # «Крипта», «Акции РФ (MOEX)», «Крипта (Алго)» — как MKT в HTML
 
 
 def _ensure_html_templates(c: sqlite3.Connection):
@@ -2069,6 +2070,7 @@ _JOURNAL_FIELDS = (
     "last", "stop", "take", "score", "strength", "prob", "dist_atr", "d1_bias",
     "signal_ts", "crosses", "vol_mult", "level_age_h", "atr_d", "atr_h1", "risk",
     "is_best",
+    "src30", "bar_ts", "sw", "swm",   # статус сделки в журнале Mini App (момент входа, режим «Свинг»)
 )
 
 
@@ -2303,3 +2305,23 @@ def best_sent_ts_since(chat_id: int, since_ms: int, market: str = "crypto") -> l
             "AND is_best=1 AND signal_ts>=?", (int(chat_id), market, int(since_ms)),
         ).fetchall()
     return [int(r["signal_ts"]) for r in rows]
+
+
+# HTML 7.37/7.38: режим Мосбиржи «Интрадей / Свинг» — свой у каждого пользователя (по умолчанию интрадей).
+# Журнал и «Отслеживаемое» общие для обоих режимов.
+def _ensure_ru_mode(c: sqlite3.Connection) -> None:
+    c.execute("CREATE TABLE IF NOT EXISTS chat_ru_mode (chat_id INTEGER PRIMARY KEY, mode TEXT NOT NULL)")
+
+
+def get_ru_mode(chat_id: int) -> str:
+    with _conn() as c:
+        _ensure_ru_mode(c)
+        row = c.execute("SELECT mode FROM chat_ru_mode WHERE chat_id=?", (int(chat_id),)).fetchone()
+    return "swing" if row and row["mode"] == "swing" else "intraday"
+
+
+def set_ru_mode(chat_id: int, mode: str) -> None:
+    with _conn() as c:
+        _ensure_ru_mode(c)
+        c.execute("INSERT OR REPLACE INTO chat_ru_mode(chat_id, mode) VALUES (?,?)",
+                  (int(chat_id), "swing" if mode == "swing" else "intraday"))
