@@ -28,9 +28,9 @@ SCREENER_HTML = WEBAPP_DIR / "screener.html"
 
 INJECT_SNIPPET = """
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
-<link rel="stylesheet" href="/mobile.css?v=20261016a">
-<script src="/bridge.js?v=20261016a"></script>
-<script src="/lean.js?v=20261016a"></script>
+<link rel="stylesheet" href="/mobile.css?v=20261016b">
+<script src="/bridge.js?v=20261016b"></script>
+<script src="/lean.js?v=20261016b"></script>
 """
 
 
@@ -171,7 +171,38 @@ def require_user(request: web.Request) -> int:
     )
 
 
+# Рыночные данные Mini App (ISS/IMOEX, Bybit, OKX) — только через наш сервер /api/mkt/… (mkt_proxy.py):
+# телефон с прокси для Telegram не ходит на биржи сам. Перехват fetch ставится в <head> до кода движка.
+HEAD_SNIPPET = """<script>(function(){
+  if (window.__hwMktProxy || !window.fetch) return; window.__hwMktProxy = true;
+  var H = {'api.bybit.com':'bybit','www.okx.com':'okx','iss.moex.com':'iss'}, of = window.fetch.bind(window);
+  function hdr(){
+    if (window.__hwApiHeaders) { var h = window.__hwApiHeaders(); delete h['Content-Type']; return h; }
+    var o = {}, d = '';
+    try { d = (window.Telegram && Telegram.WebApp && Telegram.WebApp.initData) || ''; } catch (e) {}
+    if (!d) { try { d = new URLSearchParams((location.hash || '').slice(1)).get('tgWebAppData') || new URLSearchParams(location.search).get('initData') || ''; } catch (e) {} }
+    if (d) o['X-Telegram-Init-Data'] = d;
+    try { var q = new URLSearchParams(location.search), t = q.get('token') || q.get('sync_token'); if (t) o['X-Sync-Token'] = t; } catch (e) {}
+    return o;
+  }
+  window.fetch = function (input, init) {
+    var url = typeof input === 'string' ? input : (input && input.url) || '', x = null;
+    try { x = new URL(String(url), location.href); } catch (e) {}
+    var up = x && x.protocol === 'https:' && H[x.hostname];
+    if (!up || (init && init.method && String(init.method).toUpperCase() !== 'GET')) return of(input, init);
+    var pu = '/api/mkt/' + up + x.pathname + x.search, dbg = null;
+    try { dbg = new URLSearchParams(location.search).get('debug_user_id'); } catch (e) {}
+    if (dbg) pu += (pu.indexOf('?') >= 0 ? '&' : '?') + 'debug_user_id=' + encodeURIComponent(dbg);
+    return of(pu, { method: 'GET', headers: hdr(), credentials: 'same-origin' });
+  };
+})();</script>
+"""
+
+
 def _inject_html(raw: str) -> str:
+    hi = raw.lower().find("<head>")
+    if hi >= 0:
+        raw = raw[:hi + 6] + HEAD_SNIPPET + raw[hi + 6:]
     marker = "</body>"
     idx = raw.lower().rfind(marker)
     if idx < 0:
@@ -607,6 +638,8 @@ def create_app() -> web.Application:
     app.router.add_get("/api/miniapp/stats", api_signal_stats_get)
     app.router.add_get("/api/journal", api_journal_get)
     app.router.add_get("/api/journal/chart/{row_id}/{tf}", api_journal_chart)
+    import mkt_proxy
+    mkt_proxy.setup(app)   # рыночные данные Mini App через сервер (ISS / Bybit / OKX)
 
     # CORS preflight
     async def _options(request: web.Request) -> web.Response:
