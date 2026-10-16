@@ -956,6 +956,108 @@ def score_v6(s: dict):
     return max(0.0, min(7.9, 0.79 * T - (3 if spike else 0) - (2 if poke else 0)))
 
 
+_P_TIERS = [0.15, 0.18, 0.20, 0.22, 0.245, 0.30]
+
+
+def _p_pct(s: dict) -> float:
+    try:
+        p = float(s.get("p"))
+        if not math.isfinite(p):
+            p = 0.2
+    except (TypeError, ValueError):
+        p = 0.2
+    P = _P_TIERS
+    if p <= P[0]:
+        return 0.0
+    for i in range(1, len(P)):
+        if p <= P[i]:
+            return ((i - 1) + (p - P[i - 1]) / (P[i] - P[i - 1])) / (len(P) - 1)
+    return 1.0
+
+
+def _side(s: dict) -> str:
+    return s.get("side") or ("short" if s.get("d") == 0 else "long")
+
+
+def score_v7(s: dict):
+    """HTML 7.39 scoreV7(): ЛП-шорты крипты, ярусы «близость к The best»."""
+    if _side(s) != "short":
+        return None
+    if s.get("d1_streak") is None or s.get("vtr") is None:
+        return None
+    d = _risk_d(s)
+    pk = s.get("pk_ext")
+    poke = abs(pk - s["e"]) / d if (pk is not None and d) else 0
+    g = s.get("g_spk")
+    spike = g is not None and g >= 8
+    D1, VOL = s["d1_streak"] >= 2, s["vtr"] <= 1.0
+    tier = 0 if (poke > 3 or (not D1 and not VOL and spike)) else (3 if (D1 and VOL) else (2 if (D1 or VOL) else 1))
+    return [0, 4, 6, 8][tier] + [3.9, 1.9, 1.9, 2.0][tier] * _p_pct(s)
+
+
+def score_v8_pts(s: dict):
+    """HTML 7.42 scoreV8pts()."""
+    for k in ("d1_streak", "lv_touch24", "lvl_density", "crosses", "brk_run"):
+        if s.get(k) is None:
+            return None
+    d = _risk_d(s)
+    pk = s.get("pk_ext")
+    poke = abs(pk - s["e"]) / d if (pk is not None and d) else 0
+    g = s.get("g_spk")
+    bad = poke > 3 or (g is not None and g >= 8)
+    return (2 * (s["d1_streak"] >= 2) + (s["lv_touch24"] == 0) + (s["lvl_density"] <= 2)
+            + (s["crosses"] <= 4) + (s["brk_run"] <= 2) - (2 if bad else 0))
+
+
+def score_v8(s: dict):
+    """HTML 7.42 scoreV8(): ЛП-шорты крипты, «похожесть на The best» по баллам."""
+    if _side(s) != "short":
+        return None
+    pt = score_v8_pts(s)
+    if pt is None:
+        return None
+    B = ([0, 3.9] if pt <= 0 else [4, 4.6] if pt == 1 else [4.7, 5.3] if pt == 2 else [5.4, 5.9] if pt == 3
+         else [6, 7.9] if pt == 4 else [8, 8.9] if pt == 5 else [9, 10])
+    return B[0] + (B[1] - B[0]) * _p_pct(s)
+
+
+def score_long(s: dict):
+    """HTML 7.49 scoreLong(): ЛП-лонги крипты."""
+    if _side(s) != "long":
+        return None
+    ds = s.get("d1_streak")
+    if ds is None:
+        return None
+    vp = s.get("v6_poke")
+    pt = -1 if ds <= -2 else 2 * (ds >= 2) + (1 if (vp is not None and vp <= 1.385) else 0)
+    B = [0, 3.9] if pt < 0 else [4, 5.9] if pt == 0 else [6, 7.9] if pt == 1 else [8, 10]
+    return B[0] + (B[1] - B[0]) * _p_pct(s)
+
+
+def _r1(v: float) -> float:
+    return math.floor(v * 10 + 0.5) / 10
+
+
+def signal_score_show(feat: dict, strategy: str, market: str = "crypto") -> float:
+    """HTML 7.71 signalScore(): у ЛП крипты — scoreLong (лонги) → v8 → v7 → v6; остальное — как раньше.
+    Порядок/приоритет сигналов по-прежнему по v6 (prioOf, HTML 7.39) — это поле card['score']."""
+    if strategy != "brk" and market != "ru":
+        for fn in (score_long, score_v8, score_v7):
+            v = fn(feat)
+            if v is not None:
+                return _r1(v)
+    return signal_score(feat, strategy, market)
+
+
+def turn_day_at(h1c: list, i: int) -> float:
+    """HTML 7.10 turnDayAt(): оборот за 24 часа до сигнала включительно."""
+    v = 0.0
+    for k in range(max(0, i - 23), i + 1):
+        if 0 <= k < len(h1c):
+            v += h1c[k].vol_quote or 0
+    return v
+
+
 # ═══ The best (HTML 6.93, режим «edge») ═══
 BEST_SPK = 8
 BEST_POKE = 3
@@ -1253,6 +1355,7 @@ def evaluate_brk(
                 "v6_fresh": 1, "v6_poke": 0, "v6_covers": 1,
                 "v6_preAcc": 0, "v6_smooth": 0, "v6_d1Against": 0,
                 "atrD_pct": pit_atr_d / bar.c,
+                "lv": lv.price, "e": bar.c, "atrD": pit_atr_d, "turnD": turn_day_at(h1c, i),
             }
             sf.update(_extra_feats(
                 h1c, h1_upto, i, bar, lv, pit_levels, side, min_risk_b, side,
@@ -1514,8 +1617,10 @@ def evaluate_fbo(
                 side == "long", br_side, w, pit_atr_d, a_h1, d1c,
             ))
             sf.update(fbo_shape(h1c, hi_idx, lv.price, br_side, lv.formed_ts, pit_atr_d, v_med))
-            sf.update({"vol5mAvg": v_med / 12, "atrD": pit_atr_d, "e": bar.c, "side": side})
-            score = signal_score(sf, "fbo", market)
+            sf.update({"vol5mAvg": v_med / 12, "atrD": pit_atr_d, "e": bar.c, "side": side,
+                       "lv": lv.price, "turnD": turn_day_at(h1c, hi_idx)})
+            score = signal_score(sf, "fbo", market)            # приоритет (HTML prioOf: v6)
+            score_show = signal_score_show(sf, "fbo", market)  # показ/фильтр «мин. оценка» (HTML signalScore)
 
             cards.append({
                 "ticker": ticker,
@@ -1523,7 +1628,8 @@ def evaluate_fbo(
                 "score": score,
                 "fwd": [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[hi_idx + 1: hi_idx + 1 + hold_h(market)]],
                 "_ord": (hi_idx, li),
-                "feat": _card_feat(sf, "fbo", side, bar.ts, lv.kind, p, score),
+                "feat": _card_feat(sf, "fbo", side, bar.ts, lv.kind, p, score_show),
+                "score_show": score_show,
                 "strategy": "fbo",
                 "side": "LONG" if side == "long" else "SHORT",
                 "status": "SIGNAL",
@@ -1572,8 +1678,10 @@ def evaluate(
     no_night: bool = False,
     market: str = "crypto",
     ru_ctx: Optional[dict] = None,
+    k30: Optional[list[Bar]] = None,
 ) -> dict:
     """
+    k30: 30-минутки (HTML 7.58) — ложный пробой ловится на середине часа (только крипта, только ЛП).
     Точка входа для скринера. Уровни считаются point-in-time по UTC-дню внутри
     evaluate_brk/evaluate_fbo (как scanSymbol day-cache в HTML): на каждом часе
     lookback — cut = закрытые D1 до bar.ts + синтетический intraday день из H1,
@@ -1620,7 +1728,47 @@ def evaluate(
             threshold=fbo_threshold, lookback_hours=lookback_hours, no_night=no_night, market=market,
         ))
 
+    if k30 and "fbo" in strategies and market != "ru":
+        cards.extend(_half_hour_fbo(ticker, d1c, h4c, h1, h1c, k30, fbo_threshold,
+                                    lookback_hours, no_night, market))
     out["cards"] = cards
+    return out
+
+
+HALF_H = 1_800_000
+
+
+def _half_hour_fbo(ticker, d1c, h4c, h1, h1c, k30, threshold, lookback_hours, no_night, market) -> list[dict]:
+    """HTML 7.58 scanSymbol(): для каждого часа окна (и формирующегося) первая 30-минутка часа — как
+    закрытая часовая свеча; ЛП на ней = сигнал с середины часа (_src=30, вход в t+30 мин).
+    Свечи вперёд: вторая половина часа + следующие часы."""
+    by = {b.ts: b for b in k30}
+    start = max(60, len(h1c) - lookback_hours)
+    form_h = h1[-1].ts if (h1 and not h1[-1].confirmed) else None
+    hold = hold_h(market)
+    out = []
+    for i in range(start, len(h1c) + 1):
+        H = h1c[i].ts if i < len(h1c) else form_h
+        if H is None:
+            continue
+        a = by.get(H)
+        if not a or not a.confirmed:
+            continue
+        pb = Bar(ts=H, o=a.o, h=a.h, l=a.l, c=a.c, vol_quote=a.vol_quote or 0, confirmed=True)
+        part = h1c[:i] + [pb]
+        sg = evaluate_fbo(ticker, d1c, h4c, part, 0.0, [], "flat", threshold=threshold,
+                          lookback_hours=1, no_night=no_night, market=market)
+        b2 = by.get(H + HALF_H)
+        fwd = ([(b2.ts, b2.o, b2.h, b2.l, b2.c)] if (b2 and b2.confirmed) else []) + \
+              [(b.ts, b.o, b.h, b.l, b.c) for b in h1c[i + 1: i + 1 + hold]]
+        for c in sg:
+            if c["signal_ts"] != H:
+                continue
+            c["src30"] = True
+            c["feat"]["_src"] = 30
+            c["fwd"] = fwd
+            c["_ord"] = (i, c["_ord"][1], 30)
+            out.append(c)
     return out
 
 
@@ -1628,3 +1776,110 @@ if __name__ == "__main__":
     m = _load_model()
     print(VERSION, "params", PARAMS)
     print("model loaded:", len(m["trees"]), "trees, threshold", m.get("threshold"))
+
+
+# ═══ HTML 7.49 / 7.55: BTC-поводырь и связанность с BTC (для ЛП-лонгов крипты) ═══
+def btc_bias_compute(h1: list) -> dict | None:
+    """btcBiasCompute(): пробой/ЛП вчерашнего и 5-дневного хая/лоя BTC на H1; состояние держится 12 ч.
+    h1 — закрытые часовики BTC (Bar). Возвращает {ts: -1/0/1}."""
+    if not h1 or len(h1) < 200:
+        return None
+    D = 86_400_000
+    days: dict[int, list] = {}
+    for b in h1:
+        k = (b.ts // D) * D
+        x = days.get(k)
+        if x is None:
+            days[k] = [b.h, b.l]
+        else:
+            x[0] = max(x[0], b.h)
+            x[1] = min(x[1], b.l)
+    dk = sorted(days)
+    lv = {}
+    for i in range(1, len(dk)):
+        p = days[dk[i - 1]]
+        h5 = l5 = None
+        if i >= 5:
+            h5 = max(days[dk[j]][0] for j in range(i - 5, i))
+            l5 = min(days[dk[j]][1] for j in range(i - 5, i))
+        lv[dk[i]] = (p[0], p[1], h5, l5)
+    out = {}
+    cur, age = 0, 999
+    for i in range(1, len(h1)):
+        b, pc = h1[i], h1[i - 1].c
+        L = lv.get((b.ts // D) * D)
+        sg = 0
+        if L:
+            for H, Lo in ((L[0], L[1]), (L[2], L[3])):
+                if H is None:
+                    continue
+                if b.c > H and pc <= H:
+                    sg += 1
+                if b.h > H and b.c < H and pc < H:
+                    sg -= 1
+                if b.c < Lo and pc >= Lo:
+                    sg -= 1
+                if b.l < Lo and b.c > Lo and pc > Lo:
+                    sg += 1
+        if sg != 0:
+            cur, age = (1 if sg > 0 else -1), 0
+        else:
+            age += 1
+        out[b.ts] = cur if age < 12 else 0
+    return out
+
+
+def cbtc_tag(cards: list[dict], all_closes: dict) -> None:
+    """cbtcTag(): корреляция часовых лог-доходностей монеты и BTC за 168 ч до свечи сигнала (ЛП-лонги)."""
+    B = all_closes.get("BTC")
+    if not B or len(B) < 200:
+        return
+    bi = {ts: i for i, (ts, _c) in enumerate(B)}
+    cache: dict = {}
+    for card in cards:
+        s = card.get("feat") or {}
+        if card.get("market", "crypto") != "crypto" or card.get("strategy", "fbo") != "fbo" or s.get("d") != 1:
+            continue
+        t = card.get("ticker") or ""
+        base = t[:-4] if t.endswith("USDT") else (t.split("-")[0] if "-" in t else t)
+        C = all_closes.get(base)
+        if not C or len(C) < 200:
+            continue
+        if base not in cache:
+            cache[base] = {ts: i for i, (ts, _c) in enumerate(C)}
+        ci, j = cache[base].get(card["signal_ts"]), bi.get(card["signal_ts"])
+        if ci is None or j is None:
+            continue
+        xs, ys = [], []
+        for k in range(168):
+            if ci - k < 0 or ci - k - 1 < 0:
+                break
+            a, a0 = C[ci - k], C[ci - k - 1]
+            jb, jb0 = bi.get(a[0]), bi.get(a0[0])
+            if jb is None or jb0 is None:
+                continue
+            xs.append(math.log(a[1] / a0[1]))
+            ys.append(math.log(B[jb][1] / B[jb0][1]))
+        if len(xs) < 134:
+            continue
+        n = len(xs)
+        mx, my = sum(xs) / n, sum(ys) / n
+        sxy = sxx = syy = 0.0
+        for k in range(n):
+            dx, dy = xs[k] - mx, ys[k] - my
+            sxy += dx * dy
+            sxx += dx * dx
+            syy += dy * dy
+        s["cbtc"] = sxy / math.sqrt(sxx * syy) if (sxx > 0 and syy > 0) else None
+
+
+def btc_tag(cards: list[dict], bias: dict | None) -> None:
+    """mkTag(): btcBias по времени сигнала (крипта)."""
+    if not bias:
+        return
+    for card in cards:
+        if card.get("market", "crypto") != "crypto":
+            continue
+        v = bias.get(card["signal_ts"])
+        if v is not None:
+            card.setdefault("feat", {})["btcBias"] = v

@@ -21,6 +21,10 @@ SHORT_WINDOW_H = 168   # окно скана < недели → «не боле�
 MAXRISK = 0.20
 BE_TRIGGER_R = 1.5
 COIN_WINDOW_H = 12
+HALF_H = 1_800_000
+LONG_HOUR_CAP = 4   # HTML 7.50: не больше 4 ЛП-лонгов крипты в час (самые ликвидные)
+RU_STOP_ATR = 25    # HTML 7.36: MOEX — стоп не меньше 25% ATR дня
+RU_FRI_H = 20       # HTML 7.60: MOEX — выход в пятницу 20:00 МСК
 
 
 def _base(card: dict) -> str:
@@ -34,10 +38,15 @@ def _d(card: dict) -> int:
     return 1 if card["side"] == "LONG" else 0
 
 
+def sig_end(c: dict) -> int:
+    """HTML 7.58 sigEnd(): момент входа — закрытие часа или середина часа (30-минутка)."""
+    return int(c["signal_ts"]) + (HALF_H if c.get("src30") else 3_600_000)
+
+
 def dedup_list(cards: list[dict]) -> list[dict]:
-    """dedupList(): повторы одного уровня (±1%) по монете+типу в пределах 48 ч → первый по времени."""
+    """dedupList(): повторы одного уровня (±1%) по монете+типу в пределах 48 ч → самый ранний по моменту входа."""
     ty = lambda c: c.get("strategy", "fbo")
-    arr = sorted(cards, key=lambda c: (_base(c), ty(c), c["signal_ts"], c.get("_ord", (0, 0))))
+    arr = sorted(cards, key=lambda c: (_base(c), ty(c), sig_end(c), c.get("_ord", (0, 0))))
     groups = []
     cur = None
     for c in arr:
@@ -56,11 +65,32 @@ def dedup_list(cards: list[dict]) -> list[dict]:
     for g in groups:
         best = g["items"][0]
         for b in g["items"][1:]:
-            if b["signal_ts"] < best["signal_ts"] or (b["signal_ts"] == best["signal_ts"] and b["score"] > best["score"]):
+            if sig_end(b) < sig_end(best) or (sig_end(b) == sig_end(best) and b["score"] > best["score"]):
                 best = b
         out.append(best)
-    out.sort(key=lambda c: -c["signal_ts"])
+    out.sort(key=lambda c: -sig_end(c))
     return out
+
+
+def stop_k(card: dict, k: float) -> float:
+    """HTML stopK(): MOEX (не алго, режим «Интрадей») — стоп не меньше 25% ATR дня."""
+    if card.get("market") == "ru" and card.get("strategy") != "algo":
+        return max(float(k or 0), RU_STOP_ATR)
+    return k
+
+
+def ru_fri_cut(card: dict):
+    """HTML 7.60 ruFriCut(): MOEX — ближайшая пятница 20:00 МСК после входа (сделка закрывается)."""
+    if card.get("market") != "ru" or card.get("strategy") == "algo":
+        return None
+    ent = sig_end(card)
+    d = datetime.fromtimestamp((ent + 3 * 3_600_000) / 1000, tz=timezone.utc)
+    add = (5 - ((d.weekday() + 1) % 7) + 7) % 7
+    midnight = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp() * 1000)
+    cut = midnight + add * 86_400_000 + RU_FRI_H * 3_600_000 - 3 * 3_600_000
+    if cut <= ent:
+        cut += 7 * 86_400_000
+    return cut
 
 
 def recompute(card: dict, f: dict) -> dict | None:
@@ -69,8 +99,9 @@ def recompute(card: dict, f: dict) -> dict | None:
     atr_d = card.get("atr_d") or 0
     is_ru = card.get("market") == "ru"
     # новый HTML: стоп не меньше 1% для акций РФ (2% крипта), удержание 96ч РФ / 168ч крипта
-    risk = max((f["stop"] / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e)
+    risk = max((stop_k(card, f["stop"]) / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e)   # HTML 7.36
     hold = HOLD_RU if is_ru else HOLD
+    fri = ru_fri_cut(card)   # HTML 7.60
     if risk <= 0 or risk / e > MAXRISK:
         return None
     long_ = _d(card) == 1
@@ -80,6 +111,9 @@ def recompute(card: dict, f: dict) -> dict | None:
     cur_stop, moved = stop, False
     outcome, exit_t, last_ts = "open", card["signal_ts"], card["signal_ts"]
     for (ts, o, h, l, c) in card.get("fwd") or []:
+        if fri is not None and ts >= fri:
+            outcome, exit_t = "expired", last_ts
+            break
         if (ts - card["signal_ts"]) / 3_600_000 > hold:
             outcome, exit_t = "expired", last_ts
             break
@@ -95,11 +129,41 @@ def recompute(card: dict, f: dict) -> dict | None:
         if not moved and ((h >= be) if long_ else (l <= be)):
             cur_stop, moved = e, True
         last_ts = ts
+    if outcome == "open" and fri is not None and (card.get("fwd") or []) and last_ts + 3_600_000 >= fri:
+        outcome, exit_t = "expired", last_ts   # HTML 7.60: пятница 20:00 наступила
     return {**card, "stop": stop, "take": take, "risk": risk, "rp": risk / e, "o": outcome, "xt": exit_t}
 
 
-def _prio_key(c):  # orderRows: t desc, prio desc, base asc
-    return (-c["signal_ts"], -c["score"], _base(c))
+def algo_reject(card: dict, f: dict) -> bool:
+    """Новые правила passes() HTML 7.51–7.59 (до фильтров шаблона).
+    • ЛП: стоп обязан быть ЗА уровнем (шорт — стоп не ниже уровня, лонг — не выше), иначе сигнала нет.
+    • ЛП-лонги крипты: BTC-поводырь не медвежий, монета не падает 2+ дня, ≤4 ч за уровнем, корр. с BTC ≥0.5."""
+    s = card.get("feat") or {}
+    mkt = card.get("market", "crypto")
+    if card.get("strategy", "fbo") == "fbo" and mkt != "us":
+        lv, e, a = s.get("lv", card.get("level")), card.get("last"), card.get("atr_d")
+        if lv is not None and e is not None and a is not None:
+            ru = mkt == "ru"
+            risk = max((stop_k(card, f["stop"]) / 100.0) * a, (0.01 if ru else 0.02) * e)
+            if _d(card) == 1:
+                if e - risk > lv:
+                    return True
+            elif e + risk < lv:
+                return True
+    if mkt == "crypto" and card.get("strategy", "fbo") == "fbo" and _d(card) == 1:
+        if s.get("btcBias") is not None and s["btcBias"] < 0:
+            return True
+        if s.get("d1_streak") is not None and s["d1_streak"] <= -2:
+            return True
+        if s.get("brk_run") is not None and s["brk_run"] + 1 > 4:
+            return True
+        if s.get("cbtc") is not None and s["cbtc"] < 0.5:
+            return True
+    return False
+
+
+def _prio_key(c):  # orderRows: sigEnd desc, prio desc, base asc
+    return (-sig_end(c), -c["score"], _base(c))
 
 
 def _apply_coin_limit(rows):
@@ -117,23 +181,26 @@ def _apply_coin_limit(rows):
 
 
 def _cap_cluster(rows, cap):
-    if not cap or cap >= 99:
-        return sorted(rows, key=_prio_key)
-    by = {}
+    """HTML 7.33/7.50 capCluster(): лимит «сигналов в час» снят; у крипты — не больше 4 ЛП-лонгов в час
+    (самые ликвидные: оборот за сутки turnD, затем posMax, затем тикер). cap оставлен для совместимости."""
+    by, out = {}, []
     for s in rows:
-        by.setdefault((s["signal_ts"] // 3_600_000, _d(s)), []).append(s)
-    keep = []
+        if s.get("market", "crypto") == "crypto" and s.get("strategy", "fbo") == "fbo" and _d(s) == 1:
+            by.setdefault(s["signal_ts"] // 3_600_000, []).append(s)
+        else:
+            out.append(s)
     for g in by.values():
-        g.sort(key=lambda s: (-s["score"], _base(s)))
-        keep.extend(g[:int(cap)])
-    return sorted(keep, key=_prio_key)
+        g.sort(key=lambda s: (-((s.get("feat") or {}).get("turnD") or 0),
+                              -((s.get("feat") or {}).get("vol5mAvg") or 0), _base(s)))
+        out.extend(g[:LONG_HOUR_CAP])
+    return sorted(out, key=_prio_key)
 
 
 def _apply_sequential(rows, f):
     """applySequential() в режиме «Сигналы»: сделок в день + стоп-кран после серии стопов."""
     if f["daycap"] >= 99 and not f["streak"]:
         return rows
-    asc = sorted(rows, key=lambda s: (s["signal_ts"], -s["score"], _base(s)))
+    asc = sorted(rows, key=lambda s: (sig_end(s), -s["score"], _base(s)))
     out, per_day, pending = [], {}, []
     streak, paused_until = 0, 0
     for t in asc:
@@ -195,7 +262,7 @@ def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
         rows = [c for c in rows if c.get("strategy", "fbo") == strategy]
     ok = []
     for c in rows:
-        if not passes_html(c["feat"], f):
+        if algo_reject(c, f) or not passes_html(c["feat"], f):
             continue
         r = recompute(c, f)
         if r is None or r["rp"] * 100 > f["maxrisk"]:
@@ -229,7 +296,7 @@ def _best_week_cap(rows, reg_ts=None):
     HTML 7.01: счёт недели начинается с уже отобранных раньше (реестр The best) — те, что раньше первого
     сигнала списка и в той же неделе. reg_ts — время сигналов из реестра этого рынка."""
     from hwv1 import BEST_POKE, BEST_WEEK, best_poke
-    asc = sorted(rows, key=lambda s: (s["signal_ts"], -s["score"], _base(s)))
+    asc = sorted(rows, key=lambda s: (sig_end(s), -s["score"], _base(s)))
     cnt, keep = {}, []
     if asc and reg_ts:
         t0 = asc[0]["signal_ts"]
@@ -271,7 +338,7 @@ def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False,
                 and c.get("market", "crypto") == "crypto" and is_best_card(c)]
     ok = []
     for c in rows:
-        if not passes_html(c["feat"], f):
+        if algo_reject(c, f) or not passes_html(c["feat"], f):
             continue
         r = recompute(c, f)
         if r is None or r["rp"] * 100 > f["maxrisk"]:

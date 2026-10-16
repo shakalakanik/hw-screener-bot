@@ -229,7 +229,7 @@ async def fetch_tickers(
     return await fetch_tickers_okx(client, min_vol=min_vol, top_n=top_n)
 
 
-_BAR_MS = {"D": 86_400_000, "240": 4 * 3_600_000, "60": 3_600_000, "5": 300_000}
+_BAR_MS = {"D": 86_400_000, "240": 4 * 3_600_000, "60": 3_600_000, "30": 1_800_000, "5": 300_000}
 
 
 def _html_confirm(bars: list[Bar], interval: str) -> list[Bar]:
@@ -342,6 +342,59 @@ async def fetch_klines(
     return await fetch_klines_bybit(client, symbol, interval, limit, html_pages=html_pages)
 
 
+async def fetch_k30(client: httpx.AsyncClient, symbol: str, from_ts: int, inst_id: str | None = None) -> list[Bar]:
+    """HTML 7.58 ex.k30(): 30-минутки с from_ts (ложный пробой на середине часа). Ошибка → [] (как k30Bars)."""
+    seen: dict[int, Bar] = {}
+    try:
+        if _active_exchange == "okx":
+            after, ep = None, "candles"
+            for _p in range(40):
+                params = {"instId": inst_id or symbol, "bar": "30m", "limit": 300 if ep == "candles" else 100}
+                if after:
+                    params["after"] = after
+                d = await _get_okx(client, f"/api/v5/market/{ep}", params)
+                if str(d.get("code")) != "0":
+                    break
+                page = d.get("data") or []
+                if not page:
+                    if ep == "candles":
+                        ep = "history-candles"
+                        continue
+                    break
+                for k in page:
+                    k = list(k) + ["0"] * 9
+                    vq = float(k[7] or 0) if k[7] not in (None, "") else float(k[6] or 0)
+                    seen[int(k[0])] = Bar(ts=int(k[0]), o=float(k[1]), h=float(k[2]), l=float(k[3]),
+                                          c=float(k[4]), vol_quote=vq or 0.0)
+                after = min(int(k[0]) for k in page)
+                if after <= from_ts:
+                    break
+        else:
+            end = None
+            for _p in range(10):
+                params = {"category": "linear", "symbol": symbol, "interval": "30", "limit": 1000}
+                if end:
+                    params["end"] = end
+                d = await _get_bybit(client, "/v5/market/kline", params)
+                page = d.get("result", {}).get("list", []) if str(d.get("retCode", 0)) == "0" else []
+                if not page:
+                    break
+                for k in page:
+                    seen[int(k[0])] = Bar(ts=int(k[0]), o=float(k[1]), h=float(k[2]), l=float(k[3]),
+                                          c=float(k[4]), vol_quote=float(k[6]))
+                end = min(int(k[0]) for k in page) - 1
+                if end < from_ts:
+                    break
+    except Exception as e:
+        logger.debug("k30 %s: %s", symbol, e)
+        return []
+    now = int(time.time() * 1000)
+    out = sorted(seen.values(), key=lambda b: b.ts)
+    for b in out:
+        b.confirmed = (b.ts + 1_800_000) <= now
+    return out
+
+
 def html_avg_turn(d1: list[Bar], win_h: int, now_ms: int | None = None) -> float:
     """Средний дневной оборот для отбора инструментов — как HTML (кнопка «Сканировать»):
     закрытые D1 внутри окна; если их меньше 3 — последние 3 закрытых (фикс окна 24 ч)."""
@@ -375,22 +428,26 @@ async def scan_one(
         # От глубины зависят ATR (RMA с начала ряда) и «свободная зона» — поэтому 1:1.
         d1n = min(450, -(-lb // 24) + 60)
         need = min(9100, lb + 280)
-        d1, h1 = await asyncio.gather(
+        k30_from = int(time.time() * 1000) - min(lb + 8, 720) * 3_600_000   # HTML 7.58: 30-минутки ≤30 дней
+        d1, h1, k30 = await asyncio.gather(
             fetch_klines(client, symbol, "D", limit=d1n, inst_id=inst_id, html_pages=True),
             fetch_klines(client, symbol, "60", limit=need, inst_id=inst_id, html_pages=True),
+            fetch_k30(client, symbol, k30_from, inst_id=inst_id),
         )
 
         # Порог модели в скане не применяем (как scanSymbol в HTML) — решает шаблон.
         # no_night — чекбокс «без ночи» в HTML (по умолчанию включён).
         result = evaluate(
             symbol, last, bid, ask, d1, [], h1, [], 0,
-            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lb + 8,
+            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lb + 8, k30=k30,
         )
         from html_pipeline import dedup_list
         cards = dedup_list(result.get("cards", []))
         # Для отбора инструментов: средний дневной оборот за окно (HTML perCoin.avg)
         turn = html_avg_turn(d1, lb)
-        return {"cards": cards, "turn": turn, "base": _card_base({"ticker": symbol})}
+        h1c = [b for b in h1 if b.confirmed]
+        return {"cards": cards, "turn": turn, "base": _card_base({"ticker": symbol}),
+                "h1c": h1c}   # HTML 7.49/7.55: закрытия всех монет — для BTC-поводыря и связанности с BTC
     except Exception as e:
         logger.warning("scan_one %s error: %s", symbol, e)
         return {"cards": [], "turn": 0.0, "base": ""}
@@ -435,6 +492,8 @@ def _f_from_template(raw: dict, market: str | None = None, strategy: str | None 
                 continue
         if v is None or v == "auto":
             f[k] = dv
+        elif k == "side" and v == "both":
+            f[k] = None   # HTML 7.56: «оба» — обе стороны (ЛП-лонги только вручную)
         elif k in _F_STR:
             f[k] = str(v)
         elif k in _F_INT:
@@ -492,6 +551,8 @@ def passes_html(s: dict, f: dict) -> bool:
         else:
             if s["ru_ixS"] == 0:
                 return False
+            if (time.gmtime(s["t"] / 1000).tm_hour + 3) % 24 <= 11:
+                return False   # HTML 7.25: лонг с 07:00 до 11:59 МСК не берём
             if s["ru_ixS"] != 7 and str(s.get("k") or "").startswith("5d"):
                 return False
             rx = 1
@@ -1112,7 +1173,22 @@ async def _scan_crypto_html(
     cards = _select_universe(results, n_inst, min_vol)
     for c in cards:
         c["market"] = "crypto"
+    tag_crypto_cards(cards, results)
     return cards
+
+
+def tag_crypto_cards(cards: list[dict], results: list) -> None:
+    """HTML 7.49/7.55 (scanUniverse): btcBias (поводырь BTC) и cbtc (корреляция с BTC) — для ЛП-лонгов."""
+    from hwv1 import btc_bias_compute, btc_tag, cbtc_tag
+    series = {r["base"]: r["h1c"] for r in results if isinstance(r, dict) and r.get("base") and r.get("h1c")}
+    try:
+        btc_tag(cards, btc_bias_compute(series.get("BTC")))
+    except Exception as e:
+        logger.debug("btc bias: %s", e)
+    try:
+        cbtc_tag(cards, {b: [(x.ts, x.c) for x in v] for b, v in series.items()})
+    except Exception as e:
+        logger.debug("cbtc: %s", e)
 
 
 def _week_quota_filter(chat_id: int, cards: list[dict], week_max: int) -> list[dict]:
@@ -1267,14 +1343,26 @@ async def _deliver_html(
                     chosen[key] = {**c, "matched_template": name, "template_thr": thr,
                                    "is_best": mkt in ("crypto", "ru") and best_key(c) in best_keys}
 
+        # HTML 7.58: сигнал с середины часа (30-минутка) — вход в t+30 мин. В Telegram/журнал уходит со
+        # signal_ts = t − 30 мин, чтобы показанное время (signal_ts + 1 ч) было моментом входа и ключ отправки
+        # отличался от часового сигнала того же часа. Окно отправки считаем по исходному бару (bar_ts).
+        for k, c in list(chosen.items()):
+            if "score_show" in c:   # HTML signalScore (7.42 v8 / 7.49 лонги) — показываемая оценка
+                c = chosen[k] = {**c, "score": c["score_show"], "score_prio": c["score"]}
+                c.pop("score_show", None)
+            elif c.get("market", "crypto") == "crypto" and c.get("strategy") == "brk":
+                c = chosen[k] = {**c, "score": None}   # HTML 7.40: у пробоя крипты оценка не показывается
+            if c.get("src30") and "bar_ts" not in c:
+                chosen[k] = {**c, "bar_ts": int(c["signal_ts"]), "signal_ts": int(c["signal_ts"]) - 1_800_000}
         # Счётчики для прозрачности (ручной «Скан» пишет итог: найдено как в HTML → отправлено).
         st = {"found": len(chosen), "too_old": 0, "night": 0, "already": 0, "level_dup": 0,
               "conc": 0, "sent": 0,
               "exchange": ("OKX" if _active_exchange == "okx" else "Bybit")}
         fresh = []
         for c in chosen.values():
-            if (int(c["signal_ts"]) < min_send_ts if min_send_ts is not None
-                    else now_ms - int(c["signal_ts"]) > MAX_SIGNAL_AGE_MS):
+            ts_chk = int(c.get("bar_ts", c["signal_ts"]))
+            if (ts_chk < min_send_ts if min_send_ts is not None
+                    else now_ms - ts_chk > MAX_SIGNAL_AGE_MS):
                 st["too_old"] += 1
             elif c.get("market", "crypto") == "crypto" and not crypto_send_hour_ok(c["signal_ts"]):
                 st["night"] += 1   # ночь: не шлём и не помечаем отправленным

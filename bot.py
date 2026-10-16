@@ -2275,7 +2275,7 @@ async def _scan_pass(markets: list[str], label: str, send_hours: int = 1) -> Non
             only_markets=markets,
         )
         dur = time.time() - t0
-        late = label != "ru" and time.time() - hour_start > SCAN_SEND_DEADLINE_S
+        late = label == "crypto/algo" and time.time() - hour_start > SCAN_SEND_DEADLINE_S
         (logger.warning if late else logger.info)(
             "Авто-скан %s: отправлено новых карточек=%d, длительность %.1f с, завершён в HH:%s%s",
             label, n, dur, time.strftime("%M:%S", time.gmtime(time.time())),
@@ -2302,6 +2302,17 @@ async def scan_loop():
                 )
         except Exception:
             logger.exception("Ошибка проверки исходов сигналов")
+
+
+# HTML 7.58: два скана крипты в час — на закрытии часа и на 30-й минуте (ложный пробой на середине часа).
+CRYPTO_HALF_DELAY_S = 30 * 60 + 40
+
+
+async def scan_loop_half():
+    while True:
+        nxt = next_scan_ts(time.time(), CRYPTO_HALF_DELAY_S)
+        await asyncio.sleep(max(0.0, nxt - time.time()))
+        await _scan_pass(["crypto"], "crypto30")
 
 
 async def scan_loop_ru():
@@ -2357,6 +2368,7 @@ async def main():
 
     asyncio.create_task(scan_loop())
     asyncio.create_task(scan_loop_ru())
+    asyncio.create_task(scan_loop_half())
     await dp.start_polling(bot)
 
 
