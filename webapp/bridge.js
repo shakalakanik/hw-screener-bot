@@ -91,6 +91,8 @@
     return h;
   }
 
+  window.__hwApiHeaders = apiHeaders;   // для перехвата fetch рыночных данных (см. HEAD_SNIPPET в webapp_server.py)
+
   async function api(method, path, body) {
     var opts = { method: method, headers: apiHeaders() };
     if (body !== undefined) opts.body = JSON.stringify(body);
