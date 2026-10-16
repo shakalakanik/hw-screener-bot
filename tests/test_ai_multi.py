@@ -26,14 +26,14 @@ CASES = [
   [M("crypto",True), A("crypto",True,"fbo"), M("ru",True), A("ru",True,"brk")]),
  ("включи мосбиржу и выключи крипту", [M("ru",True), M("crypto",False)]),
  ("Выключи КРИПТУ, включи МОСБИРЖУ", [M("crypto",False), M("ru",True)]),
- ("всё выключи кроме крипты", [M("crypto",True), M("ru",False), M("algo",False)]),
+ ("всё выключи кроме крипты", [M("crypto",True), M("ru",False)]),
  ("включи крипту и мосбиржу", [M("crypto",True), M("ru",True)]),
  ("вкючи крепту авто оба", [M("crypto",True), A("crypto",True,"both")]),          # опечатки
  ("влючи мосбржу авто на лп", [M("ru",True), A("ru",True,"fbo")]),
  ("выключи авто на крипте", [A("crypto",False)]),
- ("включи алго и выключи мосбиржу", [M("algo",True), M("ru",False)]),
- ("включи только крипту", [M("crypto",True), M("ru",False), M("algo",False)]),
- ("включи все рынки", [M("crypto",True), M("ru",True), M("algo",True)]),
+ ("включи алго и выключи мосбиржу", []),
+ ("включи только крипту", [M("crypto",True), M("ru",False)]),
+ ("включи все рынки", [M("crypto",True), M("ru",True)]),
  ("мосбиржу авто пробой, крипту выключи", [M("ru",True), A("ru",True,"brk"), M("crypto",False)]),
 ]
 AMBIG = ["на крипте только лучший сигнал", "включи на пробой", "поставь крипте пробой", "что такое ATR", "сделай хорошо"]
@@ -105,7 +105,7 @@ class _C:
     class aio: models = _Models()
 os.environ["GEMINI_API_KEY"] = "fake"; ai_chat._client = lambda: _C()
 r = asyncio.run(ai_chat.chat("выключи алго, а на крипте убери авто — и подумай что ещё", [], bot._ai_user_context(U1)))
-ok = r.proposal and norm(r.proposal["actions"]) == [M("algo",False), A("crypto",False)]
+ok = r.proposal and norm(r.proposal["actions"]) == [A("crypto",False)]
 fails += not ok; print("OK  " if ok else "FAIL", "mocked Gemini multi", r.proposal)
 # шаблоны: fuzzy-имена, set_strategy, ненайденный → заметка; результат == кнопки tpl:/strat:
 for u in (U1, U2):
