@@ -168,7 +168,7 @@
         if (!out.fm && parts[3]) out.fm = parts[3];
       }
     }
-    out.fm = (/^(ru|moex|мосбиржа)$/i.test(out.fm)) ? 'ru' : (/^(algo|a)$/i.test(out.fm) ? 'algo' : (out.fm ? 'crypto' : ''));
+    out.fm = (/^(ru|moex|мосбиржа)$/i.test(out.fm)) ? 'ru' : (out.fm ? 'crypto' : '');
     return (out.tab === 'watch' || out.base) ? out : null;
   }
 
@@ -281,7 +281,7 @@
     if (!m) return null;
     var c = m[1].toLowerCase();
     return {
-      market: c === 'm' ? 'ru' : c === 'a' ? 'algo' : 'crypto',
+      market: c === 'm' ? 'ru' : 'crypto',   // 16.10: «Крипта (Алго)» убрана
       id: m[2] ? (parseInt(m[2], 10) || 0) : 0
     };
   }
@@ -291,7 +291,7 @@
     var m = (location.pathname || '').match(/\/journal\/(crypto|moex|ru|algo)(?:\/(\d+))?/i);
     if (m) {
       fromPath = true;
-      market = /^(moex|ru)$/i.test(m[1]) ? 'ru' : /^algo$/i.test(m[1]) ? 'algo' : 'crypto';
+      market = /^(moex|ru)$/i.test(m[1]) ? 'ru' : 'crypto';
       id = m[2] ? (parseInt(m[2], 10) || 0) : 0;
     }
     if (!fromPath) {
@@ -301,7 +301,7 @@
         var q = new URLSearchParams(location.search || '');
         if ((q.get('tab') || '') === 'journal') {
           var fm = (q.get('fm') || '').toLowerCase();
-          market = (fm === 'ru' || fm === 'moex') ? 'ru' : fm === 'algo' ? 'algo' : 'crypto';
+          market = (fm === 'ru' || fm === 'moex') ? 'ru' : 'crypto';
           id = parseInt(q.get('jid') || '0', 10) || 0;
         }
       } catch (e) {}
@@ -403,13 +403,16 @@
   var jWatchItems = {};
   function journalWatchItem(row) {
     var c = row.card || {};
-    var m = row.market === 'ru' ? 'ru' : row.market === 'algo' ? 'algo' : 'crypto';
+    var m = row.market === 'ru' ? 'ru' : 'crypto';
     var tick = String(row.ticker || c.ticker || '');
     var base = m === 'ru' ? tick : tick.replace(/USDT$/i, '');
     if (!base) return null;
     var ts = parseInt(c.signal_ts || row.signal_ts || 0, 10);
     if (!ts) return null;
     if (ts < 1e12) ts *= 1000;   // секунды → мс
+    // HTML 7.58: сигнал с середины часа — в карточке signal_ts = bar_ts − 30 мин, в движке t = bar_ts и _src = 30
+    var src30 = !!c.src30 && c.bar_ts;
+    if (src30) { ts = parseInt(c.bar_ts, 10); if (ts < 1e12) ts *= 1000; }
     var side = String(c.side || '').toUpperCase() === 'SHORT' ? 'SHORT' : 'LONG';
     var n = function (v) { var x = Number(v); return isNaN(x) ? 0 : x; };
     var e = n(c.last != null ? c.last : c.entry), st = n(c.stop);
@@ -420,7 +423,9 @@
       lv: n(c.level), k: c.kind || '', p: n(c.prob), e: e, st: st, tk: n(c.take),
       rp: e ? Math.abs(e - st) / Math.abs(e) : 0,
       strength: c.strength != null ? c.strength : 3, crosses: 0, vol_mult: 1,
-      score: (c.score != null && c.score !== '' && !isNaN(Number(c.score))) ? Number(c.score) : null
+      score: (c.score != null && c.score !== '' && !isNaN(Number(c.score))) ? Number(c.score) : null,
+      _src: src30 ? 30 : undefined, sw: c.sw === 2 ? 2 : undefined,
+      swm: (c.swm === 0 || c.swm === 1) ? c.swm : undefined
     };
   }
   function journalIsWatched(t) {
@@ -458,6 +463,121 @@
     try { if (typeof window.syncEyeButtons === 'function') window.syncEyeButtons(); } catch (e3) {}
   }
 
+  /* ---- Статус сделки в журнале (HTML 7.18/7.46 sigStatus): активна ±R / тейк / стоп / безубыток / закрыта по времени.
+   * Пересчёт по свежим часовым свечам — тем же движком 7.71, что «Отслеживаю» (halfBarAfter, beROf, holdOfT, ruFriCut).
+   * Результат кэшируется на устройстве (hw_jstatus); «🔄 Обновить» пересчитывает раздел текущего рынка. */
+  var JST_KEY = 'hw_jstatus', jstCache = null, jstBusy = false, jstAutoDone = {};
+  function jstLoad() { if (jstCache) return jstCache; try { jstCache = JSON.parse(localStorage.getItem(JST_KEY) || '{}') || {}; } catch (e) { jstCache = {}; } return jstCache; }
+  function jstSave() { try { localStorage.setItem(JST_KEY, JSON.stringify(jstCache || {})); } catch (e) {} }
+  function jStatusGet(id) { return jstLoad()[String(id)] || null; }
+  function jR(r) { return (r >= 0 ? '+' : '') + Number(r).toFixed(2) + 'R'; }
+  function jStatusHtml(st) {
+    if (!st) return '<span class="muted">—</span>';
+    if (st.nodata) return '<span class="muted">нет свечей</span>';
+    if (st.o === 'take') return '<span class="take">тейк</span>' + (st.r != null ? ' <span class="muted" style="font-size:11px">' + jR(st.r) + '</span>' : '');
+    if (st.o === 'stop') return '<span class="stop">стоп</span> <span class="muted" style="font-size:11px">−1.00R</span>';
+    if (st.o === 'be') return '<span class="muted">безубыток</span> <span class="muted" style="font-size:11px">0.00R</span>';
+    if (st.o === 'expired') return '<span class="muted">закрыта по времени</span>' + (st.r != null ? ' <span class="muted" style="font-size:11px">' + jR(st.r) + '</span>' : '');
+    if (st.r != null) return '<span class="' + (st.r >= 0 ? 'take' : 'stop') + '">' + jR(st.r) + '</span> <span class="muted" style="font-size:11px">активна' + (st.be ? ' · БУ' : '') + '</span>';
+    return '<span class="muted">активна</span>';
+  }
+  function jStatusPaint(root) {
+    var els = (root || document).querySelectorAll('.hw-j-status');
+    for (var i = 0; i < els.length; i++) els[i].innerHTML = jStatusHtml(jStatusGet(els[i].getAttribute('data-jid')));
+  }
+  function jExFor(m) {
+    /* global MOEX, Bybit, EX */
+    if (m === 'ru') return (typeof MOEX !== 'undefined') ? MOEX : null;
+    try { if (typeof EX !== 'undefined' && EX && (typeof MOEX === 'undefined' || EX !== MOEX)) return EX; } catch (e) {}
+    return (typeof Bybit !== 'undefined') ? Bybit : null;
+  }
+  async function jEvalTrade(t) {
+    var ex = jExFor(t.mkt);
+    if (!ex || !t.e || !t.st || !t.tk) return null;
+    var need = Math.max(400, Math.ceil((Date.now() - t.t) / 3600000) + 50);
+    var h1 = await ex.kline(t.sym, '1h', need);
+    var half = [];
+    try { if (typeof halfBarAfter === 'function') half = await halfBarAfter(ex, t); } catch (e) { half = []; }
+    var after = half.concat(h1.filter(function (b) { return b.ts > t.t; }));
+    if (!h1.length || h1[0].ts > t.t) return { nodata: true };
+    var risk = Math.abs(t.e - t.st); if (!(risk > 0)) return null;
+    var beR = typeof beROf === 'function' ? beROf(t) : 1.5;
+    var beLvl = t.d ? t.e + beR * risk : t.e - beR * risk;
+    var fri = typeof ruFriCut === 'function' ? ruFriCut(t) : null;
+    var hold = typeof holdOfT === 'function' ? holdOfT(t) : 168;
+    var cur = t.st, moved = false, lc = null, res = null, r = null;
+    var rLc = function () { return lc == null ? 0 : (t.d ? lc - t.e : t.e - lc) / risk; };
+    for (var i = 0; i < after.length; i++) {
+      var b = after[i];
+      if (fri != null && b.ts >= fri) { res = 'expired'; r = rLc(); break; }
+      if ((b.ts - t.t) / 3600000 > hold) { res = 'expired'; r = rLc(); break; }
+      var hs = t.d ? b.l <= cur : b.h >= cur, ht = t.d ? b.h >= t.tk : b.l <= t.tk;
+      if (hs) { res = moved ? 'be' : 'stop'; r = moved ? 0 : -1; break; }
+      if (ht) { res = 'take'; r = Math.abs(t.tk - t.e) / risk; break; }
+      if (beR > 0 && !moved && (t.d ? b.h >= beLvl : b.l <= beLvl)) { cur = t.e; moved = true; }
+      lc = b.c;
+    }
+    if (!res && fri != null && after.length && after[after.length - 1].ts + 3600000 >= fri) { res = 'expired'; r = rLc(); }
+    if (!res) { var p = h1.length ? h1[h1.length - 1].c : null; r = p != null ? (t.d ? p - t.e : t.e - p) / risk : null; }
+    return { o: res || 'open', r: r, be: moved, at: Date.now() };
+  }
+  async function jStatusRun(rows, onlyMissing) {
+    if (jstBusy || !rows || !rows.length) return;
+    jstBusy = true;
+    var cache = jstLoad(), list = [];
+    for (var i = 0; i < rows.length; i++) {
+      var st = cache[String(rows[i].id)];
+      if (onlyMissing && st && (st.o !== 'open' || (Date.now() - (st.at || 0)) < 15 * 60000)) continue;
+      var t = journalWatchItem(rows[i]); if (t) list.push([rows[i].id, t]);
+    }
+    var prog = document.querySelector('.hw-j-prog'), btn = document.querySelector('.hw-j-refresh');
+    if (btn) btn.disabled = true;
+    var done = 0, idx = 0;
+    async function worker() {
+      while (idx < list.length) {
+        var it = list[idx++];
+        try { var st = await jEvalTrade(it[1]); if (st) cache[String(it[0])] = st; } catch (e) {}
+        done++; if (prog) prog.textContent = done + '/' + list.length;
+      }
+    }
+    try { await Promise.all([worker(), worker(), worker(), worker()]); } finally {
+      jstSave(); jstBusy = false;
+      if (btn) btn.disabled = false;
+      if (prog) prog.textContent = list.length ? 'обновлено' : '';
+      jStatusPaint(document.getElementById('journalBody'));
+    }
+  }
+  function jStatusAuto(rows) {
+    var cur = curMarket();
+    var body = document.getElementById('journalBody');
+    if (body && !body.__hwJstArmed) {
+      body.__hwJstArmed = true;
+      body.addEventListener('click', function (ev) {
+        var b = ev.target && ev.target.closest ? ev.target.closest('.hw-j-refresh') : null;
+        if (!b) return;
+        ev.preventDefault();
+        var d = lastJournalData || {}; jStatusRun(d[curMarket()] || [], false);
+      });
+    }
+    if (jstAutoDone[cur]) return;
+    jstAutoDone[cur] = true;
+    setTimeout(function () { jStatusRun(rows, true); }, 300);   // только сделки без статуса или открытые (старше 15 мин)
+  }
+
+  /* HTML 7.37: режим Мосбиржи «Интрадей/Свинг» — настройка пользователя из бота (⚙️ Фильтр → Мосбиржа) */
+  function syncRuMode() {
+    fetch(journalAuthUrl('/api/me'), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.ru_mode) return;
+        var m = d.ru_mode === 'swing' ? 'swing' : 'intraday';
+        try { localStorage.setItem('hw_ru_mode', m); } catch (e) {}
+        /* global RU_MODE */
+        try { if (typeof RU_MODE !== 'undefined' && RU_MODE !== m) { RU_MODE = m; if (typeof renderScan === 'function' && typeof MKT !== 'undefined' && MKT === 'ru') renderScan(); } } catch (e) {}
+      }).catch(function () {});
+  }
+  setTimeout(syncRuMode, 500);
+
   function journalCardHtml(row) {
     var c = row.card || {};
     var side = String(c.side || '');
@@ -471,7 +591,7 @@
     var strat = c.strategy === 'brk' ? '📈 Пробой' : c.strategy === 'algo' ? ('⚡ Алго' + (c.algo_combo ? ': ' + jEsc(c.algo_combo) : '')) : '🔻 Ложный пробой';
     var prob = (c.strategy === 'fbo' && c.prob != null && c.prob !== '')
       ? '  (модель p=' + Number(c.prob).toFixed(2) + ')' : '';
-    var mkt = row.market === 'ru' ? '🇷🇺 Мосбиржа' : row.market === 'algo' ? '⚡ Крипта (Алго)' : '🌐 Крипта';
+    var mkt = row.market === 'ru' ? '🇷🇺 Мосбиржа' : '🌐 Крипта';
     var tpl = c.matched_template ? '<div><span>шаблон</span> <b>' + jEsc(c.matched_template) + '</b></div>' : '';
     var score = (c.score != null && c.score !== '')
       ? ('⭐ Оценка: <b>' + Number(c.score).toFixed(1) + '</b> / 10')
@@ -496,7 +616,8 @@
         '<div><span>стоп-лосс</span> <b class="stop">' + jFmt(stop) + '  (−' + risk.toFixed(1) + '%)</b></div>' +
         '<div><span>тейк-профит</span> <b class="take">' + jFmt(take) + '  (+' + tp.toFixed(1) + '%)</b></div>' +
         '<div><span>оценка</span> ' + score + '</div>' +
-        // signal_ts = открытие H1-бара; показываем закрытие (+1ч), как HTML new Date(t+3600000)
+        '<div><span>статус</span> <b class="hw-j-status" data-jid="' + jEsc(row.id) + '">' + jStatusHtml(jStatusGet(row.id)) + '</b></div>' +
+        // signal_ts = открытие H1-бара (у 30-минутного сигнала — bar_ts − 30 мин); показываем момент входа (+1ч), как HTML sigEnd(t)
         '<div><span>сигнал</span> <b>' + jEsc(jMsk((Number(c.signal_ts || row.signal_ts) || 0) && (Number(c.signal_ts || row.signal_ts) + 3600000))) + '</b></div>' +
       '</div>' +
       '<div class="charts">' +
@@ -520,7 +641,9 @@
     } else {
       for (var i = 0; i < rows.length; i++) inner += journalCardHtml(rows[i]);
     }
-    return '<div class="card" id="journalSec-' + market + '"><div class="sect"><span>' + title + '</span></div>' + inner + '</div>';
+    var btn = (rows && rows.length) ? ' <button type="button" class="hw-j-refresh" style="margin-left:8px;padding:4px 10px;font-size:13px">🔄 Обновить</button>' +
+      '<span class="hw-j-prog muted" style="margin-left:6px;font-size:12px"></span>' : '';
+    return '<div class="card" id="journalSec-' + market + '"><div class="sect"><span>' + title + '</span>' + btn + '</div>' + inner + '</div>';
   }
 
   function armJournalCharts(root) {
@@ -592,14 +715,14 @@
   /* ---- Переключатель рынка вверху: Крипта | Мосбиржа | Крипта (Алго) ----
    * Использует штатный #mkt / applyMarket() скринера (per-market state: шаблоны, бэктест,
    * тестер, скан, «Отслеживаю»). Журнал фильтруется здесь. */
-  var MKT_LABELS = [['crypto', 'Крипта'], ['ru', 'Мосбиржа'], ['algo', 'Крипта (Алго)']];
+  var MKT_LABELS = [['crypto', 'Крипта'], ['ru', 'Мосбиржа']];   // 16.10: «Крипта (Алго)» убрана
   function curMarket() {
     var mk = document.getElementById('mkt');
     var v = mk && mk.value;
-    return (v === 'ru' || v === 'algo') ? v : 'crypto';
+    return v === 'ru' ? 'ru' : 'crypto';
   }
   function setMarket(m) {
-    m = (m === 'moex' || m === 'ru') ? 'ru' : (m === 'algo' ? 'algo' : 'crypto');
+    m = (m === 'moex' || m === 'ru') ? 'ru' : 'crypto';
     var mk = document.getElementById('mkt');
     if (mk && mk.value !== m) {
       mk.value = m;
@@ -668,14 +791,15 @@
     var t = parseJournalTarget();
     var crypto = (data && data.crypto) || [];
     var ru = (data && data.ru) || [];
-    var algo = (data && data.algo) || [];
     lastJournalData = data || {};
-    var secs = { crypto: ['Крипта', crypto], ru: ['Мосбиржа', ru], algo: ['Крипта (Алго)', algo] };
+    var secs = { crypto: ['Крипта', crypto], ru: ['Мосбиржа', ru] };
     // Только раздел выбранного вверху рынка (deep link уже переключил рынок на свой)
     var cur = curMarket();
     jWatchItems = {};
     var html = journalSectionHtml(cur, secs[cur][0], secs[cur][1]);
     body.innerHTML = html;
+    jStatusPaint(body);
+    jStatusAuto(secs[cur][1]);
     if (!body.__hwEyeArmed) {
       body.__hwEyeArmed = true;
       body.addEventListener('click', onJournalEye);
@@ -850,6 +974,7 @@
     /* global scanSymbol, lastClosed, atr, approachAtr, d1Streak, signalScore, isBestFBO, bestPoke, BEST_POKE, MKT, HW_FEAT_KEYS */
     // только крипта: у MOEX признаки индекса (IMOEX) и ruCluster считаются по всему списку — их даёт сам движок
     if (typeof scanSymbol !== 'function' || MKT !== 'crypto') return false;
+    if (t._src === 30) return false;   // 7.58: сигнал с середины часа — признаки уже посчитаны на его момент
     var h1c = lastClosed(h1), idx = -1;
     for (var i = 0; i < h1c.length; i++) if (h1c[i].ts === t.t) { idx = i; break; }
     if (idx < 60) return false;

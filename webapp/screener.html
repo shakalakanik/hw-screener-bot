@@ -77,7 +77,7 @@ progress{width:100%;height:6px;margin-top:8px}
 <div class="card">
   <div class="row">
     <div class="field"><label>Рынок</label>
-      <select id="mkt"><option value="crypto">Крипта</option><option value="ru">Акции РФ (MOEX)</option><option value="algo">Крипта (Алго)</option></select></div>
+      <select id="mkt"><option value="crypto">Крипта</option><option value="ru">Акции РФ (MOEX)</option></select></div>
     <div class="field" id="fldScStrat"><label>Стратегия</label><select id="sc_strat"><option value="fbo">Ложный пробой</option><option value="brk">Пробой</option><option value="both">Оба</option></select></div>
     <div class="field" id="fldScSide"><label>Сторона</label>
       <select id="sc_side" class="flt" title="«Авто»: для ложного пробоя — только SHORT, для пробоя/«Оба» — обе стороны">
@@ -1279,7 +1279,7 @@ const isClosed=t=>t.o==='take'||t.o==='stop'||t.o==='be'||t.o==='expired';
 function sumNet(rows){ let s=0; for(const t of rows) if(isClosed(t)&&t.nr!=null) s+=t.nr; return s; }
 const HOLD_CRYPTO=168, HOLD_RU=96,   // 6.94: MOEX — 4 суток (было 48 ч): ход 3R при стопе 1% занимает дни
       LOOKBACK=6, MAXRISK=0.20;
-function getHold(){ return MKT==='ru'?HOLD_RU:HOLD_CRYPTO; }
+function getHold(){ return isRuMoney()?HOLD_RU:HOLD_CRYPTO; }
 const HOLD=168; // fallback — заменяем ниже через getHold() в recompute и scanSymbol
 let LAST=[], BT=[], REGIME=null, EX=null, MKT='crypto';
 let SC_BEST=false, BT_BEST=false;   // «The best» (ТЕСТОВЫЙ режим): отдельно для вкладок «Сигналы» и «Бэктест»
@@ -1350,7 +1350,9 @@ function readF(pfx){
     }
     else if(v==='auto'&&id==='side'){
       // «авто» для стороны: ложный пробой — только SHORT, пробой/оба — обе стороны
-      f[id]=stratOf(pfx)==='fbo'?0:DEF[id];
+      f[id]=stratOf(pfx)==='fbo'?0:DEF[id];   // 7.56: «авто» — ЛП только SHORT (лонги зависят от рынка, своей игры нет); лонги — вручную «оба»/«только LONG»
+    }
+    else if(v==='both'&&id==='side'){ f[id]=null;
     }
     else if(v==='auto') f[id]=DEF[id];
     else if(['kind','hours','daypos','dow','appr','atrr','round','green','atrd'].includes(id)) f[id]=v;
@@ -1363,10 +1365,25 @@ function readF(pfx){
 function copyF(from,to){ for(const id of FIDS){ const a=el('#'+from+'_'+id), b=el('#'+to+'_'+id); if(a&&b) b.value=a.value; } }
 /* ===== выбор стратегии: ложный пробой / пробой / оба ===== */
 function stratOf(pfx){ if(pfx==='bt'&&SEARCH_TYPE) return SEARCH_TYPE; const e=el('#'+pfx+'_strat'); return e?e.value:'fbo'; }
-function byStrat(rows,st){ if(MKT==='algo') return rows.filter(s=>s.type==='algo'); return st==='both'?rows:rows.filter(s=>(s.type||'fbo')===st); }
+function byStrat(rows,st){ if(isAlgoM()) return rows.filter(s=>s.type==='algo'); return st==='both'?rows:rows.filter(s=>(s.type||'fbo')===st); }
 const typeLbl=t=>t.type==='brk'?'пробой':t.type==='algo'?'алго':'ЛП';
 const pStr=t=>(t.type==='brk'||t.type==='algo')?'—':t.p.toFixed(3);
 function passes(s,f){
+  // 7.51: правило пользователя — у ложного пробоя стоп обязан быть ЗА уровнем: шорт — стоп не ниже уровня, лонг — не выше. Иначе сигнала нет.
+  if((s.type||'fbo')==='fbo'&&s.mkt!=='us'&&s.lv!=null&&s.e!=null&&s.atrD!=null){
+    const ru=s.mkt==='ru'||MKT==='ru', risk=swRiskCap(s,Math.max((stopK(s,f.stop)/100)*s.atrD,(ru?0.01:0.02)*s.e));
+    if(s.d===1){ if(s.e-risk>s.lv) return false; } else { if(s.e+risk<s.lv) return false; }
+  }
+  if(MKT==='crypto'&&s.mkt!=='ru'&&s.mkt!=='us'&&(s.type||'fbo')==='fbo'&&s.d===1){   // 7.49: ЛП-лонги — по поводырю и без «падающего ножа»
+    if(s.btcBias!=null&&s.btcBias<0) return false;            // BTC медвежий (пробил лой вниз или сделал ЛП хая за 12 ч)
+    if(s.d1_streak!=null&&s.d1_streak<=-2) return false;      // монета падает 2+ дня подряд — ловля ножа
+    if(s.brk_run!=null&&s.brk_run+1>4) return false;
+    if(s.cbtc!=null&&s.cbtc<0.5) return false;                // 7.55: монета ходит сама по себе (корр. с BTC за 7 дн < 0.5) — такие лонги хуже          // 7.52: лонг — не больше 4 ч за уровнем (от первого закрытия под уровнем до входа)
+  }
+  if(NO_RALLY&&MKT==='crypto'&&s.mkt!=='ru'&&s.mkt!=='us'&&(s.type||'fbo')==='fbo'&&(s.side||(s.d===0?'short':'long'))==='short'&&s.mkBad!=null&&s.mkBad>=3) return false;   // 7.45
+  if(s.sw===2) return ruSwing()&&(f.side===null||f.side===undefined||s.d===f.side);
+  if(ruSwing()&&isRuBrkSig(s)&&s.swm!==0&&s.atrD_pct!=null&&s.atrD_pct<RU_SW.atrMin) return false;   // 7.38: свинг — только бумаги с ATR дня ≥2.5%   // 7.37: дневной шорт — свои правила (при генерации), только в режиме «Свинг»
+  if(s.mkt==='us'&&(s.us_cut||(s.type==='brk'&&!s.us_set))) return false;   // 7.24: США — лучшие условия пробоя + не больше 5 в час и 10 в день (правило алгоритма)
   // Алго-сигналы: только индикаторные фильтры, технические пропускаем
   if(s.type==='algo') return passesAlgoFilters(s,f);
   const isB=s.type==='brk';
@@ -1385,6 +1402,7 @@ function passes(s,f){
       } else return false;
     } else {
       if(s.ru_ixS===0) return false;                   // лонг при падающем индексе не берём
+      if(ruHour(s)<=11) return false;                  // 7.25: лонг с 07:00 до 11:59 МСК (утренняя сессия и первый час) — 22–35% тейков в обоих периодах, не берём
       if(s.ru_ixS!==7&&String(s.k||'').startsWith('5d')) return false;   // 7.06: при смешанном индексе лонг на пробое 5-дневного максимума — догонялка (17–24% тейков), не берём
       rx=1;
     }
@@ -1503,7 +1521,7 @@ function passes(s,f){
 // На трёх отдельных месяцах это дало стабильно более короткие серии стопов при той же доходности.
 // Единая мера «лучше/хуже» для ЛЮБОГО отбора «оставь только лучшие» (12ч-дедуп монеты,
 // лимит сигналов в час, недельный кап) — используется как оценка сигнала 0..10.
-function prioOf(s){ return PRIO_RAND?PRIO_RAND(s):signalScore(s); }
+function prioOf(s){ if(PRIO_RAND) return PRIO_RAND(s); if((s.type||'fbo')==='fbo'&&MKT==='crypto'&&s.mkt!=='ru'){ const v=scoreV6(s); if(v!=null) return Math.round(v*10)/10; } return signalScore(s); }
 
 // Оценка сигнала 0–10. Как построена (всё на реальных сделках, тот же код scanSymbol/recompute):
 // живые данные OKX, 160 монет, до 90 дней, ~3700 закрытых сделок, исход посчитан при стопе 10% и
@@ -1566,6 +1584,8 @@ function scoreV6(s){
   return Math.max(0,Math.min(7.9,0.79*T-(spike?3:0)-(poke?2:0)));
 }
 function signalScore(s){
+  if(s&&s.sw===2) return 5;   // 7.37: дневной шорт — средний сигнал (+0.4R на сделку, как «авто» в среднем)
+  if(s&&s.mkt==='us'&&s.score!=null) return s.score;   // у США своя оценка
   // v2 (после ручной оценки 50 сделок): у ложного пробоя к 34 признакам добавлены 6 новых — сидение
   // за уровнем, вход далеко от уровня, аномалия, D1 сильно против, чёткий и чистый уровень, нелинейная p.
   // Проверено на отложенных 3 неделях: винрейт по диапазонам оценки 0-2/2-4/4-6/6-8/8-10 —
@@ -1577,7 +1597,7 @@ function signalScore(s){
   // обучения, а не качество сигнала.
   // ЛП: новая оценка v3 (похожесть на эталонные сделки). Пробой — прежняя модель.
   if(s.type==='brk'&&isRuSig(s)){ const v=scoreRU(s); if(v!=null) return Math.round(v*10)/10; }   // 7.02: своя оценка пробоя MOEX
-  if((s.type||'fbo')==='fbo'){ const cr=MKT==='crypto'&&s.mkt!=='ru'; const v6=cr?scoreV6(s):null; if(v6!=null) return Math.round(v6*10)/10; /* 6.90: v6 только для крипты; MOEX — прежняя оценка */ const r=hwScore(s); if(r) return Math.round(r.score*10)/10; }
+  if((s.type||'fbo')==='fbo'){ const cr=MKT==='crypto'&&s.mkt!=='ru'; const vl=cr?scoreLong(s):null; if(vl!=null) return Math.round(vl*10)/10; const v8=cr?scoreV8(s):null; if(v8!=null) return Math.round(v8*10)/10; const v7=cr?scoreV7(s):null; if(v7!=null) return Math.round(v7*10)/10; const v6=cr?scoreV6(s):null; if(v6!=null) return Math.round(v6*10)/10; /* 6.90: v6 только для крипты; MOEX — прежняя оценка */ const r=hwScore(s); if(r) return Math.round(r.score*10)/10; }
   const M=s.type==='brk'?SCORE_MODEL.B:SCORE_MODEL.F, st=M.st, p=smPredict(M,s);
   let v;
   if(p<=st[0].c) v=st[0].v;
@@ -1670,12 +1690,12 @@ function fboM5Refine(s,m5){
   let ap=96*60; for(let k=bars.length-1;k>=0;k--){ const b=bars[k]; if(b.ts>=bs) continue; if(dr*(L-b.c)>=0.3*s.atrD){ ap=(bs-b.ts)/60000; break; } }
   s.m5t24=t24; s.m5ap=ap; return true;
 }
-const HW_FEAT_KEYS=['ru_ixS','ru_ixExt','ru_clu','ru_dm','ru_sl200','ru_e50200','ru_run24','ru_b8w','ru_brng','ru_cpos','ru_ix24','ru_base8','ru_sa50','ru_ix50','d1_streak','g_spk','pk_ext','vtr','lvB','lv_touch','lv_touch24','ap03','near12','mv12','vbrk','lv_prom','brk_run','ret_d','dist_atr','m5t24','m5ap','v6_poke','vol_contraction','atrD','level_age_h','strength','crosses','vol5mAvg','posMax','vol_mult'];
+const HW_FEAT_KEYS=['sw','swm','ru_ix20','ru_d1close','ru_ixS','ru_ixExt','ru_clu','ru_dm','ru_sl200','ru_e50200','ru_run24','ru_b8w','ru_brng','ru_cpos','ru_ix24','ru_base8','ru_sa50','ru_ix50','d1_streak','g_spk','pk_ext','vtr','lvB','lv_touch','lv_touch24','ap03','near12','mv12','vbrk','lv_prom','brk_run','ret_d','dist_atr','m5t24','m5ap','v6_poke','vol_contraction','atrD','level_age_h','strength','crosses','vol5mAvg','posMax','vol_mult'];
 /* 7.00: звёздочка ★ у сигналов, которые подходят под The Best (только крипта): ЛП-шорт, D1 ≥2 зелёных подряд,
    объём не разгоняется, без шипа и без большого хвоста прокола. Показывается везде, даже когда The Best выключен. */
 function isBestStar(t){
   try{
-    if(!t||MKT==='algo') return false;
+    if(!t||isAlgoM()) return false;
     return bestReg().has(t.base+'|'+t.t);
   }catch(e){ return false; }
 }
@@ -1712,13 +1732,14 @@ function weeklyBestCap(rows, weekMax){
   }
   const keep=[];
   for(const k in byWeek){
-    byWeek[k].sort((a,b)=>(b.score||0)-(a.score||0));
+    if(byWeek[k][0]&&byWeek[k][0].mkt==='us') byWeek[k].sort((a,b)=>sigEnd(a)-sigEnd(b));   // 7.23: США — первые N за неделю по времени (как в реальной торговле)
+    else byWeek[k].sort((a,b)=>(b.score||0)-(a.score||0));
     keep.push(...byWeek[k].slice(0,weekMax));
   }
   return keep.sort(orderRows);
 }
 function orderRows(a,b){
-  return (b.t-a.t) || (prioOf(b)-prioOf(a)) || (a.base<b.base?-1:a.base>b.base?1:0);
+  return (sigEnd(b)-sigEnd(a)) || (prioOf(b)-prioOf(a)) || (a.base<b.base?-1:a.base>b.base?1:0);
 }
 
 // Правило алгоритма (не фильтр, не настраивается): одна монета не чаще раза в 12 часов.
@@ -1726,7 +1747,7 @@ function orderRows(a,b){
 // только повторы у ОДНОГО уровня, поэтому одна монета могла давать подряд несколько
 // сигналов по разным уровням.
 const COIN_WINDOW_H = 12;
-function coinWindowKey(s, winH){ return s.base+'|'+Math.floor(s.t/(winH*3600000)); }
+function coinWindowKey(s, winH){ return s.base+(s.sw===2?'|d1':'')+'|'+Math.floor(s.t/(winH*3600000)); }
 function applyCoinLimit(rows, winH){
   winH = COIN_WINDOW_H;
   const best={};
@@ -1741,6 +1762,13 @@ function applyCoinLimit(rows, winH){
   return rows.filter(s=>keep.has(s));
 }
 function capCluster(rows,cap){
+  if(MKT==='crypto'&&LONG_HOUR_CAP<99){
+    const by={}, out=[];
+    for(const s of rows){ if(s.mkt!=='ru'&&s.mkt!=='us'&&(s.type||'fbo')==='fbo'&&s.d===1){ const k=Math.floor(s.t/3600000); (by[k]=by[k]||[]).push(s); } else out.push(s); }
+    for(const k in by){ by[k].sort((a,b)=>((b.turnD||0)-(a.turnD||0))||((b.posMax||0)-(a.posMax||0))||(a.base<b.base?-1:a.base>b.base?1:0)); out.push(...by[k].slice(0,LONG_HOUR_CAP)); }
+    return out.sort(orderRows);
+  }
+  return rows.slice().sort(orderRows);   // 7.33: лимит «сигналов в час» убран на всех рынках — показываются все сигналы, подходящие по параметрам
   if(!cap||cap>=99) return rows.slice().sort(orderRows);
   const by={};
   for(const s of rows){ const k=Math.floor(s.t/3600000)+'|'+s.d; (by[k]=by[k]||[]).push(s); }
@@ -1754,10 +1782,13 @@ function capCluster(rows,cap){
 // пересчёт стопа/тейка/исхода по сохранённым свечам
 function recompute(s,f){
   if(s.type==='algo') return s.o!=null?s:null;   // исход алго-сделки посчитан при загрузке
+  if(s.mkt==='us') return s.o!=null?s:null;      // 7.15: США — исход посчитан движком по 5-минуткам
   // Стоп не меньше: 2% для крипты, 1% для акций РФ (там спред+комиссия меньше, ATR другой)
   const stopMinPct=(s.mkt==='ru'||MKT==='ru')?0.01:0.02;
-  const holdH=(s.mkt==='ru'||MKT==='ru')?HOLD_RU:HOLD_CRYPTO;
-  const risk=Math.max((f.stop/100)*s.atrD, stopMinPct*s.e);
+  const sw_=swOf(s);   // 7.37
+  const holdH=sw_===1?RU_SW.holdH:sw_===2?RU_SW.holdD:((s.mkt==='ru'||s.mkt==='ru_algo'||isRuMoney())?HOLD_RU:HOLD_CRYPTO);
+  const beR=sw_===1?RU_SW.beH:sw_===2?RU_SW.beD:BE_TRIGGER_R;
+  const risk=swRiskCap(s,Math.max((stopK(s,f.stop)/100)*s.atrD, stopMinPct*s.e));   // 7.36: MOEX — не меньше 25% ATR; 7.38: свинг — не больше 2%
   if(risk<=0||risk/s.e>MAXRISK) return null;
   const long=s.d===1;
   const stop=long?s.e-risk:s.e+risk;
@@ -1766,11 +1797,13 @@ function recompute(s,f){
   // ровно в точку входа. Если после этого цена возвращается — исход «безубыток» (0R).
   // В винрейт и итог такие сделки не входят: считаются только тейки и стопы.
   // По часовым свечам консервативно: перенос действует со СЛЕДУЮЩЕЙ свечи.
-  const beLvl=long?s.e+BE_TRIGGER_R*risk:s.e-BE_TRIGGER_R*risk;
+  const beLvl=long?s.e+beR*risk:s.e-beR*risk;
   let curStop=stop, moved=false;
   let outcome='open', exitT=s.t, lastClose=s.e, lastTs=s.t;
   let ambH=null, m5used=false;
+  const friCut=ruFriCut(s);   // 7.60
   outer: for(const b of (s.fwd||[])){
+    if(friCut!=null&&b[0]>=friCut){ outcome='expired'; exitT=lastTs; break; }
     if((b[0]-s.t)/3600000>holdH){ outcome='expired'; exitT=lastTs; break; }
     exitT=b[0];
     // есть 5-минутки для этого часа — идём по ним (точный порядок стоп/тейк/перенос в безубыток)
@@ -1780,7 +1813,7 @@ function recompute(s,f){
         const hs5=long?x[3]<=curStop:x[2]>=curStop, ht5=long?x[2]>=take:x[3]<=take;
         if(hs5){ outcome=moved?'be':'stop'; exitT=x[0]; m5used=true; break outer; }
         if(ht5){ outcome='take'; exitT=x[0]; m5used=true; break outer; }
-        if(!moved && (long?x[2]>=beLvl:x[3]<=beLvl)){ curStop=s.e; moved=true; }
+        if(beR>0 && !moved && (long?x[2]>=beLvl:x[3]<=beLvl)){ curStop=s.e; moved=true; }
       }
       lastClose=b[4]; lastTs=b[0]; continue;
     }
@@ -1789,9 +1822,10 @@ function recompute(s,f){
     if(hs&&ht&&!(s.m5&&s.m5[b[0]])) ambH=b[0];      // спорный час: по часовику не понять, что было первым
     if(hs){ outcome=moved?'be':'stop'; break; }   // стоп внутри свечи считается первым (пока нет 5-минуток)
     if(ht){ outcome='take'; break; }
-    if(!moved && (long?b[2]>=beLvl:b[3]<=beLvl)){ curStop=s.e; moved=true; }
+    if(beR>0 && !moved && (long?b[2]>=beLvl:b[3]<=beLvl)){ curStop=s.e; moved=true; }
     lastClose=b[4]; lastTs=b[0];
   }
+  if(outcome==='open'&&friCut!=null&&(s.fwd||[]).length&&lastTs+3600000>=friCut){ outcome='expired'; exitT=lastTs; }   // 7.60: пятница 20:00 наступила
   // Результат сделки в R. Истёкшая за 7 дней закрывается по цене закрытия последней часовой свечи
   // (раньше такие сделки просто выпадали из статистики). Из каждой закрытой сделки вычитаются
   // издержки: комиссия и проскальзывание, COST_PCT от цены за полный круг.
@@ -1821,7 +1855,7 @@ function recompute(s,f){
       else break;
     }
   }
-  return {...s, st:stop, tk:take, rp:risk/s.e, o:outcome, tgtR:f.tgt, xt:exitT, beMoved:moved, r, nr, ambH, m5used, ewM};
+  return {...s, st:stop, tk:take, rp:risk/s.e, o:outcome, tgtR:f.tgt, xt:exitT, beMoved:moved, r, nr, ambH, m5used, ewM, ...(isRuBrkSig(s)&&s.sw!==2?{swm:sw_===1?1:0}:{})};
 }
 // лимит сделок в день и стоп-кран после серии убытков — идём по времени вперёд,
 // как в реальной торговле: пропущенная сделка не влияет на серию
@@ -1863,14 +1897,14 @@ function btLimits(){
 // сделок в реальности можно взять в работу за неделю, а не свойство бэктеста/перебора.
 // Бэктест и перебор комбинаций всегда считаются по ПОЛНОМУ накопленному набору.
 function scanWeekMax(){
-  return +(el('#sc_weekmax')?el('#sc_weekmax').value:20)||999;
+  return 999;   // 7.32: недельный лимит убран на всех рынках — список не зависит от будущих сигналов недели
 }
 function applySequential(rows,f,noBt,Lov){
   // noBt — режим «Сигналы»: лимиты «сделок в день» и «одновременно в рынке» живут в панели
   // бэктеста и к сканеру не относятся (раньше они тихо резали и список сигналов).
   const L=Lov||(noBt?{dayMax:0,conc:0}:btLimits());
   if(f.daycap>=99 && !f.streak && !L.dayMax && !L.conc) return rows;
-  const asc=rows.slice().sort((a,b)=>(a.t-b.t)||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
+  const asc=rows.slice().sort((a,b)=>(sigEnd(a)-sigEnd(b))||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
   const out=[]; const perDay={}; let streak=0, pausedUntil=0;
   const openUntil=[];   // времена выхода принятых, ещё не закрытых сделок (для лимита позиций)
   const pending=[];     // принятые сделки, чей исход ещё не стал известен (для серии и паузы)
@@ -1949,7 +1983,7 @@ function fmtRange(r,kind){
 }
 
 function applyAll(rows,f,scanMode,Lov,fB){
-  if(MKT==='algo') return rows.filter(s=>s.type==='algo'&&s.o!=null).slice().sort((a,b)=>b.t-a.t);  // новые сверху
+  if(isAlgoM()) return rows.filter(s=>s.type==='algo'&&s.o!=null).slice().sort((a,b)=>sigEnd(b)-sigEnd(a));  // новые сверху
   const fx=s=>(fB&&s.type==='brk')?fB:f;   // в «Оба»: у пробоя свои фильтры
   // Сигнал с недопустимым риском (стоп слишком далеко) отсекается СРАЗУ — по нему нельзя войти,
   // поэтому он не должен занимать место в правилах «одна монета за 12ч» и «сигналов в час».
@@ -1997,10 +2031,20 @@ const Bybit={
     }
     return Object.values(seen).sort((a,b)=>a.ts-b.ts);
   },
+  async k30(sym,fromTs){   // 7.58: 30-минутки — ложный пробой ловится на середине часа
+    const now=Date.now(), seen={}; let end;
+    for(let p=0;p<10;p++){
+      const d=await (await fetch(`https://api.bybit.com/v5/market/kline?category=linear&symbol=${sym}&interval=30&limit=1000`+(end?`&end=${end}`:''))).json();
+      if(d.retCode!==0||!d.result.list.length) break;
+      for(const k of d.result.list) seen[+k[0]]={ts:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],vol_quote:+k[6],confirmed:(+k[0]+HALF_H)<=now};
+      end=Math.min(...d.result.list.map(k=>+k[0]))-1; if(end<fromTs) break;
+    }
+    return Object.values(seen).sort((a,b)=>a.ts-b.ts);
+  },
   m5(sym,limit,endTs){
     const u=`https://api.bybit.com/v5/market/kline?category=linear&symbol=${sym}&interval=5&limit=${limit}`+(endTs?`&end=${endTs}`:'');
     return fetch(u).then(r=>r.json()).then(d=>d.retCode!==0?[]:
-      d.result.list.map(k=>({t:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4]})).sort((a,b)=>a.t-b.t));
+      d.result.list.map(k=>({t:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4]})).sort((a,b)=>sigEnd(a)-sigEnd(b)));
   }
 };
 const OKX={
@@ -2018,7 +2062,7 @@ const OKX={
     const seen={}; let after;
     for(let p=0;p<Math.ceil(limit/300)+1;p++){
       const u=`https://www.okx.com/api/v5/market/candles?instId=${sym}&bar=${bar}&limit=300`+(after?`&after=${after}`:'');
-      const d=await (await fetch(u)).json();
+      const d=await okxGet(u);
       if(d.code!=='0'||!d.data.length) break;
       for(const k of d.data) seen[+k[0]]={ts:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],vol_quote:+(k[7]??k[6])||0,confirmed:(+k[0]+dur)<=now};
       if(Object.keys(seen).length>=limit) break;
@@ -2026,10 +2070,21 @@ const OKX={
     }
     return Object.values(seen).sort((a,b)=>a.ts-b.ts);
   },
+  async k30(sym,fromTs){   // 7.58: 30-минутки — ложный пробой ловится на середине часа
+    const now=Date.now(), seen={}; let after=null, ep='candles';
+    for(let p=0;p<40;p++){
+      const d=await okxGet(`https://www.okx.com/api/v5/market/${ep}?instId=${sym}&bar=30m&limit=${ep==='candles'?300:100}`+(after?`&after=${after}`:''));
+      if(d.code!=='0') break;
+      if(!d.data.length){ if(ep==='candles'){ ep='history-candles'; continue; } break; }
+      for(const k of d.data) seen[+k[0]]={ts:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],vol_quote:+(k[7]??k[6])||0,confirmed:(+k[0]+HALF_H)<=now};
+      after=Math.min(...d.data.map(k=>+k[0])); if(after<=fromTs) break;
+    }
+    return Object.values(seen).sort((a,b)=>a.ts-b.ts);
+  },
   m5(sym,limit,endTs){
     const u=`https://www.okx.com/api/v5/market/candles?instId=${sym}&bar=5m&limit=${Math.min(limit,300)}`+(endTs?`&after=${endTs}`:'');
     return fetch(u).then(r=>r.json()).then(d=>d.code!=='0'?[]:
-      d.data.map(k=>({t:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4]})).sort((a,b)=>a.t-b.t));
+      d.data.map(k=>({t:+k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4]})).sort((a,b)=>sigEnd(a)-sigEnd(b)));
   }
 };
 /* ===== MOEX ISS — акции РФ, режим TQBR. Без ключа, CORS открыт, задержка 15 минут ===== */
@@ -2096,6 +2151,17 @@ const MOEX={
     }
     const rows=await issCandles(path,60,now-limit*3600000,null,Math.min(40,Math.ceil(limit*0.75/500)+2));
     return issBars(rows,'1h',now);
+  },
+  // 7.58: 30-минутки из 10-минуток ISS — ложный пробой ловится на середине часа
+  async k30(sym,fromTs){
+    const now=Date.now(), path=`/engines/stock/markets/shares/boards/TQBR/securities/${sym}`;
+    const days=Math.max(1,(now-fromTs)/86400000);
+    const rows=await issCandles(path,10,fromTs,null,Math.min(30,Math.ceil(days*110/500)+2));
+    const b={};
+    for(const r of rows){ const ts=Math.floor(mskToUtc(r[6])/HALF_H)*HALF_H, x=b[ts];
+      if(!x) b[ts]={ts,o:+r[0],h:+r[2],l:+r[3],c:+r[1],vol_quote:+r[4]||0};
+      else { x.h=Math.max(x.h,+r[2]); x.l=Math.min(x.l,+r[3]); x.c=+r[1]; x.vol_quote+=(+r[4]||0); } }
+    return Object.values(b).map(x=>({...x,confirmed:x.ts+HALF_H+ISS_DELAY<=now})).sort((a,c)=>a.ts-c.ts);
   },
   // готовых 5-минуток у биржи нет — собираем из минуток
   async m5(sym,limit,endTs){
@@ -2314,9 +2380,9 @@ function isBestRU(s){
 // 7.06: сколько пробоев той же стороны было по всему списку бумаг за последние 3 часа (включая этот) — «рынок пробивает вместе»
 function ruCluster(list){
   for(const d of [0,1]){
-    const ts=list.filter(s=>s.type==='brk'&&s.d===d).map(s=>s.t).sort((a,b)=>a-b);
+    const ts=list.filter(s=>s.type==='brk'&&s.d===d&&s.sw!==2).map(s=>s.t).sort((a,b)=>a-b);   // 7.37: дневные шорты в «пробоях за 3 ч» не считаются
     const lb=x=>{ let lo=0,hi=ts.length; while(lo<hi){ const m=(lo+hi)>>1; if(ts[m]<x) lo=m+1; else hi=m; } return lo; };
-    for(const s of list) if(s.type==='brk'&&s.d===d) s.ru_clu=lb(s.t+1)-lb(s.t-2*3600000);
+    for(const s of list) if(s.type==='brk'&&s.d===d&&s.sw!==2) s.ru_clu=lb(s.t+1)-lb(s.t-2*3600000);
   }
 }
 function scoreRU(s){ const z=ruTasteRaw(s); if(z==null||s.ru_ix24==null) return null; const p=ruTastePct(z), nc=isBestRU(s)?2:(ruBestConds(s)>=1||(s.d===0&&(s.ru_ixS===7||ruHour(s)>=RU_TB.hour)))?1:0;
@@ -2324,7 +2390,50 @@ function scoreRU(s){ const z=ruTasteRaw(s); if(z==null||s.ru_ix24==null) return 
   if(nc===2&&ruHour(s)>=13&&s.ru_ixS===7&&s.ru_clu!=null&&s.ru_clu>=7) return 9.5+0.5*p;
   return nc===2?8+1.45*p:nc===1?5+2.9*p:4.9*p; }
 const isRuSig=s=>s.mkt==='ru'||(s.mkt==null&&MKT==='ru');
-function scanSymbol(base,sym,d1,h1,opt){
+/* [hw-bot] 7.71: алгоритмы */
+const HALF_H=1800000;
+const LONG_HOUR_CAP=4;
+const RU_FRI_H=20;
+const RU_STOP_ATR=25;
+let BTC_BIAS=null;
+function btcBiasCompute(h1){
+  if(!h1||h1.length<200) return null; const D=86400000, out=new Map();
+  const days=new Map(); for(const b of h1){ const k=Math.floor(b.ts/D)*D; const x=days.get(k); if(!x) days.set(k,{h:b.h,l:b.l}); else { x.h=Math.max(x.h,b.h); x.l=Math.min(x.l,b.l); } }
+  const dk=[...days.keys()].sort((a,b)=>a-b), lv=new Map();
+  for(let i=1;i<dk.length;i++){ const p=days.get(dk[i-1]); let h5=-Infinity,l5=Infinity; if(i>=5){ for(let j=i-5;j<i;j++){ const x=days.get(dk[j]); h5=Math.max(h5,x.h); l5=Math.min(l5,x.l); } }
+    lv.set(dk[i],{ph:p.h,pl:p.l,h5:i>=5?h5:null,l5:i>=5?l5:null}); }
+  let cur=0, age=999;
+  for(let i=1;i<h1.length;i++){ const b=h1[i], pc=h1[i-1].c, L=lv.get(Math.floor(b.ts/D)*D); let sg=0;
+    if(L){ for(const [H,Lo] of [[L.ph,L.pl],[L.h5,L.l5]]){ if(H==null) continue;
+      if(b.c>H&&pc<=H) sg++; if(b.h>H&&b.c<H&&pc<H) sg--; if(b.c<Lo&&pc>=Lo) sg--; if(b.l<Lo&&b.c>Lo&&pc>Lo) sg++; } }
+    if(sg!==0){ cur=Math.sign(sg); age=0; } else age++;
+    out.set(b.ts, age<12?cur:0); }
+  return out;
+}
+function cbtcTag(rows,all){
+  const B=all.BTC; if(!B||B.length<200) return;
+  const bi=new Map(B.map((b,i)=>[b.ts,i]));
+  const cache={};
+  for(const s of rows){ if(s.mkt==='ru'||s.mkt==='us'||(s.type||'fbo')!=='fbo'||s.d!==1) continue;
+    const C=all[s.base]; if(!C||C.length<200) continue;
+    if(!cache[s.base]) cache[s.base]=new Map(C.map((b,i)=>[b.ts,i]));
+    const ci=cache[s.base].get(s.t), j=bi.get(s.t); if(ci==null||j==null) continue;
+    const xs=[],ys=[];
+    for(let k=0;k<168;k++){ const a=C[ci-k], a0=C[ci-k-1]; if(!a||!a0) break; const jb=bi.get(a.ts), jb0=bi.get(a0.ts); if(jb==null||jb0==null) continue;
+      xs.push(Math.log(a.c/a0.c)); ys.push(Math.log(B[jb].c/B[jb0].c)); }
+    if(xs.length<134) continue;
+    const n=xs.length, mx=xs.reduce((p,v)=>p+v,0)/n, my=ys.reduce((p,v)=>p+v,0)/n; let sxy=0,sxx=0,syy=0;
+    for(let k=0;k<n;k++){ const dx=xs[k]-mx, dy=ys[k]-my; sxy+=dx*dy; sxx+=dx*dx; syy+=dy*dy; }
+    s.cbtc=(sxx>0&&syy>0)?sxy/Math.sqrt(sxx*syy):null;
+  }
+}
+async function halfBarAfter(ex,s){   // вторая половина часа сигнала — для пересчёта исхода
+  if(!s||s._src!==30) return [];
+  const k=await k30Bars(ex,s.sym,s.t); const b=k.find(x=>x.ts===s.t+HALF_H&&x.confirmed); return b?[b]:[];
+}
+async function k30Bars(ex,sym,fromTs){ if(MKT==='ru'||(ex&&ex.name==='MOEX')) return [];   // 7.59: Мосбиржа — только по закрытию часа (данные с задержкой 15 мин)
+  try{ if(ex&&ex.k30) return await ex.k30(sym,fromTs); }catch(e){} return []; }
+function scanSymbolCore(base,sym,d1,h1,opt){
   const out=[];
   const d1c=lastClosed(d1), h1c=lastClosed(h1);
   // 7.02 (MOEX): EMA50/EMA200 по часовикам — тренд акции на H1 для The best и оценки MOEX
@@ -2424,7 +2533,7 @@ function scanSymbol(base,sym,d1,h1,opt){
               atr_ratio: atrD>0 ? aH1/atrD : 0,
               lvl_density: levels.filter(L=>Math.abs(L.price-lv.price)<=atrD).length,
               round_dist: roundDist(lv.price), green_ratio: greenRatio(h1cut), d1_streak: d1Streak(d1c,bar.ts),
-              turn24:0, p:0, vol5mAvg:vMed/12, posMax:(vMed/12)*0.10});   // модель обучена на ложных пробоях — для пробоя её оценка не применяется
+              turn24:0, turnD:turnDayAt(h1c,i), p:0, vol5mAvg:vMed/12, posMax:(vMed/12)*0.10});   // модель обучена на ложных пробоях — для пробоя её оценка не применяется
           }
         }
       }
@@ -2508,7 +2617,7 @@ function scanSymbol(base,sym,d1,h1,opt){
         green_ratio: greenRatio(h1cut),
         d1_streak: d1Streak(d1c,bar.ts),
         turn24: 0,
-        vol5mAvg: vMed/12,
+        vol5mAvg: vMed/12, turnD: turnDayAt(h1c,i),
         posMax: (vMed/12)*0.10};
       Object.assign(s, fboShape(h1c,i,lv.price,brSide,lv.formedTs,atrD,vMed));
       s.p=modelPredict(s);
@@ -2520,22 +2629,179 @@ function scanSymbol(base,sym,d1,h1,opt){
   // к выжившим — иначе на трёхмесячном окне память улетает в сотни мегабайт.
   if(opt.raw){
     for(const s of out){
-      s.fwd=h1c.slice(s._i+1, s._i+1+getHold()).map(b=>[b.ts,b.o,b.h,b.l,b.c]);
+      s.fwd=h1c.slice(s._i+1, s._i+1+ruHoldBars()).map(b=>[b.ts,b.o,b.h,b.l,b.c]);
       const r=recompute(s,{stop:10,tgt:TARGET_R});
       s.o=r?r.o:'none'; delete s.fwd; delete s._i;
     }
     return out;
   }
-  const ded=dedupList(out);
+  const ded=opt.noDedup?out:dedupList(out);
   for(const s of ded){
-    s.fwd=h1c.slice(s._i+1, s._i+1+getHold()).map(b=>[b.ts,b.o,b.h,b.l,b.c]);
+    s.fwd=h1c.slice(s._i+1, s._i+1+ruHoldBars()).map(b=>[b.ts,b.o,b.h,b.l,b.c]);
     delete s._i;
   }
+  if(MKT==='ru'&&!opt.noD1) ruD1Signals(base,sym,d1c,h1,h1c,fromIdx,opt,ded);   // 7.37: дневные шорты для режима «Свинг»
   return ded;
+}
+function scoreLong(s){ const side=s.side||(s.d===0?'short':'long'); if(side!=='long') return null;
+  if(s.d1_streak==null) return null;
+  const pt=s.d1_streak<=-2?-1:2*(s.d1_streak>=2)+((s.v6_poke!=null&&s.v6_poke<=1.385)?1:0);
+  const P=[0.15,0.18,0.20,0.22,0.245,0.30], p=isFinite(+s.p)?+s.p:0.2; let pct=1;
+  if(p<=P[0]) pct=0; else for(let i=1;i<P.length;i++) if(p<=P[i]){ pct=((i-1)+(p-P[i-1])/(P[i]-P[i-1]))/(P.length-1); break; }
+  const B=pt<0?[0,3.9]:pt===0?[4,5.9]:pt===1?[6,7.9]:[8,10]; return B[0]+(B[1]-B[0])*pct; }
+function scoreShownOk(s){ if(!s) return true; const cr=MKT==='crypto'&&s.mkt!=='ru'&&s.mkt!=='us'; if(!cr) return true;
+  return (s.type||'fbo')==='fbo'; }
+function scoreV7(s){
+  const side=s.side||(s.d===0?'short':'long'); if(side!=='short') return null;
+  if(s.d1_streak==null||s.vtr==null) return null;
+  const d=s.st!=null&&s.e!=null?Math.abs(s.st-s.e):(s.atrD!=null&&s.e!=null?Math.max(0.10*s.atrD,0.02*s.e):null);
+  const poke=(s.pk_ext!=null&&d>0)?Math.abs(s.pk_ext-s.e)/d:0, spike=s.g_spk!=null&&s.g_spk>=8;
+  const D1=s.d1_streak>=2, VOL=s.vtr<=1.0;
+  const tier=(poke>3||(!D1&&!VOL&&spike))?0:(D1&&VOL?3:(D1||VOL?2:1));
+  const P=[0.15,0.18,0.20,0.22,0.245,0.30], p=isFinite(+s.p)?+s.p:0.2; let pct=1;
+  if(p<=P[0]) pct=0; else for(let i=1;i<P.length;i++) if(p<=P[i]){ pct=((i-1)+(p-P[i-1])/(P[i]-P[i-1]))/(P.length-1); break; }
+  return [0,4,6,8][tier]+[3.9,1.9,1.9,2.0][tier]*pct;
+}
+function scoreV8(s){ const side=s.side||(s.d===0?'short':'long'); if(side!=='short') return null;
+  const pt=scoreV8pts(s); if(pt==null) return null;
+  const P=[0.15,0.18,0.20,0.22,0.245,0.30], p=isFinite(+s.p)?+s.p:0.2; let pct=1;
+  if(p<=P[0]) pct=0; else for(let i=1;i<P.length;i++) if(p<=P[i]){ pct=((i-1)+(p-P[i-1])/(P[i]-P[i-1]))/(P.length-1); break; }
+  const B=pt<=0?[0,3.9]:pt===1?[4,4.6]:pt===2?[4.7,5.3]:pt===3?[5.4,5.9]:pt===4?[6,7.9]:pt===5?[8,8.9]:[9,10];
+  return B[0]+(B[1]-B[0])*pct; }
+function scoreV8pts(s){
+  if(s.d1_streak==null||s.lv_touch24==null||s.lvl_density==null||s.crosses==null||s.brk_run==null) return null;
+  const d=s.st!=null&&s.e!=null?Math.abs(s.st-s.e):(s.atrD!=null&&s.e!=null?Math.max(0.10*s.atrD,0.02*s.e):null);
+  const poke=(s.pk_ext!=null&&d>0)?Math.abs(s.pk_ext-s.e)/d:0, bad=poke>3||(s.g_spk!=null&&s.g_spk>=8);
+  return 2*(s.d1_streak>=2)+(s.lv_touch24===0||s.lv_touch24==0)+(s.lvl_density<=2)+(s.crosses<=4)+(s.brk_run<=2)-(bad?2:0);
+}
+function scoreVis(s,v){ return scoreShownOk(s)?v:null; }
+function sigEnd(t){ return t.t+(t&&t._src===30?HALF_H:3600000); }
+function stopK(s,k){
+  if(!(s&&(s.mkt==='ru'||(s.mkt==null&&MKT==='ru'))&&s.type!=='algo')) return k;
+  const w=swOf(s); if(w===2) return 0;                       // дневной шорт: стоп 1% от входа
+  return Math.max(+k||0, w===1?RU_SW.stopH:RU_STOP_ATR);      // свинг: 50% ATR; интрадей: 25% ATR (и не меньше 1%)
+}
+function ruFriCut(t){
+  if(!ruIsT(t)) return null;
+  const ent=sigEnd(t), d=new Date(ent+3*3600000), add=(5-d.getUTCDay()+7)%7;
+  let cut=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())+add*86400000+RU_FRI_H*3600000-3*3600000;
+  if(cut<=ent) cut+=7*86400000;
+  return cut;
+}
+function turnDayAt(h1c,i){ let v=0; for(let k=Math.max(0,i-23);k<=i;k++) v+=(h1c[k]&&h1c[k].vol_quote)||0; return v; }
+function mkCompute(series){
+  const tsSet=new Set(); for(const sr of series) for(const b of sr) tsSet.add(b.ts);
+  const T=[...tsSet].sort((a,b)=>a-b), n=T.length, pos=new Map(T.map((t,i)=>[t,i]));
+  if(n<200||series.length<10) return null;
+  const K=series.length, L=series.map(()=>new Float64Array(n).fill(NaN)), A=series.map(()=>new Uint8Array(n));
+  series.forEach((sr,k)=>{ for(const b of sr){ const i=pos.get(b.ts); if(i!=null&&b.c>0) L[k][i]=Math.log(b.c); } });
+  // EMA50 по закрытиям, выше/ниже
+  series.forEach((sr,k)=>{ let e=null,cnt=0; const a=2/51; for(let i=0;i<n;i++){ const v=L[k][i]; if(!isFinite(v)) continue; const c=Math.exp(v); e=e==null?c:e+a*(c-e); cnt++; A[k][i]=cnt>=50?(c>e?2:1):0; } });
+  const idx=new Float64Array(n);
+  for(let i=1;i<n;i++){ let s_=0,m=0; for(let k=0;k<K;k++){ const a=L[k][i],b=L[k][i-1]; if(isFinite(a)&&isFinite(b)){ s_+=a-b; m++; } } idx[i]=m?s_/m:0; }
+  const ret=(i,h)=>{ let s_=0,m=0; for(let k=0;k<K;k++){ const a=L[k][i],b=L[k][i-h]; if(isFinite(a)&&isFinite(b)){ s_+=a-b; m++; } } return m>=5?s_/m:null; };
+  const out=new Map();
+  for(let i=168;i<n;i++){
+    let up=0,tot=0; for(let k=0;k<K;k++){ if(A[k][i]){ tot++; if(A[k][i]===2) up++; } }
+    let net=0,abs=0; for(let j=i-23;j<=i;j++){ net+=idx[j]; abs+=Math.abs(idx[j]); }
+    const a24=ret(i,24), a168=ret(i,168), ab50=tot>=5?up/tot:null, er24=abs>0?Math.abs(net)/abs:null;
+    if(a24==null||a168==null||ab50==null||er24==null) continue;
+    const bad=(a168>MK_TH.a168)+(ab50>MK_TH.ab50)+(er24>MK_TH.er24)+(a24>MK_TH.a24);
+    out.set(T[i],{bad,a24,a168,ab50,er24});
+  }
+  return out;
+}
+function mkTag(rows){ if(BTC_BIAS){ for(const s of rows){ if(s.mkt==='ru'||s.mkt==='us') continue; const v=BTC_BIAS.get(s.t); if(v!=null) s.btcBias=v; } } if(!MK_STATE) return; for(const s of rows){ if(s.mkt==='ru'||s.mkt==='us') continue; const v=MK_STATE.get(s.t); if(v) s.mkBad=v.bad; } }
+let MK_STATE=null;
+const MK_TH={a168:0.031,ab50:0.89,er24:0.33,a24:0.033};
+let NO_RALLY=false;
+const RU_SW={stopH:50, stopMaxPct:0.02, atrMin:0.025, d1Str:4, holdH:168, beH:0, holdD:96, beD:1.5, ix20:0.04};
+function beROf(t){ const w=swStored(t); return w===1?RU_SW.beH:w===2?RU_SW.beD:BE_TRIGGER_R; }
+function holdOfT(t){ const w=swStored(t); return w===1?RU_SW.holdH:w===2?RU_SW.holdD:getHold(); }
+const isAlgoM=m=>(m||MKT)==='algo'||(m||MKT)==='ru_algo';
+const isRuBrkSig=s=>!!s&&s.type==='brk'&&(s.mkt==='ru'||(s.mkt==null&&MKT==='ru'));
+const isRuMoney=m=>(m||MKT)==='ru'||(m||MKT)==='ru_algo';
+async function okxGet(u){
+  for(let a=0;a<6;a++){
+    try{ const r=await fetch(u); const d=await r.json(); if(d&&(d.code==='50011'||r.status===429)){ await new Promise(z=>setTimeout(z,600*(a+1))); continue; } return d; }
+    catch(e){ if(a===5) throw e; await new Promise(z=>setTimeout(z,600*(a+1))); }
+  }
+  return {code:'50011',data:[]};
+}
+function ruD1Signals(base,sym,d1c,h1,h1c,fromIdx,opt,out){
+  if(!opt||!opt.ixP||!opt.imoexD1||d1c.length<50||!h1c.length) return;
+  const tFrom=h1c[Math.min(fromIdx,h1c.length-1)].ts, ixd=opt.imoexD1, HB=ruHoldBars();
+  const firstAt=(arr,ts)=>{ let lo=0,hi=arr.length; while(lo<hi){ const m=(lo+hi)>>1; if(arr[m].ts<ts) lo=m+1; else hi=m; } return lo; };
+  for(let k=45;k<d1c.length;k++){
+    const today=d1c[k], prev=d1c[k-1];
+    const j=firstAt(h1,today.ts+86400000); if(j>=h1.length) continue;
+    const eb=h1[j]; if(eb.ts-today.ts>5*86400000) continue;
+    const tSig=eb.ts-3600000; if(tSig<tFrom) continue;
+    const cut=d1c.slice(0,k+1), aD=atr(cut); if(!(aD>0)) continue;
+    let best=null;
+    for(const L of V0.buildLevels(cut,[])){
+      if(V0.sideOf(L.kind)!=='short') continue;
+      if(!(today.c<L.price&&prev.c>=L.price)) continue;
+      if(!(L.strength>=RU_SW.d1Str)) continue;   // 7.38
+      const ov=(L.price-today.c)/aD;
+      if(!best||L.strength>best.L.strength||(L.strength===best.L.strength&&ov<best.ov)) best={L,ov};
+    }
+    if(!best) continue;
+    const st=ruIxState(opt.ixP,tSig,-1); if(!st||st.ru_ixS!==7) continue;
+    const ic=ixd.filter(b=>b.ts<=today.ts); if(ic.length<20) continue;
+    const c0=ic[ic.length-1].c, sma20=ic.slice(-20).reduce((a,b)=>a+b.c,0)/20, ix20=1-c0/sma20;
+    if(ix20>=RU_SW.ix20) continue;
+    const jc=firstAt(h1c,eb.ts), vw=h1c.slice(Math.max(0,jc-24),jc).map(b=>b.vol_quote||0).filter(v=>v>0).sort((a,b)=>a-b), vMed=vw.length?vw[Math.floor(vw.length/2)]:0;
+    out.push({type:'brk',sw:2,base,sym,t:tSig,d:0,side:'short',lv:best.L.price,k:'D1-закрытие · '+best.L.kind,kind:best.L.kind,e:eb.o,atrD:aD,
+      strength:best.L.strength,crosses:0,touched8:0,acc:0,level_age_h:(tSig-best.L.formedTs)/3600000,vol_contraction:1,vol_mult:1,
+      overshoot_atr:best.ov,dist_atr:0,bias_ok:1,atrD_pct:aD/eb.o,aH1_pct:0,v6_fresh:1,v6_poke:0,v6_covers:1,v6_preAcc:0,v6_smooth:0,v6_d1Against:0,
+      free_zone_h:0,wall_r:99,day_pos:0,body_ratio:1,wick_ratio:0,ru_ixS:st.ru_ixS,ru_ixExt:st.ru_ixExt,ru_ix20:ix20,ru_d1close:today.c,
+      brk_bars:1,vol_ret_brk:1,dow:new Date(eb.ts).getUTCDay(),ema_ok:1,approach_atr:0,atr_ratio:0,lvl_density:0,round_dist:0,green_ratio:0,d1_streak:0,
+      turn24:0,turnD:jc>0?turnDayAt(h1c,jc-1):0,p:0,vol5mAvg:vMed/12,posMax:(vMed/12)*0.10,grouped:1,
+      fwd:h1c.slice(jc,jc+HB).map(b=>[b.ts,b.o,b.h,b.l,b.c])});
+  }
+}
+function ruHoldBars(){ return MKT==='ru'?200:getHold(); }
+function ruIsT(t){ return !!t&&t.type!=='algo'&&(t.mkt==='ru'||(t.mkt==null&&MKT==='ru')); }
+function ruSwing(){ return MKT==='ru'&&RU_MODE==='swing'; }
+function swOf(s){ if(!isRuBrkSig(s)) return 0; if(s.sw===2) return 2; if(s.swm!=null) return s.swm?1:0; return RU_MODE==='swing'?1:0; }
+function swRiskCap(s,risk){ return swOf(s)===1?Math.min(risk,RU_SW.stopMaxPct*s.e):risk; }
+let RU_MODE=(()=>{ try{ return localStorage.getItem('hw_ru_mode')==='swing'?'swing':'intraday'; }catch(e){ return 'intraday'; } })();
+function swStored(t){ if(!t) return 0; if(t.sw===2) return 2; return t.swm===1?1:0; }
+/* [hw-bot] заглушки: в Mini App нет США/аналитики/виджета состояния рынка */
+function mkRender(){}
+function anLogScan(){}
+function anLogSearch(){}
+function runUsScan(){}
+async function usRefreshWatch(){}
+function autoOnKey(){ return 'hw_auto_on'; }
+
+function scanSymbol(base,sym,d1,h1,opt){
+  const k30=opt&&opt.k30;
+  if(!k30||!k30.length||opt.raw) return scanSymbolCore(base,sym,d1,h1,opt);
+  const o2=Object.assign({},opt,{k30:null});
+  const full=scanSymbolCore(base,sym,d1,h1,Object.assign({},o2,{noDedup:true}));
+  const h1c=lastClosed(h1), by=new Map(k30.map(b=>[b.ts,b]));
+  const fromIdx=Math.max(60,h1c.length-opt.scanBars), part=[];
+  const formH=(h1.length&&!h1[h1.length-1].confirmed)?h1[h1.length-1].ts:null;
+  for(let i=fromIdx;i<=h1c.length;i++){
+    const H=i<h1c.length?h1c[i].ts:formH; if(H==null) continue;
+    const a=by.get(H); if(!a||!a.confirmed) continue;
+    const pb={ts:H,o:a.o,h:a.h,l:a.l,c:a.c,vol_quote:a.vol_quote||0,confirmed:true};
+    const sg=scanSymbolCore(base,sym,d1,h1c.slice(0,i).concat([pb]),Object.assign({},o2,{scanBars:1,noDedup:true,noD1:true}));
+    const b2=by.get(H+HALF_H);
+    for(const s of sg){
+      if((s.type||'fbo')!=='fbo') continue;
+      s._src=30;
+      s.fwd=(b2&&b2.confirmed?[[b2.ts,b2.o,b2.h,b2.l,b2.c]]:[]).concat(h1c.slice(i+1,i+1+ruHoldBars()).map(b=>[b.ts,b.o,b.h,b.l,b.c]));
+      part.push(s);
+    }
+  }
+  return dedupList(full.concat(part));
 }
 function dedupList(list){
   const ty=t=>t.type||'fbo';
-  const arr=list.slice().sort((a,b)=>a.base<b.base?-1:a.base>b.base?1:ty(a)<ty(b)?-1:ty(a)>ty(b)?1:a.t-b.t);
+  const arr=list.slice().sort((a,b)=>a.base<b.base?-1:a.base>b.base?1:ty(a)<ty(b)?-1:ty(a)>ty(b)?1:sigEnd(a)-sigEnd(b));
   const kept=[]; let cur=null;
   for(const t of arr){
     if(cur&&t.base===cur.base&&ty(t)===cur.type&&Math.abs(t.lv-cur.lv)/Math.max(Math.abs(cur.lv),1e-12)<0.01&&(t.t-cur.lastT)<=48*3600000){
@@ -2546,9 +2812,9 @@ function dedupList(list){
   return kept.map(c=>{
     // Берём ПЕРВЫЙ сигнал группы: в момент первого сигнала о более поздних ничего не известно.
     // Раньше брался лучший по вероятности модели — это было знание будущего.
-    const best=c.items.reduce((a,b)=>(b.t<a.t||(b.t===a.t&&prioOf(b)>prioOf(a)))?b:a);
+    const best=c.items.reduce((a,b)=>(sigEnd(b)<sigEnd(a)||(sigEnd(b)===sigEnd(a)&&prioOf(b)>prioOf(a)))?b:a);   // 7.58: самый ранний по моменту входа
     return Object.assign({},best,{grouped:c.items.length});
-  }).sort((a,b)=>b.t-a.t);
+  }).sort((a,b)=>sigEnd(b)-sigEnd(a));
 }
 
 /* ===== графики ===== */
@@ -2577,7 +2843,7 @@ function fmtBE(t){
 }
 /* 6.95: Мосбиржа — объём 5м и вход из капитала в рублях: «20 тыс ₽», «1.25 млн ₽». Вход = 10% объёма пятиминутки
    без деления на крипто-плечо ×16.5 (на акциях оно не применяется). Крипта — как раньше. */
-const isRuRow=t=>t&&(t.mkt==='ru'||(t.mkt==null&&MKT==='ru'));
+const isRuRow=t=>t&&(t.mkt==='ru'||t.mkt==='ru_algo'||(t.mkt==null&&isRuMoney()));
 function fmtRub(v){
   if(!v||v<=0) return '—';
   if(v>=1e9) return (v/1e9).toFixed(2)+' млрд ₽';
@@ -2603,10 +2869,11 @@ function fmtDur(ms){
 }
 /* Длительность сделки: для закрытых — до _closeTs/xt, для открытых — до сейчас */
 function tradeDur(t){
+  if(t._nodata) return '—';   // 7.60: нет свечей с момента входа — длительность неизвестна (раньше считалось от входа до сейчас → тысячи часов)
   const closeTs=t._closeTs||(t.xt&&t.xt>t.t?t.xt:null);
-  if(t._res==='take'||t._res==='stop'||t._res==='be') return fmtDur(closeTs?closeTs-t.t:null);
+  if(t._res==='take'||t._res==='stop'||t._res==='be'||(t._res==='eod'||t._res==='expired')) return fmtDur(closeTs?closeTs-t.t:null);
   if(t.o==='take'||t.o==='stop'||t.o==='be'||t.o==='expired') return fmtDur(closeTs?closeTs-t.t:null);
-  return fmtDur(Date.now()-(t.t+3600000)); // открытая — от закрытия свечи (прихода сигнала)
+  return fmtDur(Date.now()-(sigEnd(t))); // открытая — от закрытия свечи (прихода сигнала)
 }
 function outcomeHtml(o){
   if(o==='take') return '<span class="take">тейк</span>';
@@ -2840,8 +3107,8 @@ function toggleWatch(t){
   let w=loadWatch();
   const i=w.findIndex(x=>x.base===t.base&&x.t===t.t);
   if(i>=0) w.splice(i,1);
-  else w.push(hwCopyFeat({mkt:MKT,type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
-               strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,vol5mAvg:t.vol5mAvg,posMax:t.posMax,score:t.score!=null?t.score:signalScore(t),added:Date.now()},t));
+  else w.push(hwCopyFeat({mkt:MKT,type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,_src:t._src,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
+               strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,vol5mAvg:t.vol5mAvg,turnD:t.turnD,posMax:t.posMax,score:t.score!=null?t.score:signalScore(t),added:Date.now()},t));
   saveWatch(w); updCounts();
 }
 function updCounts(){
@@ -2864,7 +3131,7 @@ function renderScan(){
   const winH=windowHours(), cutoff=Date.now()-winH*3600000;
   // The best (тест): отбор по профилю ЛП-шортов ДО лимитов «монета 12ч / сигналов в час / недельный кап».
   // Относится только к ложному пробою — для режима «Пробой» не применяется.
-  const scBase0=byStrat(LAST.filter(s=>s.t>=cutoff),stratOf('sc'));
+  const scBase0=byStrat(LAST.filter(s=>s.t>=cutoff&&(s.sw!==2||ruSwing())),stratOf('sc'));   // 7.37
   const scBestOn=SC_BEST&&((MKT==='crypto'&&stratOf('sc')!=='brk')||(MKT==='ru'&&stratOf('sc')!=='fbo'));   // 7.02: крипта — ЛП, Мосбиржа — пробой
   const scSrc=scBestOn?bestSource(byStrat(LAST.filter(s=>s.t>=cutoff),MKT==='ru'?'brk':'fbo')):scBase0;
   const bestRows=(MKT==='crypto'||MKT==='ru')?bestPipeline(LAST.filter(s=>s.t>=cutoff)):null;   // 7.01: всегда — для звёздочек
@@ -2898,7 +3165,7 @@ function renderScan(){
   for(const t of rows.slice(0,300)){
     const tr=document.createElement('tr'); tr.className='clickable';
     tr.innerHTML=`<td class="muted">▸</td><td><span class="eye ${isWatched(t)?'on':''}" data-base="${t.base}" data-t="${t.t}">👁</span></td>`+
-      `<td>${nameCell(t,'sc')}</td><td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
+      `<td>${nameCell(t,'sc')}</td><td class="muted">${new Date(sigEnd(t)).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
       `<td>${fmt(t.lv)}</td><td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td>`+
       `<td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
@@ -2971,7 +3238,7 @@ async function renderWatch(){
       res=`<span class="${r>=0?'take':'stop'}">${r>=0?'+':''}${r.toFixed(2)}R</span>`;
     }
     tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${nameCell(t)}</td>`+
-      `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
+      `<td class="muted">${new Date(sigEnd(t)).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td>`+
       `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
       `<td>${t._now!=null?fmt(t._now):'—'}</td>`+
@@ -2989,7 +3256,7 @@ async function renderWatch(){
       if(shown.has(t.t+'_'+t.base)) continue;
       const tr=document.createElement('tr'); tr.className='clickable'; tr.style.opacity='0.35';
       tr.innerHTML=`<td class="muted">▸</td><td><span class="eye on">👁</span></td><td>${nameCell(t)}</td>`+
-        `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
+        `<td class="muted">${new Date(sigEnd(t)).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
         `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td>${fmt(t.lv)}</td>`+
         `<td>${fmt(t.e)}${t.ewM!=null?'<br><span class="muted" style="font-size:10px">окно '+ewStr(t.ewM)+'</span>':''}</td><td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
         `<td>—</td>`+
@@ -3188,7 +3455,7 @@ async function hwM5(sym,endTs,n){
   if(EX===Bybit) return await EX.m5(sym,Math.min(1000,n),endTs);
   let out=[],end=endTs;
   for(let p=0;p<Math.ceil(n/300);p++){ const part=await EX.m5(sym,300,end); if(!part.length) break; out=part.concat(out); end=part[0].t; }
-  const seen={}; return out.filter(b=>seen[b.t]?false:(seen[b.t]=1)).sort((a,b)=>a.t-b.t);
+  const seen={}; return out.filter(b=>seen[b.t]?false:(seen[b.t]=1)).sort((a,b)=>sigEnd(a)-sigEnd(b));
 }
 // После скана: догружаем 5м для показанных ЛП и уточняем оценку (в LAST — исходные объекты сигналов)
 async function hwRefineRows(rows){
@@ -3199,7 +3466,7 @@ async function hwRefineRows(rows){
     const t=todo[k];
     setStatus(`уточняю оценку по 5-минуткам: ${k+1}/${todo.length} — ${t.base}`);
     try{
-      const m5=await hwM5(t.sym,t.t+3600000,400);
+      const m5=await hwM5(t.sym,sigEnd(t),400);
       for(const src of LAST) if(src.base===t.base&&src.t===t.t&&src.lv===t.lv&&(src.type||'fbo')==='fbo'){ if(fboM5Refine(src,m5)) n++; }
     }catch(e){}
     await yieldNow();
@@ -3211,7 +3478,7 @@ async function hwRefineRows(rows){
 // силу уровня и время его формирования.
 async function hwRefreshSignal(t,d1,h1){
   const h1c=lastClosed(h1), d1c=lastClosed(d1), idx=h1c.findIndex(b=>b.ts===t.t);
-  if(idx<60||MKT==='algo') return false;
+  if(idx<60||isAlgoM()||t._src===30) return false;   // 7.58: сигнал с середины часа — признаки уже посчитаны на его момент
   const bar=h1c[idx], H=3600000, D=86400000, isF=(t.type||'fbo')==='fbo';
   let m=null;
   try{
@@ -3238,7 +3505,7 @@ async function hwRefreshSignal(t,d1,h1){
   const brSide=t.side==='short'?'long':'short', beyond=b=>brSide==='long'?b.c>t.lv:b.c<t.lv;
   const bb=h1cut.slice(-7,-1).filter(beyond);
   Object.assign(t,{atrD, level_age_h:(bar.ts-formedTs)/H,
-    vol_mult:vMed>0?(bar.vol_quote||0)/vMed:0, vol5mAvg:vMed/12, posMax:(vMed/12)*0.10});
+    vol_mult:vMed>0?(bar.vol_quote||0)/vMed:0, vol5mAvg:vMed/12, turnD:turnDayAt(h1c,idx), posMax:(vMed/12)*0.10});
   if(m&&m.strength!=null) t.strength=m.strength;
   if(isF){
     Object.assign(t,{vol_contraction:volContraction(h1cut),
@@ -3251,6 +3518,7 @@ async function hwRefreshSignal(t,d1,h1){
   return true;
 }
 async function refreshWatch(all){
+  if(MKT==='us'){ await usRefreshWatch(all); return; }
   all=all===true;
   const w=loadWatch(); if(!w.length){renderWatch();return;}
   const btn=el('#refreshWatch'), btnAll=el('#refreshWatchAll'); btn.disabled=true; if(btnAll) btnAll.disabled=true;
@@ -3272,26 +3540,31 @@ async function refreshWatch(all){
     try{
       if(all){
         const hrs=Math.ceil((Date.now()-t.t)/3600000);
-        const need=Math.min(2000,Math.max(400,hrs+300));
+        const need=Math.max(400,hrs+300);   // 7.43: без потолка 2000 — иначе у старых сделок свечи входа не скачивались
         const [d1,h1]=await Promise.all([EX.kline(t.sym,'1d',Math.min(450,Math.ceil(need/24)+60)),EX.kline(t.sym,'1h',need)]);
-        const after=h1.filter(b=>b.ts>t.t);
+        const after=(await halfBarAfter(EX,t)).concat(h1.filter(b=>b.ts>t.t));   // 7.58
         if(h1.length){ t._now=h1[h1.length-1].c; }
         else{ try{ const tk=await EX.tickers(); const row=tk.find(r=>r.sym===t.sym||r.base===t.base); t._now=row?+row.last:null; }catch(_){} }
         t._res=null; t._closeTs=null;
-        const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
-        let curStop=t.st, moved=false;
+        const risk=Math.abs(t.e-t.st), beR_=beROf(t), beLvl=t.d?t.e+beR_*risk:t.e-beR_*risk;
+        let curStop=t.st, moved=false, lc=null; const friCut=ruFriCut(t), rLc=()=>lc==null?0:(t.d?lc-t.e:t.e-lc)/risk;   // 7.60
         for(const b of after){
+          if(friCut!=null&&b.ts>=friCut){ t._res='expired'; t._closeTs=friCut; t._r=rLc(); break; }
+          if((b.ts-t.t)/3600000>holdOfT(t)){ t._res='expired'; t._closeTs=b.ts; t._r=rLc(); break; }   // 7.31: по сроку удержания (крипта 168 ч, MOEX 96 ч; 7.37: свинг 168/96 ч)
           const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
           if(hs){t._res=moved?'be':'stop'; t._closeTs=b.ts; break;}
           if(ht){t._res='take'; t._closeTs=b.ts; break;}
-          if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
+          if(beR_>0 && !moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
+          lc=b.c;
         }
+        if(!t._res&&friCut!=null&&after.length&&after[after.length-1].ts+3600000>=friCut){ t._res='expired'; t._closeTs=friCut; t._r=rLc(); }   // 7.60
         t._beMoved=moved;
+        if(!h1.length||h1[0].ts>t.t){ t._res=null; t._closeTs=null; t._r=null; t._nodata=true; } else delete t._nodata;   // 7.43
         // признаки сигнала, объём 5м, вход из капитала — по свежим данным
         try{ await hwRefreshSignal(t,d1,h1); }catch(_){}
         // 5-минутки: 33ч до сигнала (уточнение оценки) + 4ч после (окно входа ±0.3R)
         try{
-          const signalEnd=t.t+3600000;
+          const signalEnd=sigEnd(t);
           let m5bars=[];
           if(MKT==='ru'){ m5bars=(await MOEX.m5(t.sym,48,signalEnd)).map(b=>({...b,t:b.ts??b.t})); }
           else { m5bars=await hwM5(t.sym,signalEnd+4*3600000,450); }
@@ -3309,23 +3582,28 @@ async function refreshWatch(all){
         if(hwX(t)) t.score=signalScore(t);
       } else {
         // Лёгкое обновление открытой сделки: только статус и текущая цена.
-        const h1=await EX.kline(t.sym,'1h',400);
-        const after=h1.filter(b=>b.ts>t.t);
+        const h1=await EX.kline(t.sym,'1h',Math.max(400,Math.ceil((Date.now()-t.t)/3600000)+50));   // 7.43: без потолка 1000 ч — старше 41 дня свечи входа терялись и сделка «висела» в работе   // 7.31: вся история сделки, а не последние 400 ч
+        const after=(await halfBarAfter(EX,t)).concat(h1.filter(b=>b.ts>t.t));   // 7.58
         if(h1.length){ t._now=h1[h1.length-1].c; }
         else{ try{ const tk=await EX.tickers(); const row=tk.find(r=>r.sym===t.sym||r.base===t.base); t._now=row?+row.last:null; }catch(_){} }
         t._res=null; t._closeTs=null;
-        const risk=Math.abs(t.e-t.st), beLvl=t.d?t.e+BE_TRIGGER_R*risk:t.e-BE_TRIGGER_R*risk;
-        let curStop=t.st, moved=false;
+        const risk=Math.abs(t.e-t.st), beR_=beROf(t), beLvl=t.d?t.e+beR_*risk:t.e-beR_*risk;
+        let curStop=t.st, moved=false, lc=null; const friCut=ruFriCut(t), rLc=()=>lc==null?0:(t.d?lc-t.e:t.e-lc)/risk;   // 7.60
         for(const b of after){
+          if(friCut!=null&&b.ts>=friCut){ t._res='expired'; t._closeTs=friCut; t._r=rLc(); break; }
+          if((b.ts-t.t)/3600000>holdOfT(t)){ t._res='expired'; t._closeTs=b.ts; t._r=rLc(); break; }   // 7.31: по сроку удержания (крипта 168 ч, MOEX 96 ч; 7.37: свинг 168/96 ч)
           const hs=t.d?b.l<=curStop:b.h>=curStop, ht=t.d?b.h>=t.tk:b.l<=t.tk;
           if(hs){t._res=moved?'be':'stop'; t._closeTs=b.ts; break;}
           if(ht){t._res='take'; t._closeTs=b.ts; break;}
-          if(!moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
+          if(beR_>0 && !moved && (t.d?b.h>=beLvl:b.l<=beLvl)){ curStop=t.e; moved=true; }
+          lc=b.c;
         }
+        if(!t._res&&friCut!=null&&after.length&&after[after.length-1].ts+3600000>=friCut){ t._res='expired'; t._closeTs=friCut; t._r=rLc(); }   // 7.60
         t._beMoved=moved;
+        if(!h1.length||h1[0].ts>t.t){ t._res=null; t._closeTs=null; t._r=null; t._nodata=true; } else delete t._nodata;   // 7.43
         // Окно входа: 5-минутки для первых 4ч после сигнала
         try{
-          const signalEnd=t.t+3600000;
+          const signalEnd=sigEnd(t);
           const ewLo=t.e-0.3*Math.abs(t.e-t.st), ewHi=t.e+0.3*Math.abs(t.e-t.st);
           let m5bars=[];
           if(MKT==='ru'){ m5bars=(await MOEX.m5(t.sym,48,signalEnd)).filter(b=>b.ts>=signalEnd&&b.ts<signalEnd+4*3600000); }
@@ -3432,7 +3710,7 @@ function renderBt(){
     const tr=document.createElement('tr'); tr.className='clickable';
     const oc=outcomeHtml(t.o);
     tr.innerHTML=`<td class="muted">▸</td><td>${nameCell(t,'bt')}</td>`+
-      `<td class="muted">${new Date(t.t+3600000).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
+      `<td class="muted">${new Date(sigEnd(t)).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
       `<td class="${t.d?'take':'stop'}">${t.d?'LONG':'SHORT'}</td><td class="muted">${typeLbl(t)} · ${t.k}</td>`+
       `<td>${fmt(t.lv)}</td><td title="В скобках: окно входа ±0.3R">${fmt(t.e)}${t.ewM!=null?'<span class="muted"> ('+ewStr(t.ewM)+')</span>':''}</td>`+
       `<td class="stop">${fmtStop(t)}</td><td class="muted">${fmtBE(t)}</td><td class="take">${fmt(t.tk)}</td>`+
@@ -3510,22 +3788,25 @@ async function scanUniverse(ex,tk,winH,onStart,onProg){
         }
       }catch(e){}
     }
-    let raw=[],i=0,brk=0,rev=0;
+    let raw=[],i=0,brk=0,rev=0; const mkSer={}, mkAll={};   // 7.45 / 7.55
     // 6.99: инструменты загружаются параллельно (раньше — по одному), результат тот же
     const doOne=async(it)=>{
       try{
         const d1n=Math.min(450, Math.ceil(winH/24)+60);
-        const [d1,h1]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need)]);
+        const [d1,h1,k30]=await Promise.all([ex.kline(it.sym,'1d',d1n),ex.kline(it.sym,'1h',need),k30Bars(ex,it.sym,Date.now()-Math.min(winH+8,720)*3600000)]);   // 7.58: 30-минутки за последние ≤30 дней
         // РУ: относительная сила акции vs IMOEX за 5 торговых дней
         if(MKT==='ru'){
           const d1cl=lastClosed(d1);
           const d5=d1cl.length>=6?d1cl[d1cl.length-6]:d1cl[0];
           opt.sym5ret=d1cl.length>=2?(d1cl[d1cl.length-1].c-d5.c)/d5.c:0;
         }
-        const sigC=scanSymbol(it.base,it.sym,d1,h1,opt).map(s=>(s.mkt=MKT,s));
+        const sigC=scanSymbol(it.base,it.sym,d1,h1,Object.assign({},opt,{k30})).map(s=>(s.mkt=MKT,s));
         const d1cl=lastClosed(d1), dW0=d1cl.filter(b=>b.ts>=Date.now()-winH*3600000), dW=dW0.length>=3?dW0:d1cl.slice(-3);
         const avgT=dW.length?dW.reduce((a,b)=>a+(b.vol_quote||0),0)/dW.length:0;
         perCoin[it.base]={avg:avgT, sig:sigC};
+        if(MKT==='crypto'&&!/^(BTC|ETH)$/.test(it.base)&&!isStock(it.base)) mkSer[it.base]=lastClosed(h1).map(b=>({ts:b.ts,c:b.c}));   // 7.45
+        if(MKT==='crypto') mkAll[it.base]=lastClosed(h1).map(b=>({ts:b.ts,c:b.c}));   // 7.55: закрытия всех монет — для связанности с BTC
+        if(MKT==='crypto'&&it.base==='BTC') mkSer.__btc=lastClosed(h1).map(b=>({ts:b.ts,o:b.o,h:b.h,l:b.l,c:b.c}));   // 7.49
         const h1c=lastClosed(h1),d1c=lastClosed(d1);
         if(h1c.length>60&&d1c.length>45){
           const aD=atr(d1c), lv=aD>0?V0.buildLevels(d1c,[]):[];
@@ -3550,6 +3831,7 @@ async function scanUniverse(ex,tk,winH,onStart,onProg){
     const kept=Object.entries(perCoin).filter(([,v])=>v.avg>=minVol).sort((a,b)=>b[1].avg-a[1].avg).slice(0,nInst);
     raw=[]; for(const [,v] of kept) raw=raw.concat(v.sig);
     if(MKT==='ru') ruCluster(raw);
+    if(MKT==='crypto'){ try{ const top=Object.entries(perCoin).filter(([b])=>mkSer[b]&&b!=='__btc').sort((a,b)=>b[1].avg-a[1].avg).slice(0,120).map(([b])=>mkSer[b]); MK_STATE=mkCompute(top); try{ BTC_BIAS=btcBiasCompute(mkSer.__btc); }catch(e){ BTC_BIAS=null; } try{ cbtcTag(raw,mkAll); }catch(e){} mkTag(raw); }catch(e){ MK_STATE=null; } }   // 7.45
     return {raw, nList:list.length, nKept:kept.length, brk, rev};
 }
 el('#run').addEventListener('click',async()=>{
@@ -3569,7 +3851,7 @@ el('#run').addEventListener('click',async()=>{
       (i,n,base,cnt)=>{ prog.value=i/n*100; if(i%5===0) setStatus(`${i}/${n} — ${base} (сигналов: ${cnt})`); });
     let raw=U.raw; const brk=U.brk, rev=U.rev;
     UNIVERSE_NOTE=`просканировано ${U.nList} инструментов, из них ${U.nKept} с достаточным средним оборотом`;
-    LAST=raw.sort((a,b)=>b.t-a.t);   // дедуп уже сделан внутри scanSymbol
+    LAST=raw.sort((a,b)=>sigEnd(b)-sigEnd(a));   // дедуп уже сделан внутри scanSymbol
     LAST_SCAN_META=scanSignature();
     const f=readF('sc');
     const weekAgo=Date.now()-7*86400000;
@@ -3605,8 +3887,8 @@ el('#addWatch').addEventListener('click',()=>{
   let w=loadWatch(), added=0;
   for(const t of rows){
     if(w.some(x=>x.base===t.base&&x.t===t.t)) continue;
-    w.push(hwCopyFeat({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
-            strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,vol5mAvg:t.vol5mAvg,posMax:t.posMax,score:t.score!=null?t.score:signalScore(t),added:Date.now()},t));
+    w.push(hwCopyFeat({type:t.type||'fbo',base:t.base,sym:t.sym,t:t.t,_src:t._src,d:t.d,side:t.side,lv:t.lv,k:t.k,p:t.p,e:t.e,st:t.st,tk:t.tk,rp:t.rp,
+            strength:t.strength,crosses:t.crosses,vol_mult:t.vol_mult,vol5mAvg:t.vol5mAvg,turnD:t.turnD,posMax:t.posMax,score:t.score!=null?t.score:signalScore(t),added:Date.now()},t));
     added++;
   }
   saveWatch(w); renderWatch(); setStatus(`добавлено в отслеживаемое: ${added}`);
@@ -3788,7 +4070,7 @@ function precompute(rows, stops, tgts){
     // Раскладываем ОДИН РАЗ в хронологическом порядке (с тем же тай-брейком, что везде).
     // Тогда «первая/вторая половина» — это префикс битовой маски, и быстрый путь
     // в fastEvalCombo применим всегда, а не случайно.
-    arr.sort((a,b)=>(a.t-b.t)||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
+    arr.sort((a,b)=>(sigEnd(a)-sigEnd(b))||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
     cache[st+'|'+tg]={rows:arr, idx:buildIndex(arr)};
   }
   return cache;
@@ -4364,7 +4646,7 @@ await yieldNow(); cand[q].rob=robustCheck(cand[q].c); cand[q].rank=cand[q].wr*ca
       '<th>Сделок<br><span class="muted">/нед</span></th><th>Итог R<br><span class="muted">на сделку</span></th><th>Стопов<br>подряд</th>'+
       '<th>Капитал<br><span class="muted">мин. от старта</span></th><th>Устойчивость<br><span class="muted">мин … мед … макс</span></th><th>Вне выб.<br><span class="muted">R · WR · сд.</span></th><th>Надёжн.</th><th>Фильтры</th></tr></thead><tbody>';
     // Кривая и капитал — тем же расчётом, что график по клику (места в рынке из «Одновременно в рынке», иначе 1)
-    const RUm=MKT==='ru', STARTm=RUm?20000:50, pnlm=RUm?(t=>(t.r||0)*(t.rp||0)):(t=>(t.r||0)/3);
+    const RUm=isRuMoney(), STARTm=RUm?20000:50, pnlm=RUm?(t=>(t.r||0)*(t.rp||0)):(t=>(t.r||0)/3);
     const slotsM=+(el('#bt_conc')?el('#bt_conc').value:0)||1, srcM=byStrat(btPeriodCut(BT),stratOf('bt'));
     top.forEach((r,i)=>{
       const act=Object.entries(r.c).filter(([k,v])=>v!=='auto').map(([k,v])=>`${nm[k]||k}:${v}`).join(', ')||'всё на авто';
@@ -4397,7 +4679,7 @@ await yieldNow(); cand[q].rob=robustCheck(cand[q].c); cand[q].rank=cand[q].wr*ca
       'Настоящая комбинация даёт похожие числа на обеих половинах: до 12 п.п. — приемлемо, больше 20 п.п. — скорее всего подгонка. '+
       'Чем меньше фильтров в наборе и чем больше сделок, тем надёжнее.'+ROB_NOTE_DYN+'</div>';
     // Запоминаем результаты, чтобы можно было вернуться к списку после «Применить»
-    LAST_SEARCH={html:h, top};
+    LAST_SEARCH={html:h, top}; try{ anLogSearch('regular',top); }catch(e){}
     showSearchResults();
   } finally { btn.disabled=false; }
 }
@@ -4482,7 +4764,7 @@ function bestRegAdd(rows){
 }
 function bestWeekCap(rows){
   const W=bestWatchSet(), cnt={}, keep=[];
-  const asc=rows.slice().sort((a,b)=>(a.t-b.t)||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
+  const asc=rows.slice().sort((a,b)=>(sigEnd(a)-sigEnd(b))||(prioOf(b)-prioOf(a))||(a.base<b.base?-1:a.base>b.base?1:0));
   if(asc.length){ const t0=asc[0].t; for(const [k,v] of bestReg()) if(v<t0){ const wk=isoWeekKey(v); if(wk===isoWeekKey(t0)) cnt[wk]=(cnt[wk]||0)+1; } }
   for(const t of asc){
     const w=W.has(t.base+'|'+t.t);
@@ -4500,7 +4782,7 @@ function bestF(){
   if(MKT==='ru') return readFFromObj({});   // 7.02: Мосбиржа — алгоритм MOEX в «авто» (обе стороны, лонги по тренду акции)
   const f=readFFromObj({});
   const nn=el('#noNight'); if(nn&&!nn.checked) f.hours='0-24';   // как «авто» в панели
-  f.side=0;   // ЛП — только SHORT
+  f.side=0;   // 7.56: The best — только ЛП-шорты
   return f;
 }
 function bestPipeline(list,Lov){
@@ -4880,6 +5162,7 @@ function readFFromObj(obj){
     const v=(obj&&obj[id]!==undefined)?String(obj[id]):'auto';
     if(v==='auto'&&MKT==='ru') (f._ra||(f._ra={}))[id]=1;
     if(v==='auto'&&ruAuto(id)) f[id]=RU_AUTO[id];
+    else if(v==='both'&&id==='side') f[id]=null;   // 7.56
     else if(v==='auto') f[id]=DEF[id];
     else if(['kind','hours','daypos','dow','appr','atrr','round','green','atrd'].includes(id)) f[id]=v;
     else if(['touch','acc','bias','side','ema','brkbars','cov','preacc','smooth','d1ag'].includes(id)) f[id]=+v;
@@ -5564,7 +5847,9 @@ function applyRuDefaults(){
   // 6.91: недельный лимит для РУ — 15 (было принудительно 3). Отбор «топ по оценке» на Мосбирже не помогает: оценка обучена
   // на крипте и выбирала в основном лонги (из 3/нед — 51 лонг на 17 шортов, лонги 25% против 53% у шортов).
   // 6.96: на Мосбирже ~15–20 сигналов в неделю; отбор «топ по оценке» тут не работает (оценка обучена на крипте) → лимит 40.
-  const wm=el('#sc_weekmax'); if(wm&&(+wm.value<=20)) wm.value=40;
+  // 7.07: на Мосбирже недельного лимита нет — при алгоритме 7.06 обычно ~13–15 сигналов в неделю, 9 недель из 10 ≤32, максимум 59;
+  // лимит «топ-N по оценке» срезал как раз недели распродаж, где пробои лучше всего (51% тейков против 33–35%).
+  const wm=el('#sc_weekmax'); if(wm) wm.value='';
   el('#sc_strat').dispatchEvent(new Event('change'));
 }
 function restoreScanUi(m){ try{ const o=JSON.parse(localStorage.getItem('hw_scan_ui_'+m)||'null');
@@ -6961,7 +7246,7 @@ function autoDefaults(){
   for(const id of FIDS){ const e=el('#sc_'+id); if(e&&[...(e.options||[])].some(o=>o.value==='auto')) e.value='auto'; }
   if(MKT==='ru'){ for(const [id,val] of Object.entries(RU_DEFAULTS)){ const e=el('#'+id); if(e&&id!=='sc_strat') e.value=val; } }
   const ms=el('#sc_minscore'); if(ms) ms.value='';
-  const wm=el('#sc_weekmax'); if(wm) wm.value=MKT==='ru'?40:20;
+  const wm=el('#sc_weekmax'); if(wm) wm.value=(MKT==='ru'||MKT==='us')?'':20;   // 7.07: Мосбиржа — без недельного лимита
   if(SC_BEST){ SC_BEST=false; try{ bestBtnState(el('#scBest'),false); }catch(e){} }
   const nowMsk=Date.now()+3*3600000, h=Math.ceil((nowMsk%86400000)/3600000)+1;   // +1 ч — чтобы в 00:00 попала последняя свеча прошлого дня
   el('#win').value=h; el('#winUnit').value='1';
