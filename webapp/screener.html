@@ -89,7 +89,7 @@ progress{width:100%;height:6px;margin-top:8px}
       <div class="note" style="padding:7px 0">MOEX ISS · задержка 15 мин</div></div>
     <div class="field" id="fldSrc"><label>Источник</label>
       <select id="src"><option value="auto">Авто (Bybit → OKX)</option><option value="bybit">Bybit</option><option value="okx">OKX</option></select></div>
-    <div class="field"><label id="minVolLbl">Мин. оборот, $млн/сут</label><input id="minVol" type="number" value="1" step="0.5" min="0.1" style="width:110px"></div>
+    <div class="field"><label id="minVolLbl">Мин. оборот, $млн/сут</label><input id="minVol" type="number" value="5" step="0.5" min="0.1" style="width:110px"></div>
     <div class="field"><label>Инструментов</label><input id="nInst" type="number" value="300" min="20" max="600" style="width:100px"></div>
     <div class="field"><label>Окно сигналов</label><input id="win" type="number" value="3" min="1" max="365" style="width:80px"></div>
     <div class="field"><label>единица</label>
@@ -1022,7 +1022,7 @@ const V0 = {};
 V0.PARAMS = {
   atr_n: 14, d1_min: 30, h4_min: 40, h1_min: 40,
   work_days: 26, swing_lr: 2,
-  vol_usd_min: 1_000_000, spread_max: 0.0015,
+  vol_usd_min: 5_000_000, spread_max: 0.0015,
   merge_atr: 0.06, merge_pct: 0.001,
   zone_atr: 0.03, zone_pct: 0.0005,
   dist_atr: 0.50,
@@ -1218,7 +1218,7 @@ V0.evaluate = function (ticker, last, bid, ask, d1in, h4in, h1in, m5in, volUsd24
   const d1 = lastClosed(d1in), h4 = lastClosed(h4in), h1 = lastClosed(h1in);
   const m5 = lastClosed(m5in || []);
   const out = { version: "HWv1.0", ticker, ok: false, cards: [], levels: [], reason: "" };
-  if (volUsd24h && volUsd24h < V0.PARAMS.vol_usd_min) { out.reason = "оборот < $1M"; return out; }
+  if (volUsd24h && volUsd24h < V0.PARAMS.vol_usd_min) { out.reason = "оборот < $5M"; return out; }
   if (d1.length < V0.PARAMS.d1_min || h4.length < V0.PARAMS.h4_min || h1.length < V0.PARAMS.h1_min || last <= 0) {
     out.reason = "мало баров"; return out;
   }
@@ -3750,7 +3750,7 @@ const RU_LIST_DEFAULT='LKOH,GAZP,YDEX,ROSN,SBER,OZON,VTBR,T,PLZL,NVTK,SIBN,TATN,
 function ruListSet(){ const L=RU_LIST_DEFAULT.split(','); const n=+el('#nInst').value||L.length; return L.slice(0,Math.max(1,n)); }   // 7.04: «Инструментов» на Мосбирже = бумаг из списка
 async function scanUniverse(ex,tk,winH,onStart,onProg){
     const ru=MKT==='ru';
-    const minVol=ru?0:(+el('#minVol').value)*1e6, nInst=ru?9999:+el('#nInst').value;
+    const minVol=ru?0:Math.max(CRYPTO_MIN_VOL,(+el('#minVol').value)*1e6), nInst=ru?9999:+el('#nInst').value;
     const noStocks=MKT==='crypto'&&el('#noStocks').checked;
     let list;
     if(ru){ const want=ruListSet(), by={}; for(const t of tk) by[t.base]=t; list=want.map(b=>by[b]).filter(Boolean); }
@@ -3842,7 +3842,7 @@ el('#run').addEventListener('click',async()=>{
   try{
     setStatus('подключаюсь…');
     const {ex,tk}=await pickSource(el('#src').value); EX=ex;
-    const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
+    const minVol=MKT==='crypto'?Math.max(CRYPTO_MIN_VOL,(+el('#minVol').value)*1e6):(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
     const noStocks=MKT==='crypto'&&el('#noStocks').checked;
     // Сканируется ровно столько инструментов, сколько указано в «Инструментов» (топ по обороту),
     // затем отсеиваются те, у кого средний дневной оборот за период ниже «Мин. оборота».
@@ -5726,7 +5726,7 @@ async function testerScanLegacy(){
   prog.style.display=''; prog.value=0; lbl.textContent='подключаюсь…';
   try{
     const {ex,tk}=await pickSource(el('#src').value); EX=ex;
-    const minVol=(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
+    const minVol=MKT==='crypto'?Math.max(CRYPTO_MIN_VOL,(+el('#minVol').value)*1e6):(+el('#minVol').value)*1e6, nInst=+el('#nInst').value;
     const noStocks=MKT==='crypto'&&el('#noStocks').checked;
     let list=tk.filter(t=>t.turn>=minVol*0.5&&t.last>0);
     if(noStocks) list=list.filter(t=>!isStock(t.base));
@@ -5800,7 +5800,8 @@ async function testerScanLegacy(){
 
 /* ===== переключатель рынка ===== */
 // У каждого рынка своё состояние: сигналы, бэктест, источник, отслеживаемые — чтобы статистика не смешивалась.
-const MKT_STATE={crypto:{LAST:[],BT:[],EX:null,REGIME:null,vol:'1'},
+const CRYPTO_MIN_VOL=5e6;   // 17.10: крипта — оборот не ниже $5M/сут всегда (как бот: screener.MIN_VOL_USD_24H)
+const MKT_STATE={crypto:{LAST:[],BT:[],EX:null,REGIME:null,vol:'5'},
                  algo:{LAST:[],BT:[],EX:null,REGIME:null,vol:'1'},
 // Алго всегда использует Bybit как источник (крипта-перпы)
 // EX инициализируется лениво в fetchAlgoSignals
@@ -6133,7 +6134,7 @@ async function algoLoad(topN,hours,progress){
   let tk;
   try{ tk=await EX.tickers(); }
   catch(e){ if(EX!==OKX){ EX=OKX; tk=await EX.tickers(); } else throw e; }
-  const minVol=(+el('#minVol').value||1)*1e6;
+  const minVol=Math.max(CRYPTO_MIN_VOL,(+el('#minVol').value||5)*1e6);
   // ВАЖНО: оборот у бирж в поле turn (раньше тут читались несуществующие поля — список был пустым)
   const uni=tk.filter(t=>(t.turn||0)>=minVol).sort((a,b)=>b.turn-a.turn).slice(0,topN);
   if(!uni.length) throw new Error('биржа не вернула монет с оборотом от $'+(minVol/1e6)+' млн');
