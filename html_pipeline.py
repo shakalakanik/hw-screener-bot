@@ -80,6 +80,62 @@ def sig_end(c: dict) -> int:
     return int(c["signal_ts"]) + (HALF_H if c.get("src30") else 3_600_000)
 
 
+# HTML 7.86: конвейер считается на окне + 7 суток разгона (склейка уровня, «монета раз в 12 ч», паузы, лимиты),
+# показывается/отправляется только окно — короткое окно = точная часть длинного.
+SCAN_WARM_H = 168
+
+
+def warm_cut(win_h: int, now_ms: int) -> int:
+    return int(now_ms) - (int(win_h) + SCAN_WARM_H) * 3_600_000
+
+
+def stop_min_c(f: dict | None) -> float:
+    """HTML 7.81/7.85 stopMinC(f): пол стопа крипты, % цены (поле шаблона «stopmin», по умолчанию 2)."""
+    v = (f or {}).get("stopmin")
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        v = 0.0
+    return (v if v > 0 else 2.0) / 100.0
+
+
+def _msk_dw_hm(ts_ms: int) -> tuple[int, int]:
+    """День недели JS (вс=0) и минуты от полуночи по МСК."""
+    import time as _t
+    g = _t.gmtime(int(ts_ms) / 1000 + 3 * 3600)
+    return (g.tm_wday + 1) % 7, g.tm_hour * 60 + g.tm_min
+
+
+def crypto_thu_fri_block(card: dict) -> bool:
+    """HTML 7.90/7.91 cryptoThuFriBlock(s) — ТОЛЬКО крипта, ТОЛЬКО ложный пробой ШОРТ, время входа sigEnd по МСК:
+    • чт 16:00 — пт 16:00 МСК: сигнала нет;
+    • сб 06:00–12:00 МСК: только при свободном пути до «стены» ≥ 7R (wall_r ≥ 7).
+    Остальные дни/часы, лонги, пробои, Мосбиржа — без изменений."""
+    if card.get("market", "crypto") != "crypto" or card.get("strategy", "fbo") != "fbo":
+        return False
+    if _d(card) != 0:
+        return False
+    dw, hm = _msk_dw_hm(sig_end(card))
+    if (dw == 4 and hm >= 16 * 60) or (dw == 5 and hm < 16 * 60):
+        return True
+    if dw == 6 and 6 * 60 <= hm < 12 * 60:
+        w = (card.get("feat") or {}).get("wall_r")
+        if not (w is not None and w >= 7):
+            return True
+    return False
+
+
+def ru_off_day(card: dict) -> bool:
+    """HTML 7.75 offDay(s,'ru'): MOEX — сигнал (время входа sigEnd, МСК) в субботу или воскресенье."""
+    dw, _ = _msk_dw_hm(sig_end(card))
+    return dw in (0, 6)
+
+
+def no_off(cards: list[dict], market: str) -> list[dict]:
+    """HTML 7.75 noOff(LAST): для MOEX — убрать сигналы выходных до всех конвейеров."""
+    return [c for c in cards if not ru_off_day(c)] if market == "ru" else cards
+
+
 def dedup_list(cards: list[dict]) -> list[dict]:
     """dedupList(): повторы одного уровня (±1%) по монете+типу в пределах 48 ч → самый ранний по моменту входа."""
     ty = lambda c: c.get("strategy", "fbo")
@@ -140,7 +196,7 @@ def recompute(card: dict, f: dict) -> dict | None:
     is_ru = card.get("market") == "ru"
     # новый HTML: стоп не меньше 1% для акций РФ (2% крипта), удержание 96ч РФ / 168ч крипта
     sw = sw_of(card, f)   # HTML 7.37
-    risk = sw_risk_cap(card, max((stop_k(card, f["stop"], f) / 100.0) * atr_d, (0.01 if is_ru else 0.02) * e), f)
+    risk = sw_risk_cap(card, max((stop_k(card, f["stop"], f) / 100.0) * atr_d, (0.01 if is_ru else stop_min_c(f)) * e), f)
     hold = RU_SW["holdH"] if sw == 1 else RU_SW["holdD"] if sw == 2 else (HOLD_RU if is_ru else HOLD)
     be_r = RU_SW["beH"] if sw == 1 else RU_SW["beD"] if sw == 2 else BE_TRIGGER_R
     fri = ru_fri_cut(card)   # HTML 7.60
@@ -189,7 +245,7 @@ def algo_reject(card: dict, f: dict) -> bool:
         lv, e, a = s.get("lv", card.get("level")), card.get("last"), card.get("atr_d")
         if lv is not None and e is not None and a is not None:
             ru = mkt == "ru"
-            risk = sw_risk_cap(card, max((stop_k(card, f["stop"], f) / 100.0) * a, (0.01 if ru else 0.02) * e), f)
+            risk = sw_risk_cap(card, max((stop_k(card, f["stop"], f) / 100.0) * a, (0.01 if ru else stop_min_c(f)) * e), f)
             if _d(card) == 1:
                 if e - risk > lv:
                     return True
@@ -307,6 +363,8 @@ def apply_all(cards: list[dict], raw_filters: dict, strategy: str,
         rows = [c for c in rows if c.get("strategy", "fbo") == strategy]
     ok = []
     for c in rows:
+        if crypto_thu_fri_block(c):   # HTML 7.90/7.91 passes(): первое правило
+            continue
         if algo_reject(c, f):
             continue
         g = swing_gate(c, f)
@@ -386,6 +444,8 @@ def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False,
                 and c.get("market", "crypto") == "crypto" and is_best_card(c)]
     ok = []
     for c in rows:
+        if crypto_thu_fri_block(c):   # HTML 7.90/7.91 passes(): первое правило
+            continue
         if algo_reject(c, f):
             continue
         g = swing_gate(c, f)
@@ -397,6 +457,22 @@ def best_pipeline(cards: list[dict], cutoff_ms: int, no_night: bool = False,
         ok.append(r)
     seq = _apply_sequential(_cap_cluster(_apply_coin_limit(ok), f["cap"] or 3), f)
     return _best_week_cap(seq, reg_ts)
+
+
+def apply_all_w(cards: list[dict], raw_filters: dict, strategy: str, now_ms: int, win_h: int,
+                week_max: int | None = 0, market: str | None = None) -> list[dict]:
+    """HTML 7.86 renderScan: applyAll на окне с разгоном (win_h + 168 ч), показ — только окно win_h."""
+    cut = int(now_ms) - int(win_h) * 3_600_000
+    rows = apply_all(cards, raw_filters, strategy, warm_cut(win_h, now_ms), week_max, win_h=win_h, market=market)
+    return [c for c in rows if c["signal_ts"] >= cut]
+
+
+def best_pipeline_w(cards: list[dict], now_ms: int, win_h: int, no_night: bool = False, market: str = "crypto",
+                    reg_ts=None, swing: bool = False) -> tuple[list[dict], list[dict]]:
+    """HTML 7.86: bestPipeline на окне с разгоном → (все отобранные — для реестра, только окно — показ/★)."""
+    cut = int(now_ms) - int(win_h) * 3_600_000
+    full = best_pipeline(cards, warm_cut(win_h, now_ms), no_night, market=market, reg_ts=reg_ts, swing=swing)
+    return full, [c for c in full if c["signal_ts"] >= cut]
 
 
 def best_reg_key(c: dict) -> str:

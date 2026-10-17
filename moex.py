@@ -321,6 +321,7 @@ async def scan_one_moex(
     client: httpx.AsyncClient,
     ticker: dict,
     lookback_hours: int = 12,
+    warm_h: int = 0,
     no_night: bool = True,
     imoex_ctx: dict | None = None,
 ) -> list[dict]:
@@ -337,7 +338,7 @@ async def scan_one_moex(
         # Глубина как в HTML: MOEX.kline(sym,'1d',ceil(win/24)+60) / ('1h', win+280)
         d1, h1 = await asyncio.gather(
             fetch_klines_moex_d1(client, symbol, -(-lookback_hours // 24) + 60),
-            fetch_klines_moex_h1(client, symbol, lookback_hours + 280),
+            fetch_klines_moex_h1(client, symbol, lookback_hours + warm_h + 280),
         )
         d1cl = [b for b in d1 if b.confirmed]
         d5 = d1cl[-6] if len(d1cl) >= 6 else (d1cl[0] if d1cl else None)
@@ -345,7 +346,7 @@ async def scan_one_moex(
         ru_ctx["sym5ret"] = ((d1cl[-1].c - d5.c) / d5.c) if (len(d1cl) >= 2 and d5) else 0
         result = evaluate(
             symbol, last, bid, ask, d1, [], h1, [], 0,
-            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lookback_hours + 8,
+            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lookback_hours + warm_h + 8,
             market="ru", ru_ctx=ru_ctx,
         )
         # dedup + ruCluster (пробои по всему списку за 3 ч) — в finalize_moex_cards после скана всех бумаг
@@ -365,7 +366,7 @@ async def scan_one_moex(
         try:
             from hwv1 import ru_d1_signals, last_closed as _lc
             h1c_ = _lc(h1)
-            d1cards = ru_d1_signals(symbol, _lc(d1), h1, h1c_, max(60, len(h1c_) - (lookback_hours + 8)), ru_ctx)
+            d1cards = ru_d1_signals(symbol, _lc(d1), h1, h1c_, max(60, len(h1c_) - (lookback_hours + warm_h + 8)), ru_ctx)
         except Exception as e:
             logger.debug("ru_d1_signals %s: %s", symbol, e)
         return {"cards": cards, "turn": turn, "base": symbol, "raw": True, "d1cards": d1cards}

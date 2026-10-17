@@ -40,7 +40,7 @@ PARAMS = {
     "work_days": 26,
     "swing_lr": 2,
     "universe_n": 200,
-    "vol_usd_min": 5_000_000.0,   # 17.10: крипта $5M (было $1M)
+    "vol_usd_min": 1_000_000.0,   # как V0.PARAMS в HTML 7.92 (отбор $5M — MIN_VOL_USD_24H)
     "merge_atr": 0.06,
     "merge_pct": 0.001,
     "zone_atr": 0.03,
@@ -1296,7 +1296,7 @@ def evaluate_brk(
         bar = h1c[i]
         if no_night and _is_night_msk(bar.ts):
             continue
-        if market == "ru" and (_ru_friday_late(bar.ts) or ru_weekend(bar.ts)):
+        if market == "ru" and _ru_friday_late(bar.ts):
             continue
         dk = bar.ts // 86_400_000
         if dk != cache_day:
@@ -1498,7 +1498,7 @@ def evaluate_fbo(
         bar = h1c[hi_idx]
         if no_night and _is_night_msk(bar.ts):
             continue
-        if market == "ru" and (_ru_friday_late(bar.ts) or ru_weekend(bar.ts)):
+        if market == "ru" and _ru_friday_late(bar.ts):
             continue
         dk = bar.ts // 86_400_000
         if dk != cache_day:
@@ -1712,7 +1712,7 @@ def evaluate(
     out = {"version": VERSION, "ticker": ticker, "ok": False, "cards": [], "reason": ""}
 
     if vol_usd_24h and vol_usd_24h < PARAMS["vol_usd_min"]:
-        out["reason"] = "оборот < $5M"
+        out["reason"] = "оборот < $1M"
         return out
     if len(h1c) < PARAMS["h1_min"] or len(d1c) < PARAMS["d1_min"] or last <= 0:
         out["reason"] = "мало баров"

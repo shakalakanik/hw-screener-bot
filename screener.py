@@ -80,6 +80,9 @@ def moex_scan_day_ok(now_s: float) -> bool:
     return _t.gmtime(now_s + 3 * 3600).tm_wday < 5
 
 
+SCAN_WARM_H = 168   # HTML 7.86: разгон конвейера (= html_pipeline.SCAN_WARM_H)
+
+
 def send_min_ts(now_ms: int, hours: int) -> int:
     """Минимальный signal_ts (открытие бара) для отправки: последние `hours` закрытых H1-баров."""
     hour_start = (int(now_ms) // 3_600_000) * 3_600_000
@@ -422,8 +425,10 @@ async def scan_one(
     *,
     lookback_hours: int | None = None,
     no_night: bool = True,
+    warm_h: int = 0,
 ) -> list[dict]:
-    """Проверить один инструмент, вернуть список карточек (может быть пустым)."""
+    """Проверить один инструмент, вернуть список карточек (может быть пустым).
+    warm_h — HTML 7.86 разгон: сигналы ищутся на win+warm часов, оборот для отбора — по окну win."""
     symbol = ticker["symbol"]
     inst_id = ticker.get("inst_id") or symbol
     lb = SCAN_LOOKBACK_H if lookback_hours is None else max(1, int(lookback_hours))
@@ -438,8 +443,8 @@ async def scan_one(
         # ex.kline(sym,'1h',min(9100,win+280)); Bybit — страницами по 1000, OKX — по 300.
         # От глубины зависят ATR (RMA с начала ряда) и «свободная зона» — поэтому 1:1.
         d1n = min(450, -(-lb // 24) + 60)
-        need = min(9100, lb + 280)
-        k30_from = int(time.time() * 1000) - min(lb + 8, 720) * 3_600_000   # HTML 7.58: 30-минутки ≤30 дней
+        need = min(9100, lb + warm_h + 280)
+        k30_from = int(time.time() * 1000) - min(lb + warm_h + 8, 720 + warm_h) * 3_600_000   # HTML 7.58/7.86
         d1, h1, k30 = await asyncio.gather(
             fetch_klines(client, symbol, "D", limit=d1n, inst_id=inst_id, html_pages=True),
             fetch_klines(client, symbol, "60", limit=need, inst_id=inst_id, html_pages=True),
@@ -450,7 +455,7 @@ async def scan_one(
         # no_night — чекбокс «без ночи» в HTML (по умолчанию включён).
         result = evaluate(
             symbol, last, bid, ask, d1, [], h1, [], 0,
-            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lb + 8, k30=k30,
+            fbo_threshold=0.0, no_night=bool(no_night), lookback_hours=lb + warm_h + 8, k30=k30,
         )
         from html_pipeline import dedup_list
         cards = dedup_list(result.get("cards", []))
@@ -466,7 +471,7 @@ async def scan_one(
 
 # ── Точный порт фильтров шаблона из HTML (readF + passes + recompute) ───────────
 _F_DEF = {
-    "thr": 0.20, "stop": 10.0, "tgt": 3.0, "str": 0.0, "cross": 99.0, "touch": None, "acc": None,
+    "thr": 0.20, "stop": 10.0, "stopmin": 2.0, "tgt": 3.0, "str": 0.0, "cross": 99.0, "touch": None, "acc": None,
     "dist": 99.0, "over": 0.0, "vc": None, "vol": 0.0, "bias": None, "side": None, "cap": 3,
     "age": 0.0, "kind": None, "maxrisk": 99.0, "hours": "9-23", "daycap": 99, "streak": 0,
     "pause": 24, "free": 0.0, "wall": 0.0, "daypos": None, "body": 0.0, "wick": 0.0,
@@ -734,7 +739,8 @@ def template_risk(card: dict, f: dict) -> tuple[float, float, float] | None:
     """recompute() из HTML: риск = max(stop% * ATR_D, 2% цены); тейк = tgt*R. → (stop, take, risk)."""
     e = float(card["last"])
     atr_d = float(card.get("atr_d") or 0)
-    min_pct = 0.01 if card.get("market") == "ru" else 0.02   # новый HTML: 1% РФ / 2% крипта
+    from html_pipeline import stop_min_c
+    min_pct = 0.01 if card.get("market") == "ru" else stop_min_c(f)   # HTML 7.85: 1% РФ / stopmin (2%) крипта
     risk = max((f["stop"] / 100.0) * atr_d, min_pct * e)
     if risk <= 0 or risk / e > MAXRISK:
         return None
@@ -1177,7 +1183,7 @@ async def _scan_crypto_html(
     total = max(1, len(tks))
     for i in range(0, len(tks), 20):
         results += await asyncio.gather(
-            *[scan_one(client, t, lookback_hours=win_h, no_night=no_night) for t in tks[i:i + 20]],
+            *[scan_one(client, t, lookback_hours=win_h, no_night=no_night, warm_h=SCAN_WARM_H) for t in tks[i:i + 20]],
             return_exceptions=True,
         )
         if progress:
@@ -1250,10 +1256,13 @@ async def _deliver_html(
     чата + общий дедуп уровня ±0.5%/36ч), лимит одновременных по шаблону, недельная квота с учётом уже отправленного. Отправка — от старых к новым."""
     from html_pipeline import apply_all, best_pipeline, best_key, best_reg_key, iso_week_key
 
+    from html_pipeline import apply_all_w, best_pipeline_w, no_off
     cutoff = now_ms - win_h * 3_600_000
     by_market: dict[str, list[dict]] = {}
     for c in all_cards:
         by_market.setdefault(c.get("market", "crypto"), []).append(c)
+    if by_market.get("ru"):
+        by_market["ru"] = no_off(by_market["ru"], "ru")   # HTML 7.75: MOEX — без сигналов выходных (до конвейеров)
 
     # The best (HTML 7.0x bestPipeline) — общий для всех чатов список по рынку (крипта / Мосбиржа).
     # ⭐ = сигнал реально отобран конвейером; недельный лимит учитывает реестр уже отобранных (HTML 7.01).
@@ -1267,9 +1276,9 @@ async def _deliver_html(
             reg = storage.best_registry_ts(bm, now_ms - 9 * 86_400_000)
         except Exception:
             reg = []
-        best_by[bm] = best_pipeline(by_market[bm], cutoff, nn_all, market=bm, reg_ts=reg)
-        try:
-            storage.best_registry_add(bm, [(best_reg_key(c), c["signal_ts"]) for c in best_by[bm]])
+        full, best_by[bm] = best_pipeline_w(by_market[bm], now_ms, win_h, nn_all, market=bm, reg_ts=reg)
+        try:   # HTML: bestRegAdd(out) — всё, что отобрал конвейер (с разгоном)
+            storage.best_registry_add(bm, [(best_reg_key(c), c["signal_ts"]) for c in full])
         except Exception as e:
             logger.debug("best registry: %s", e)
     # HTML 7.37: The best MOEX в режиме «Свинг» (другие стоп/удержание/ATR-фильтр) — считаем лениво, без записи в реестр
@@ -1283,8 +1292,8 @@ async def _deliver_html(
                 reg_sw = storage.best_registry_ts("ru", now_ms - 9 * 86_400_000)
             except Exception:
                 reg_sw = []
-            _best_ru_sw["v"] = (best_pipeline(by_market["ru"], cutoff, nn_all, market="ru", reg_ts=reg_sw, swing=True)
-                                if by_market.get("ru") else [])
+            _best_ru_sw["v"] = (best_pipeline_w(by_market["ru"], now_ms, win_h, nn_all, market="ru", reg_ts=reg_sw,
+                                                swing=True)[1] if by_market.get("ru") else [])
         return _best_ru_sw["v"]
 
     best_rows = best_by["crypto"]
@@ -1357,8 +1366,8 @@ async def _deliver_html(
             if mkt == "crypto" and not nn and raw.get("hours") in (None, "auto"):
                 # HTML readF: «авто» часов входа при выключенном «без ночи» = '0-24'
                 raw = {**raw, "hours": "0-24"}
-            rows = apply_all(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), cutoff, week_max,
-                             win_h=win_h, market=mkt)
+            rows = apply_all_w(by_market.get(mkt, []), raw, tpl.get("_strategy", "both"), now_ms, win_h,
+                               week_max, market=mkt)   # HTML 7.86: с разгоном 168 ч, показ — окно
             if mkt == "ru" and tpl.get("_strategy", "both") in ("brk", "both") and best_ru_chat:
                 # HTML 7.05: каждый сигнал The best MOEX виден в обычном списке со звёздочкой, даже если
                 # лимит «бумага 12 ч / в час» оставил там более ранний сигнал той же бумаги
@@ -1402,7 +1411,7 @@ async def _deliver_html(
                 st["too_old"] += 1
             elif c.get("market", "crypto") == "crypto" and not crypto_send_hour_ok(c["signal_ts"]):
                 st["night"] += 1   # ночь: не шлём и не помечаем отправленным
-            elif c.get("market") == "ru" and _ru_weekend(int(c.get("bar_ts", c["signal_ts"]))):
+            elif c.get("market") == "ru" and _ru_weekend(int(c.get("bar_ts", c["signal_ts"])) + 3_600_000):
                 st["night"] += 1   # MOEX: сб/вс (торги выходного дня) — не шлём
             elif storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
                                           c.get("strategy", "brk"), c["side"]):
@@ -1512,7 +1521,7 @@ async def run_scan(
 
             async def _one(t):
                 async with sem:
-                    return await scan_one_moex(client, t, lookback_hours=win_h, no_night=False, imoex_ctx=imoex_ctx)
+                    return await scan_one_moex(client, t, lookback_hours=win_h, warm_h=SCAN_WARM_H, no_night=False, imoex_ctx=imoex_ctx)
 
             results = list(await asyncio.gather(*[_one(t) for t in tickers_ru], return_exceptions=True))
             bad = [i for i, r in enumerate(results) if not (isinstance(r, dict) and r.get("raw"))]
@@ -1632,7 +1641,7 @@ async def run_manual_scan(
             results = []
             for i in range(0, len(tickers_ru), 6):
                 results += await asyncio.gather(
-                    *[scan_one_moex(client, t, lookback_hours=lookback, no_night=use_no_night,
+                    *[scan_one_moex(client, t, lookback_hours=lookback, warm_h=SCAN_WARM_H, no_night=use_no_night,
                                     imoex_ctx=imoex_ctx)
                       for t in tickers_ru[i:i + 6]],
                     return_exceptions=True,
