@@ -31,6 +31,6 @@ setTimeout(async()=>{
   w.document.querySelector('.hw-j-refresh').click();
   await new Promise(r=>setTimeout(r,1500));
   const st2=[...w.document.querySelectorAll('.hw-j-status')].map(e=>e.textContent);
-  chk('refresh recomputes (active)', /активна/.test(st2[0]), st2);
+  chk('refresh keeps closed status (af6acfd: пересчёт только открытых)', /тейк/.test(st2[0]) && /стоп/.test(st2[1]), st2);
   console.log('FAILS',fails); process.exit(fails?1:0);
 },2500);
