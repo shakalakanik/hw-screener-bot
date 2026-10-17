@@ -1069,3 +1069,30 @@
     start();
   }
 })();
+
+/* 17.10: формат символа под источник. Журнал/«Отслеживаю» хранят крипту как BTCUSDT (Bybit), а при откате источника
+ * на OKX нужен BTC-USDT-SWAP (и наоборот: позиции, добавленные из скана на OKX, на Bybit). Оборачиваем методы свечей. */
+function hwSymFor(exName, sym) {
+  var s = String(sym || '');
+  if (exName === 'OKX') { var m = /^([A-Z0-9]+)USDT$/i.exec(s); return m ? m[1].toUpperCase() + '-USDT-SWAP' : s; }
+  if (exName === 'Bybit') { var k = /^([A-Z0-9]+)-USDT-SWAP$/i.exec(s); return k ? k[1].toUpperCase() + 'USDT' : s; }
+  return s;
+}
+(function () {
+  function wrap(ex, name) {
+    if (!ex || ex.__hwSymWrapped) return;
+    ex.__hwSymWrapped = true;
+    ['kline', 'k30', 'm5'].forEach(function (fn) {
+      var orig = ex[fn]; if (typeof orig !== 'function') return;
+      ex[fn] = function (sym) { var a = Array.prototype.slice.call(arguments); a[0] = hwSymFor(name, sym); return orig.apply(this, a); };
+    });
+  }
+  function install() {
+    /* global OKX, Bybit */
+    try { if (typeof OKX !== 'undefined') wrap(OKX, 'OKX'); } catch (e) {}
+    try { if (typeof Bybit !== 'undefined') wrap(Bybit, 'Bybit'); } catch (e) {}
+  }
+  if (typeof document === 'undefined') return;
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', install); else install();
+})();
+if (typeof module !== 'undefined' && module.exports) module.exports = { hwSymFor: hwSymFor };
