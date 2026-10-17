@@ -6,6 +6,11 @@
 :root{--bg:#12131a;--panel:#1b1d27;--line:#2c2f3d;--fg:#e6e8ef;--muted:#9aa0b5;
 --green:#26a69a;--red:#ef5350;--accent:#7aa2f7;--warn:#ffb86b;--level:#ffd54f;--entry:#b0b6c8;color-scheme:dark}
 @media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#f7f8fb;--panel:#fff;--line:#e2e5ee;--fg:#1a1c25;--muted:#5c6377;--entry:#555c70;color-scheme:light}}
+:root[data-theme="light"]{--bg:#f5f6f7;--panel:#ffffff;--line:#dde0e3;--fg:#15171a;--muted:#666c72;
+--green:#0a9e57;--red:#e51c1c;--accent:#30343a;--btxt:#f5f6f7;--warn:#9c7a1f;--level:#b79a4a;--entry:#5b6273;color-scheme:light}
+:root[data-theme="light"] button:not(.ghost){color:var(--btxt)}
+:root[data-theme="light"] .tabs button:not(.on){color:var(--muted)}
+#themeToggle{font-size:13px}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:16px}
 .wrap{max-width:1250px;margin:0 auto}
@@ -70,8 +75,37 @@ progress{width:100%;height:6px;margin-top:8px}
   <button id="tabBt">Бэктест <span id="btCnt" class="muted"></span></button>
   <button id="tabTester">Тестировщик <span id="testerCnt" class="muted"></span></button>
   <button id="tabRegime">Состояние рынка</button>
+  <button id="themeToggle" type="button" class="ghost" style="margin-left:auto;padding:5px 14px" title="Переключить тему: тёмная / светлая">🌙 Тёмная</button>
   <button id="btnSaveFile" class="ghost" style="margin-left:auto;padding:5px 14px;font-size:13px" title="Скачать HTML со всеми сохранёнными данными (отслеживаемые, тестировщик, шаблоны, настройки)">💾 Сохранить</button>
 </div>
+<script>
+/* HTML 7.92: переключатель темы (hwThemeMode в localStorage). Mini App: 2 режима — тёмная / светлая;
+   без сохранённого выбора тема берётся из Telegram (colorScheme), иначе — тёмная. */
+(function(){
+  var KEY='hwThemeMode';
+  var ORDER=['dark','light'];
+  var LABELS={dark:'🌙 Тёмная',light:'☀️ Светлая'};
+  var btn=document.getElementById('themeToggle');
+  function apply(mode,user){
+    if(ORDER.indexOf(mode)<0) mode='dark';
+    var r=document.documentElement;
+    if(user){ r.style.removeProperty('--bg'); r.style.removeProperty('--fg'); }   // цвета Telegram — только для темы по умолчанию
+    r.setAttribute('data-theme', mode);
+    btn.textContent = LABELS[mode];
+  }
+  window.hwThemeApply=apply;
+  var saved=null; try{ saved=localStorage.getItem(KEY); }catch(e){}
+  var tg=null; try{ tg=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.colorScheme; }catch(e){}
+  apply(ORDER.indexOf(saved)>=0 ? saved : (tg==='light'?'light':'dark'), ORDER.indexOf(saved)>=0);
+  btn.addEventListener('click', function(){
+    var cur=document.documentElement.getAttribute('data-theme');
+    var next=ORDER[(ORDER.indexOf(cur)+1)%ORDER.length];
+    apply(next,true);
+    try{ localStorage.setItem(KEY, next); }catch(e){}
+  });
+})();
+</script>
+
 
 <div id="paneScan">
 <div class="card">
@@ -3159,6 +3193,9 @@ function kpiSignals(rows){
     `<div><label>Средняя p</label><b>${avgP.toFixed(3)}</b></div>`+
     `<div><label>Средний риск</label><b>${(avgR*100).toFixed(2)}%</b></div>`;
 }
+let ROWS_ALL=false; const ROWCAP=()=>ROWS_ALL?1e9:300;
+function scanMoreRow(tb,n){ if(n<=ROWCAP()||!tb) return; const tr=document.createElement('tr'); tr.innerHTML=`<td colspan="20" class="muted" style="padding:10px">Показано ${ROWCAP()} самых свежих из ${n} сигналов (число и статистика выше — по всем). <button class="ghost rowsAllBtn" style="padding:3px 10px;font-size:12px">Показать все ${n}</button></td>`; tb.appendChild(tr); }
+document.addEventListener('click',e=>{ if(e.target.closest&&e.target.closest('.rowsAllBtn')){ ROWS_ALL=true; try{ if(typeof renderBt==='function'&&el('#paneBt')&&el('#paneBt').style.display!=='none') renderBt(); else renderScan(); }catch(err){} } });
 function renderScan(){
   const f=readF('sc');
   const winH=windowHours(), cutoff=Date.now()-winH*3600000;
@@ -3198,7 +3235,7 @@ function renderScan(){
       `${isNaN(minSc)?'':' (с учётом оценки от '+minSc+')'}. В среднем <b>${(rows.length/weeks).toFixed(1)}</b>/нед, максимум за одну неделю: <b>${wv.length?Math.max(...wv):0}</b>.`;
   }catch(e){}
   const tb=el('#tb'); tb.innerHTML='';
-  for(const t of rows.slice(0,300)){
+  for(const t of rows.slice(0,ROWCAP())){
     const tr=document.createElement('tr'); tr.className='clickable';
     tr.innerHTML=`<td class="muted">▸</td><td><span class="eye ${isWatched(t)?'on':''}" data-base="${t.base}" data-t="${t.t}">👁</span></td>`+
       `<td>${nameCell(t,'sc')}</td><td class="muted">${new Date(sigEnd(t)).toLocaleString('ru-RU',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',timeZone:'Europe/Moscow'})}</td>`+
@@ -3212,6 +3249,7 @@ function renderScan(){
     tr.addEventListener('click',()=>expandRow(tr,t,12));
     tb.appendChild(tr);
   }
+  scanMoreRow(tb,rows.length);
   el('#resCard').style.display='';
 }
 /* Применяет режим «1 позиция»: из отсортированного списка выбирает непересекающиеся сделки.
@@ -3742,7 +3780,7 @@ function renderBt(){
   }
   el('#btMonth').innerHTML=h+'</tbody></table></div>';
   const tb=el('#bttb'); tb.innerHTML='';
-  for(const t of rows.slice(0,300)){
+  for(const t of rows.slice(0,ROWCAP())){
     const tr=document.createElement('tr'); tr.className='clickable';
     const oc=outcomeHtml(t.o);
     tr.innerHTML=`<td class="muted">▸</td><td>${nameCell(t,'bt')}</td>`+
@@ -3756,6 +3794,7 @@ function renderBt(){
     tr.addEventListener('click',()=>expandRow(tr,t,12));
     tb.appendChild(tr);
   }
+  scanMoreRow(tb,rows.length);
   updCounts();
 }
 function renderRegime(){
