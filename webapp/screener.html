@@ -3,17 +3,11 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HW FBO — скринер и бэктест</title>
 <style>
-:root{--bg:#12131a;--panel:#1b1d27;--line:#2c2f3d;--fg:#e6e8ef;--muted:#9aa0b5;
---green:#26a69a;--red:#ef5350;--accent:#7aa2f7;--warn:#ffb86b;--level:#ffd54f;--entry:#b0b6c8;color-scheme:dark}
-@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--bg:#f7f8fb;--panel:#fff;--line:#e2e5ee;--fg:#1a1c25;--muted:#5c6377;--entry:#555c70;color-scheme:light}}
-:root[data-theme="light"]{--bg:#f5f6f7;--panel:#ffffff;--line:#dde0e3;--fg:#15171a;--muted:#666c72;
---green:#0a9e57;--red:#e51c1c;--accent:#30343a;--btxt:#f5f6f7;--warn:#9c7a1f;--level:#b79a4a;--entry:#5b6273;color-scheme:light}
-:root[data-theme="light"] button:not(.ghost){color:var(--btxt)}
-:root[data-theme="light"] .tabs button:not(.on){color:var(--muted)}
-#themeToggle{font-size:13px}
+:root{--bg:#000000;--panel:#0c0c0c;--line:#333333;--fg:#ffffff;--muted:#9a9a9a;
+--green:#12e07a;--red:#ff2d2d;--accent:#ffffff;--btxt:#000000;--warn:#e0bd63;--level:#f0dca0;--entry:#c7c9cd;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:16px}
-.wrap{max-width:1250px;margin:0 auto}
+.wrap{max-width:none;margin:0 auto;padding:0 10px}   /* 7.34: на всю ширину экрана */
 h1{font-size:20px;margin:0 0 4px}
 .sub{color:var(--muted);font-size:13px;margin-bottom:16px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
@@ -23,9 +17,12 @@ h1{font-size:20px;margin:0 0 4px}
 label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 input,select{background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:14px}
 select.flt{min-width:152px}
-button{background:var(--accent);color:#0d1017;border:0;border-radius:6px;padding:9px 16px;font-weight:600;cursor:pointer;font-size:14px}
+button{background:var(--accent);color:var(--btxt);border:0;border-radius:999px;padding:9px 18px;font-weight:600;cursor:pointer;font-size:14px}
 button:disabled{opacity:.5;cursor:default}
 button.ghost{background:transparent;color:var(--fg);border:1px solid var(--line)}
+.ruModeSeg{display:flex;gap:0}.ruModeSeg button{padding:7px 14px;font-size:13px;border-radius:0;background:transparent;color:var(--fg);border:1px solid var(--line);font-weight:500}
+.ruModeSeg button:first-child{border-radius:6px 0 0 6px}.ruModeSeg button:last-child{border-radius:0 6px 6px 0;border-left:0}
+.ruModeSeg button.on{background:var(--accent);color:var(--btxt);border-color:var(--accent);font-weight:600}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
 th{color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase}
@@ -33,10 +30,24 @@ tr.clickable{cursor:pointer}
 tr.clickable:hover td{background:rgba(122,162,247,.07)}
 .take{color:var(--green)}.warnc{color:var(--warn)}.stop{color:var(--red)}.muted{color:var(--muted)}
 .scroll{overflow-x:auto}
-.kpi{display:flex;gap:14px;flex-wrap:wrap;margin:6px 0 12px}
-.kpi div{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 14px;min-width:108px}
+.kpi{display:inline-flex;width:fit-content;max-width:100%;gap:0;flex-wrap:nowrap;overflow-x:auto;margin:6px 0 12px;border:1px solid var(--line);border-radius:999px;background:var(--panel)}
+.kpi div{background:transparent;border:0;border-right:1px solid var(--line);border-radius:0;padding:10px 22px;min-width:108px;white-space:nowrap}
+.kpi div:last-child{border-right:0}
+.kpi div:first-child{border-top-left-radius:999px;border-bottom-left-radius:999px;padding-left:28px}
+.kpi div:last-child{border-top-right-radius:999px;border-bottom-right-radius:999px;padding-right:28px}
 .kpi b{display:block;font-size:20px;margin-top:2px}
 .note{font-size:12.5px;color:var(--muted);line-height:1.65}
+/* 7.79: вкладки аналитики — отдельные капсулы в несколько рядов, названия не обрезаются */
+.tabs.wrap{display:flex;flex-wrap:wrap;gap:6px;width:auto;border:0;background:transparent;border-radius:0;overflow:visible}
+.tabs.wrap button{border:1px solid var(--line) !important;border-radius:999px !important;padding:7px 14px;background:var(--panel);color:var(--muted)}
+.tabs.wrap button:first-child,.tabs.wrap button:last-child{padding:7px 14px !important}
+.tabs.wrap button.on{background:var(--accent);color:var(--btxt);border-color:var(--accent) !important}
+.chg{border:1px solid var(--accent);border-left:5px solid var(--accent);background:rgba(122,162,247,.09);border-radius:12px;padding:10px 14px;margin-bottom:10px}
+.chg h4{margin:0 0 6px;font-size:13px}
+.chg ul{margin:0;padding:0;list-style:none}
+.chg li{margin:5px 0;font-size:12.5px;line-height:1.5}
+.chg .tg{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:999px;background:var(--accent);color:var(--btxt);margin-right:6px}
+.chg .vr{color:var(--muted);margin-right:6px}
 .warn{border-left:3px solid var(--warn);padding-left:10px}
 h3{font-size:14px;margin:14px 0 8px}
 .charts{display:grid;grid-template-columns:1fr;gap:12px;padding:12px 4px}
@@ -48,9 +59,15 @@ canvas{width:100%;height:210px;display:block}
 .legend i{display:inline-block;width:14px;height:2px;vertical-align:middle;margin-right:4px}
 .tradeInfo{display:flex;gap:16px;flex-wrap:wrap;font-size:12.5px;padding:4px 8px 0}
 .tradeInfo span{color:var(--muted)}.tradeInfo b{color:var(--fg)}
-.tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
-.tabs button{background:transparent;color:var(--muted);border:1px solid var(--line);font-weight:500}
-.tabs button.on{background:var(--accent);color:#0d1017;border-color:var(--accent);font-weight:600}
+/* 7.78: верхняя панель — два отдельных «джойнед»-капсула блока: разделы слева, тема+сохранить справа */
+.topbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+.tabs,.tabsRight{display:inline-flex;width:fit-content;max-width:100%;gap:0;margin:0;flex-wrap:nowrap;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--panel)}
+.tabs button,.tabsRight button{background:transparent;color:var(--muted);border:0;border-right:1px solid var(--line);border-radius:0 !important;padding:10px 22px;font-weight:500;white-space:nowrap}
+.tabs button:last-child,.tabsRight button:last-child{border-right:0}
+.tabs button.on,.tabsRight button.on{background:var(--accent);color:var(--btxt);font-weight:600}
+.tabs button:first-child,.tabsRight button:first-child{padding-left:28px}
+.tabs button:last-child,.tabsRight button:last-child{padding-right:28px}
+#btnSaveFile{font-size:13px}
 progress{width:100%;height:6px;margin-top:8px}
 .eye{cursor:pointer;font-size:15px;opacity:.35;user-select:none}
 .eye.on{opacity:1}
@@ -64,6 +81,7 @@ progress{width:100%;height:6px;margin-top:8px}
 .sect{border-top:1px dashed var(--line);margin:12px 0 10px;padding-top:10px}
 .sect>span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .bestStar{color:#f5b301;font-weight:700;margin-left:2px}
+/* Mini App: всегда тёмная тема HTML 7.92 (без переключателя, без темы Telegram); раскладка вкладок на телефоне — mobile.css */
 </style></head><body><div class="wrap">
 
 <h1>HW FBO — скринер и бэктест</h1>
@@ -75,36 +93,8 @@ progress{width:100%;height:6px;margin-top:8px}
   <button id="tabBt">Бэктест <span id="btCnt" class="muted"></span></button>
   <button id="tabTester">Тестировщик <span id="testerCnt" class="muted"></span></button>
   <button id="tabRegime">Состояние рынка</button>
-  <button id="themeToggle" type="button" class="ghost" style="margin-left:auto;padding:5px 14px" title="Переключить тему: тёмная / светлая">🌙 Тёмная</button>
   <button id="btnSaveFile" class="ghost" style="margin-left:auto;padding:5px 14px;font-size:13px" title="Скачать HTML со всеми сохранёнными данными (отслеживаемые, тестировщик, шаблоны, настройки)">💾 Сохранить</button>
 </div>
-<script>
-/* HTML 7.92: переключатель темы (hwThemeMode в localStorage). Mini App: 2 режима — тёмная / светлая;
-   без сохранённого выбора тема берётся из Telegram (colorScheme), иначе — тёмная. */
-(function(){
-  var KEY='hwThemeMode';
-  var ORDER=['dark','light'];
-  var LABELS={dark:'🌙 Тёмная',light:'☀️ Светлая'};
-  var btn=document.getElementById('themeToggle');
-  function apply(mode,user){
-    if(ORDER.indexOf(mode)<0) mode='dark';
-    var r=document.documentElement;
-    if(user){ r.style.removeProperty('--bg'); r.style.removeProperty('--fg'); }   // цвета Telegram — только для темы по умолчанию
-    r.setAttribute('data-theme', mode);
-    btn.textContent = LABELS[mode];
-  }
-  window.hwThemeApply=apply;
-  var saved=null; try{ saved=localStorage.getItem(KEY); }catch(e){}
-  var tg=null; try{ tg=window.Telegram&&Telegram.WebApp&&Telegram.WebApp.colorScheme; }catch(e){}
-  apply(ORDER.indexOf(saved)>=0 ? saved : (tg==='light'?'light':'dark'), ORDER.indexOf(saved)>=0);
-  btn.addEventListener('click', function(){
-    var cur=document.documentElement.getAttribute('data-theme');
-    var next=ORDER[(ORDER.indexOf(cur)+1)%ORDER.length];
-    apply(next,true);
-    try{ localStorage.setItem(KEY, next); }catch(e){}
-  });
-})();
-</script>
 
 
 <div id="paneScan">
@@ -7049,7 +7039,7 @@ function renderBtCal(){
       const ts=new Date(y,m,d).getTime(), inR=a&&ts>=a&&ts<=b, end=a&&(ts===a||ts===b), isT=ts===today, fut=ts>today;
       const st=[`height:24px;line-height:24px;border-radius:4px;position:relative`,
         fut?'opacity:.35;cursor:default':'cursor:pointer',
-        end?'background:var(--accent);color:#fff;font-weight:700':inR?'background:rgba(122,162,247,.28)':'',
+        end?'background:var(--accent);color:var(--btxt);font-weight:700':inR?'background:rgba(122,162,247,.28)':'',
         isT?'outline:2px solid var(--warn);outline-offset:-2px;font-weight:700':''].filter(Boolean).join(';');
       h+=`<div ${fut?'':`data-d="${ts}"`} style="${st}" title="${fmtDay(ts)}${isT?' — сегодня':''}">${d}`+
         (has.has(dayKey(ts))?'<span style="position:absolute;left:50%;bottom:1px;width:4px;height:4px;margin-left:-2px;border-radius:50%;background:var(--green)"></span>':'')+'</div>';
@@ -7453,7 +7443,7 @@ updCounts(); renderWatch(); updTesterCount();
     </div>
     <div style="display:flex;gap:10px;justify-content:flex-end">
       <button id="tplSaveCancel" class="ghost" onclick="el('#tplSaveModal').style.display='none';_tplOnSave=null;" style="padding:7px 18px">Отмена</button>
-      <button id="tplSaveOk" onclick="const _n=tplBuildName();el('#tplSaveModal').style.display='none';if(_tplOnSave){_tplOnSave(_n);_tplOnSave=null;}" style="padding:7px 18px;background:var(--accent);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:14px">Сохранить</button>
+      <button id="tplSaveOk" onclick="const _n=tplBuildName();el('#tplSaveModal').style.display='none';if(_tplOnSave){_tplOnSave(_n);_tplOnSave=null;}" style="padding:7px 18px;background:var(--accent);color:var(--btxt);border:none;border-radius:6px;cursor:pointer;font-size:14px">Сохранить</button>
     </div>
   </div>
 </div>

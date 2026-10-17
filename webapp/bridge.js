@@ -331,21 +331,11 @@
     try { TG.ready(); } catch (e) {}
     try { TG.expand(); } catch (e) {}
     try {
-      var hwSaved = null; try { hwSaved = localStorage.getItem('hwThemeMode'); } catch (e3) {}
-      if (hwSaved === 'light' || hwSaved === 'dark') {   // выбор пользователя (переключатель темы) важнее темы Telegram
-        if (window.hwThemeApply) window.hwThemeApply(hwSaved, true);
-        else document.documentElement.setAttribute('data-theme', hwSaved);
-      } else if (TG.themeParams) {
-        var bg = TG.themeParams.bg_color;
-        var txt = TG.themeParams.text_color;
-        if (bg) document.documentElement.style.setProperty('--bg', bg);
-        if (txt) document.documentElement.style.setProperty('--fg', txt);
-        if (TG.colorScheme === 'light') document.documentElement.setAttribute('data-theme', 'light');
-        else if (TG.colorScheme === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
-        if (window.hwThemeApply) window.hwThemeApply(TG.colorScheme === 'light' ? 'light' : 'dark', false);
-      }
+      // HTML 7.92 «тёмная» — всегда; цвета/схему Telegram поверх не накладываем
+      document.documentElement.removeAttribute('data-theme');
       if (typeof TG.setHeaderColor === 'function') {
-        try { TG.setHeaderColor('secondary_bg_color'); } catch (e2) {}
+        try { TG.setHeaderColor('#000000'); } catch (e2) {}
+        try { if (typeof TG.setBackgroundColor === 'function') TG.setBackgroundColor('#000000'); } catch (e4) {}
       }
     } catch (e) {}
   }

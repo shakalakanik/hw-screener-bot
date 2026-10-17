@@ -315,7 +315,7 @@
     if (document.getElementById('hw-journal-css')) return;
     var st = document.createElement('style');
     st.id = 'hw-journal-css';
-    st.textContent = '#paneJournal .hw-jchart{width:100%;height:auto;display:block;background:#12131a;border-radius:4px;min-height:72px}' +
+    st.textContent = '#paneJournal .hw-jchart{width:100%;height:auto;display:block;background:var(--bg);border-radius:4px;min-height:72px}' +
       '#paneJournal .hw-journal-card.hw-focus{outline:2px solid #4c9aff;outline-offset:-2px;background:rgba(76,154,255,.10)}' +
       '#paneJournal .hw-j-title{font-size:16px;font-weight:700;margin:0 0 6px}' +
       // 👁 «Отслеживаемые» в правом верхнем углу карточки журнала (штатный .eye: .35 / .on = 1)
@@ -324,8 +324,7 @@
       '#paneJournal .hw-j-eye{position:absolute;top:6px;right:6px;width:36px;height:36px;display:flex;align-items:center;' +
       'justify-content:center;font-size:18px;line-height:1;border-radius:8px;-webkit-tap-highlight-color:transparent;z-index:1}' +
       '#paneJournal .hw-j-eye.on{background:rgba(76,154,255,.18)}' +
-      '#tabJournal{white-space:nowrap;flex:1 0 100% !important;order:5}' +
-      '.tabs{flex-wrap:wrap !important;overflow:visible !important}';
+      '#tabJournal{white-space:nowrap;order:5;border-right:0 !important}#tabTester{border-right:1px solid var(--line) !important}';   // HTML 7.92: вкладки — одна капсула (последний сегмент — журнал)
     document.head.appendChild(st);
   }
 
@@ -752,9 +751,9 @@
       '#hwMktBar{position:sticky;top:0;z-index:10000;box-shadow:0 2px 6px rgba(0,0,0,.18);display:flex;gap:4px;padding:6px 0;margin:0 0 8px;' +
       'background:var(--bg,#0f1115)}' +
       '#hwMktBar button{flex:1 1 0;min-width:0;padding:9px 4px;font-size:14px;font-weight:600;white-space:nowrap;' +
-      'overflow:hidden;text-overflow:ellipsis;border-radius:8px;border:1px solid rgba(127,127,127,.35);' +
-      'background:transparent;color:inherit;cursor:pointer}' +
-      '#hwMktBar button.on{background:#4c9aff;border-color:#4c9aff;color:#fff}' +
+      'overflow:hidden;text-overflow:ellipsis;border-radius:999px;border:1px solid var(--line);' +
+      'background:var(--panel);color:var(--muted);cursor:pointer}' +
+      '#hwMktBar button.on{background:var(--accent);border-color:var(--accent);color:var(--btxt)}' +
       '@media (max-width:380px){#hwMktBar button{font-size:12.5px;padding:8px 2px}}';
     document.head.appendChild(st);
     var bar = document.createElement('div');

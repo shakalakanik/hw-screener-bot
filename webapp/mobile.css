@@ -19,21 +19,6 @@ body {
   max-width: 100%;
 }
 
-.tabs {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  scrollbar-width: thin;
-  gap: 4px;
-  margin-bottom: 10px;
-}
-
-.tabs button {
-  flex: 0 0 auto;
-  white-space: nowrap;
-  font-size: 13px;
-  padding: 8px 12px;
-}
 
 select.flt {
   width: 100%;
@@ -137,12 +122,6 @@ table {
     max-width: 100%;
   }
 
-  .tabs {
-    margin-left: -4px;
-    margin-right: -4px;
-    padding: 0 4px;
-  }
-
   /* Avoid awkward wrapping of long filter labels */
   label,
   .muted,
@@ -158,3 +137,15 @@ table {
 
 /* 💾 Сохранить (скачать HTML-файл) — в Telegram бесполезна: скрыта на всех вкладках */
 #btnSaveFile{display:none!important}
+
+/* HTML 7.92 «тёмная», узкий экран: как HTML на телефоне — капсулы рядами: «Отслеживаю · Шаблоны · Тестировщик», ниже — «Журнал сигналов». */
+@media (max-width:700px){
+.tabs{border:0;background:transparent;overflow:visible;flex-wrap:wrap;row-gap:8px;width:100%;margin:0 0 12px;padding:0}
+.tabs button{background:var(--panel);border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:10px 14px;font-size:13px}
+.tabs button.on{border-color:var(--accent)}
+#tabWatch{border-left:1px solid var(--line);border-radius:999px 0 0 999px !important;padding-left:18px}
+#tabTester{border-right:1px solid var(--line) !important;border-radius:0 999px 999px 0 !important;padding-right:18px}
+#tabJournal{flex:0 0 100%;border:1px solid var(--line) !important;border-radius:999px !important;order:5}
+#tabJournal.on{border-color:var(--accent) !important}
+}
+@media (max-width:350px){.tabs button{padding:9px 10px;font-size:12px}#tabWatch{padding-left:14px}#tabTester{padding-right:14px}}
