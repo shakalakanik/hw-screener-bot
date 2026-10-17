@@ -51,8 +51,8 @@ chk("v6 ≤7.9 otherwise", hwv1.score_v6({**sv, **f, "vtr": 2}) <= 7.9)
 # доставка: ВКЛ — только The best (шаблоны крипты не применяются), ВЫКЛ — как обычно + is_best
 c1 = {**base, "feat": {}, "signal_ts": now - 1800_000}
 c2 = {**base, "ticker": "ENAUSDT", "level": 0.24, "feat": {}, "signal_ts": now - 1800_000}
-html_pipeline.best_pipeline = lambda cards, cut, nn=False, market="crypto", reg_ts=None: [dict(c1)] if market == "crypto" else []
-html_pipeline.apply_all = lambda cards, raw, st, cut, wm, win_h=None, market=None: [dict(c1), dict(c2)]
+html_pipeline.best_pipeline = lambda cards, cut, nn=False, market="crypto", reg_ts=None, **k: [dict(c1)] if market == "crypto" else []
+html_pipeline.apply_all = lambda cards, raw, st, cut, wm, win_h=None, market=None, **k: [dict(c1), dict(c2)]
 storage.is_duplicate = lambda *a, **k: False
 screener.crypto_send_hour_ok = lambda ts: True   # часы доставки — в test_send_hours.py
 sent = []

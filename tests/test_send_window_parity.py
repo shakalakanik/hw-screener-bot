@@ -89,8 +89,8 @@ for m in ('crypto', 'ru'):   # «Крипта (Алго)» убрана 16.10
     asyncio.run(screener._deliver_html(cards if m != 'algo' else [], [800 + len(m)], f, now2, 12, cap, None, None,
                                        algo_ctx={}, min_send_ts=screener.send_min_ts(now2, screener.MANUAL_SEND_HOURS)))
     hrs = sorted(datetime.fromtimestamp(c['signal_ts'] / 1000 + 3600, MSK).strftime('%H:%M') for c in got)
-    exp = [f'{h:02d}:00' for h in range(7, 19)            # 12 ч: показ 07:00–18:00
+    exp = [f'{h:02d}:00' for h in range(8, 19)            # HTML 7.86 inW: бар t ≥ now−12ч → показ 08:00–18:00
            if m != 'crypto' or screener.crypto_send_hour_ok(int(datetime(2026, 10, 7, h - 1, 0, tzinfo=MSK).timestamp() * 1000))]
-    ok(f'{m}: manual at 18:00:40 → last 12h shown 07:00–18:00 (crypto: часы отправки) (got {hrs})', hrs == exp and '06:00' not in hrs, exp)
+    ok(f'{m}: manual at 18:00:40 → last 12h (bar t≥now−12h) shown 08:00–18:00 (crypto: часы отправки) (got {hrs})', hrs == exp and '06:00' not in hrs, exp)
     html_pipeline.apply_all, algo_mod.cards_for = orig
 print('FAILS', fails); sys.exit(1 if fails else 0)

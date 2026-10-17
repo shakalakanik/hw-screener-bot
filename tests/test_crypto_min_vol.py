@@ -8,7 +8,7 @@ fails = 0
 def chk(n, c, x=""):
     global fails; fails += not c; print(("OK   " if c else "FAIL ") + n + ("" if c else f"  {x}"))
 chk("screener.MIN_VOL_USD_24H = 5M", screener.MIN_VOL_USD_24H == 5_000_000.0, screener.MIN_VOL_USD_24H)
-chk("hwv1 PARAMS vol_usd_min = 5M", hwv1.PARAMS["vol_usd_min"] == 5_000_000.0)
+chk("hwv1 PARAMS vol_usd_min = 1M (как V0 в HTML 7.92; пол 5M — в screener)", hwv1.PARAMS["vol_usd_min"] == 1_000_000.0)
 rows = [{"cards": [{"ticker": t}], "turn": v, "base": t} for t, v in (("A", 4_999_999), ("B", 5_000_000), ("C", 1_200_000), ("D", 80e6))]
 kept = [c["ticker"] for c in screener._select_universe(rows, 300, screener.MIN_VOL_USD_24H)]
 chk("отбор: <5M отброшены, ≥5M оставлены (по убыванию)", kept == ["D", "B"], kept)

@@ -97,8 +97,8 @@ mk = lambda t, ts, lv: {"ticker": t, "side": "SHORT", "market": "ru", "strategy"
                         "strength": 4, "dist_atr": 0.1, "d1_bias": "down"}
 r1, r2 = mk("SBER", now - 1800_000, 300.0), mk("GAZP", now - 1800_000, 120.0)
 orig_bp, orig_aa = html_pipeline.best_pipeline, html_pipeline.apply_all
-html_pipeline.best_pipeline = lambda cards, cut, nn=False, market="crypto", reg_ts=None: [dict(r1)] if market == "ru" else []
-html_pipeline.apply_all = lambda cards, raw, st, cut, wm, win_h=None, market=None: [dict(r2)] if market == "ru" else []
+html_pipeline.best_pipeline = lambda cards, cut, nn=False, market="crypto", reg_ts=None, **k: [dict(r1)] if market == "ru" else []
+html_pipeline.apply_all = lambda cards, raw, st, cut, wm, win_h=None, market=None, **k: [dict(r2)] if market == "ru" else []
 storage.is_duplicate = lambda *a, **k: False
 sent = []
 async def on_sig(c, ids): sent.append(c)
