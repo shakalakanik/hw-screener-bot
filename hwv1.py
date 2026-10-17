@@ -357,6 +357,14 @@ def _ru_friday_late(ts_ms: int) -> bool:
     return ((g.tm_wday + 1) % 7) == 5 and hl >= 13
 
 
+def ru_weekend(ts_ms: int) -> bool:
+    """17.10: Мосбиржа — сигналы только в будни. Торги выходного дня (сб/вс по МСК, ISS отдаёт их свечи в TQBR)
+    сигналов не дают: в HTML 7.71 позиции закрываются в пт 20:00 (ruFriCut), с пт 13:00 сигналы не берутся
+    («уйдут на выходные»), свечи выходного дня считаются «редкими тонкими» и не показываются."""
+    import time as _t
+    return _t.gmtime(int(ts_ms) / 1000 + 3 * 3600).tm_wday >= 5
+
+
 def _ru_brk_reject(h1cut: list, bar, atr_d: float) -> bool:
     """Пробой РФ: 10:00 МСК, слабый объём (<0.5 медианы 20), ATR D1 <1%, тело <40%."""
     import time as _t
@@ -1288,7 +1296,7 @@ def evaluate_brk(
         bar = h1c[i]
         if no_night and _is_night_msk(bar.ts):
             continue
-        if market == "ru" and _ru_friday_late(bar.ts):
+        if market == "ru" and (_ru_friday_late(bar.ts) or ru_weekend(bar.ts)):
             continue
         dk = bar.ts // 86_400_000
         if dk != cache_day:
@@ -1490,7 +1498,7 @@ def evaluate_fbo(
         bar = h1c[hi_idx]
         if no_night and _is_night_msk(bar.ts):
             continue
-        if market == "ru" and _ru_friday_late(bar.ts):
+        if market == "ru" and (_ru_friday_late(bar.ts) or ru_weekend(bar.ts)):
             continue
         dk = bar.ts // 86_400_000
         if dk != cache_day:

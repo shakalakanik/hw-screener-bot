@@ -69,6 +69,17 @@ SCAN_LOOKBACK_H = MAX_SIGNAL_AGE_H
 MANUAL_SEND_HOURS = 12   # = окно HTML (MAX_SIGNAL_AGE_H)
 
 
+def _ru_weekend(ts_ms: int) -> bool:
+    from hwv1 import ru_weekend
+    return ru_weekend(ts_ms)
+
+
+def moex_scan_day_ok(now_s: float) -> bool:
+    """Плановый скан MOEX — только в будни (МСК)."""
+    import time as _t
+    return _t.gmtime(now_s + 3 * 3600).tm_wday < 5
+
+
 def send_min_ts(now_ms: int, hours: int) -> int:
     """Минимальный signal_ts (открытие бара) для отправки: последние `hours` закрытых H1-баров."""
     hour_start = (int(now_ms) // 3_600_000) * 3_600_000
@@ -1391,6 +1402,8 @@ async def _deliver_html(
                 st["too_old"] += 1
             elif c.get("market", "crypto") == "crypto" and not crypto_send_hour_ok(c["signal_ts"]):
                 st["night"] += 1   # ночь: не шлём и не помечаем отправленным
+            elif c.get("market") == "ru" and _ru_weekend(int(c.get("bar_ts", c["signal_ts"]))):
+                st["night"] += 1   # MOEX: сб/вс (торги выходного дня) — не шлём
             elif storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
                                           c.get("strategy", "brk"), c["side"]):
                 st["already"] += 1

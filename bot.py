@@ -2338,6 +2338,8 @@ async def scan_loop_ru():
     while True:
         nxt = next_scan_ts(time.time(), MOEX_SCAN_DELAY_S)
         await asyncio.sleep(max(0.0, nxt - time.time()))
+        if not screener.moex_scan_day_ok(time.time()):   # сб/вс — сигналов MOEX нет (как HTML), скан не запускаем
+            continue
         await _scan_pass(["ru"], "ru", MOEX_SEND_HOURS)
 
 
