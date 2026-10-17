@@ -37,7 +37,7 @@ OKX_BAR_MAP = {"D": "1Dutc", "240": "4H", "60": "1H", "5": "5m"}
 LIMIT = 200  # баров за запрос
 
 TOP_N = 300           # инструментов по обороту за сутки
-MIN_VOL_USD_24H = 1_000_000.0   # жёсткий пол — меньше не берём вообще
+MIN_VOL_USD_24H = 5_000_000.0   # 17.10: крипта — жёсткий пол $5M/сут (было $1M); меньше не берём вообще
 
 # HTML post-filters: applyCoinLimit (12h) + capCluster (default 3)
 COIN_WINDOW_H = 12

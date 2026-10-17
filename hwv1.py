@@ -40,7 +40,7 @@ PARAMS = {
     "work_days": 26,
     "swing_lr": 2,
     "universe_n": 200,
-    "vol_usd_min": 1_000_000.0,
+    "vol_usd_min": 5_000_000.0,   # 17.10: крипта $5M (было $1M)
     "merge_atr": 0.06,
     "merge_pct": 0.001,
     "zone_atr": 0.03,
@@ -1712,7 +1712,7 @@ def evaluate(
     out = {"version": VERSION, "ticker": ticker, "ok": False, "cards": [], "reason": ""}
 
     if vol_usd_24h and vol_usd_24h < PARAMS["vol_usd_min"]:
-        out["reason"] = "оборот < $1M"
+        out["reason"] = "оборот < $5M"
         return out
     if len(h1c) < PARAMS["h1_min"] or len(d1c) < PARAMS["d1_min"] or last <= 0:
         out["reason"] = "мало баров"

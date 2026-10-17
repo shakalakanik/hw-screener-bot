@@ -2102,13 +2102,15 @@ async def handle_manual_scan_post(request: web.Request) -> web.Response:
             return float(default)
 
     # HTML: minVol в млн ($ или ₽) → абсолютные единицы * 1e6
-    min_vol_raw = body.get("minVol", body.get("min_vol", 1))
+    min_vol_raw = body.get("minVol", body.get("min_vol", 5))
     try:
         min_vol_m = float(min_vol_raw)
     except (TypeError, ValueError):
-        min_vol_m = 1.0
+        min_vol_m = 5.0
     # Если уже передали абсолют (>1e5) — не умножаем
     min_vol = min_vol_m if min_vol_m >= 100_000 else min_vol_m * 1_000_000.0
+    # 17.10: крипта — всегда не ниже $5M/сут (screener.MIN_VOL_USD_24H)
+    min_vol = max(min_vol, screener.MIN_VOL_USD_24H)
 
     n_inst = int(_num("nInst", body.get("n_inst", 300)) or 300)
     win_h = int(_num("winH", body.get("win_h", body.get("windowHours", 12))) or 12)
