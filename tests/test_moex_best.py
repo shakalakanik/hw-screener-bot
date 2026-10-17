@@ -91,7 +91,7 @@ chk("ru list = 73", len(moex.RU_LIST_DEFAULT) == 73)
 chk("hold MOEX 96h", hwv1.hold_h("ru") == 96 and html_pipeline.HOLD_RU == 96)
 
 # ── доставка: ⭐ MOEX ВКЛ — только The best MOEX; ВЫКЛ — шаблон + строки The best со звёздой
-now = int(time.time() * 1000)
+now = int(datetime(2026, 10, 19, 10, tzinfo=timezone.utc).timestamp() * 1000)   # пн 13:00 МСК: MOEX шлётся только в будни
 mk = lambda t, ts, lv: {"ticker": t, "side": "SHORT", "market": "ru", "strategy": "brk", "level": lv, "kind": "prev low",
                         "last": lv * 0.99, "stop": lv, "take": lv * 0.97, "score": 6.0, "feat": {}, "signal_ts": ts,
                         "strength": 4, "dist_atr": 0.1, "d1_bias": "down"}
