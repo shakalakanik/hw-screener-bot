@@ -527,7 +527,10 @@
     var cache = jstLoad(), list = [];
     for (var i = 0; i < rows.length; i++) {
       var st = cache[String(rows[i].id)];
-      if (onlyMissing && st && (st.o !== 'open' || (Date.now() - (st.at || 0)) < 15 * 60000)) continue;
+      // 17.10: как «Отслеживаемые» — пересчитываются только открытые (активна / без статуса / активна с БУ);
+      // завершённые (тейк / стоп / безубыток / по времени) сохраняют статус, свечи по ним не качаются.
+      if (st && st.o && st.o !== 'open' && !st.nodata) continue;
+      if (onlyMissing && st && !st.nodata && (Date.now() - (st.at || 0)) < 15 * 60000) continue;   // авто: свежепересчитанные открытые не трогаем
       var t = journalWatchItem(rows[i]); if (t) list.push([rows[i].id, t]);
     }
     var prog = document.querySelector('.hw-j-prog'), btn = document.querySelector('.hw-j-refresh');
