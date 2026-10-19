@@ -2113,6 +2113,10 @@ async def handle_manual_scan_post(request: web.Request) -> web.Response:
     min_vol = max(min_vol, screener.MIN_VOL_USD_24H)
 
     n_inst = int(_num("nInst", body.get("n_inst", 300)) or 300)
+    # HTML 7.94: крипта — «Инструментов» подгоняется под мин. оборот (главное поле по умолчанию — оборот);
+    # явное число — только если главным полем выбрано «Инструментов» (univMaster='n'). Мосбиржа — как было.
+    if str(body.get("market") or "crypto") != "ru" and str(body.get("univMaster") or body.get("univ_master") or "vol") != "n":
+        n_inst = None
     win_h = int(_num("winH", body.get("win_h", body.get("windowHours", 12))) or 12)
     no_night = bool(body.get("noNight", body.get("no_night", True)))
     no_stocks = bool(body.get("noStocks", body.get("no_stocks", True)))

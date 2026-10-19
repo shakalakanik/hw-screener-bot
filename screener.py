@@ -1159,10 +1159,20 @@ def _select_universe(results: list, n_inst: int, min_vol: float) -> list[dict]:
     return out
 
 
+UNIV_N_MIN, UNIV_N_MAX = 20, 600   # HTML #nInst min/max
+
+
+def univ_n_inst(tks: list[dict], min_vol: float) -> int:
+    """HTML 7.93/7.94 univSync (главное поле — мин. оборот, по умолчанию): «Инструментов» = число монет
+    (last>0, без акций) с оборотом 24ч ≥ minVol по свежему списку тикеров, в пределах 20…600."""
+    n = sum(1 for t in tks if float(t.get("turnover24h") or 0) >= float(min_vol))
+    return max(UNIV_N_MIN, min(UNIV_N_MAX, n))
+
+
 async def _scan_crypto_html(
     client: httpx.AsyncClient,
     *,
-    n_inst: int,
+    n_inst: int | None,
     min_vol: float,
     win_h: int,
     no_night: bool = True,
@@ -1170,12 +1180,15 @@ async def _scan_crypto_html(
     source: str | None = None,
     progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> list[dict]:
-    """Ровно как HTML: тикеры с turn ≥ minVol×0.5 и last>0, без акций, топ nInst по обороту 24ч →
+    """Ровно как HTML: тикеры с turn ≥ minVol×0.5 и last>0, без акций, топ nInst по обороту 24ч
+    (n_inst=None → HTML 7.94: nInst = число монет с оборотом 24ч ≥ minVol, 20…600) →
     скан каждого (окно win_h) → итоговый список по среднему дневному обороту за период ≥ minVol."""
     tks = await fetch_tickers(client, source=source, min_vol=min_vol * 0.5, top_n=1_000_000)
     tks = [t for t in tks if float(t.get("lastPrice") or 0) > 0]
     if no_stocks:
         tks = [t for t in tks if not _is_stock_base(t.get("symbol", ""))]
+    if n_inst is None:   # HTML 7.94: число инструментов подгоняется под мин. оборот перед каждым сканом
+        n_inst = univ_n_inst(tks, min_vol)
     tks = tks[:max(1, int(n_inst))]
     logger.info("Скан crypto: %d инструментов через %s (окно %dч)",
                 len(tks), "OKX" if _active_exchange == "okx" else "Bybit", win_h)
@@ -1500,7 +1513,7 @@ async def run_scan(
             return []
         async with httpx.AsyncClient() as client:
             return await _scan_crypto_html(
-                client, n_inst=TOP_N, min_vol=MIN_VOL_USD_24H, win_h=win_h,
+                client, n_inst=None, min_vol=MIN_VOL_USD_24H, win_h=win_h,
                 no_night=CRYPTO_NO_NIGHT, no_stocks=True,
             )
 
@@ -1572,7 +1585,7 @@ async def run_manual_scan(
     strategy: str = "fbo",
     source: str = "auto",
     min_vol: float = MIN_VOL_USD_24H,
-    n_inst: int = TOP_N,
+    n_inst: int | None = None,
     win_h: int = SCAN_LOOKBACK_H,
     no_night: bool = True,
     no_stocks: bool = True,
@@ -1590,7 +1603,8 @@ async def run_manual_scan(
     strategy = strategy if strategy in ("fbo", "brk", "both") else "fbo"
     filters = dict(filters or {})
     tpl_name = (template_name or "").strip() or "manual"
-    n_inst = max(1, min(int(n_inst or TOP_N), 600))
+    # HTML 7.94: крипта — None = авто (по мин. обороту); Мосбиржа — сколько бумаг из списка
+    n_inst = None if (n_inst is None and market == "crypto") else max(1, min(int(n_inst or TOP_N), 600))
     min_vol = float(min_vol if min_vol is not None else MIN_VOL_USD_24H)
     # noNight / noStocks только для crypto (как HTML fldNight)
     use_no_night = bool(no_night) if market == "crypto" else False
