@@ -42,7 +42,7 @@ SCAN_HOUR_DELAY_S = max(5, min(120, int(os.environ.get("SCAN_HOUR_DELAY_S", "40"
 SCAN_SEND_DEADLINE_S = 300   # к HH:05 всё должно быть отправлено
 SCAN_SCHEDULE_TEXT = ("раз в час, сразу после закрытия часовой свечи (сигналы в HH:00–HH:05 МСК); "
                       "приходят только сигналы только что закрывшегося часа; "
-                      f"крипта — только сигналы со временем {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК; "
+                      "крипта — ещё в HH:30 (30-минутки); «без ночи» как в HTML: входы 09:30–23:00 МСК (свечи 09:00–22:59); "
                       "MOEX — в HH:16 МСК (ISS публикует свечу с задержкой 15 мин)")
 
 
@@ -1699,7 +1699,7 @@ def _scan_summary(chat_id: int, st: dict | None) -> str:
     for key, label in (("already", "уже были"), ("level_dup", "повтор уровня 36ч"),
                        ("conc", "лимит «одновременно»"),
                        ("too_old", f"старше {MANUAL_SEND_HOURS} ч"),
-                       ("night", f"крипта вне {screener.CRYPTO_SEND_FROM:02d}:00–{screener.CRYPTO_SEND_TO:02d}:00 МСК")):
+                       ("night", "крипта, ночь (без ночи, как HTML: свеча 23:00–09:00 МСК)")):
         if st.get(key):
             parts.append(f"{label}: {st[key]}")
     cfg = storage.get_active_config(chat_id)

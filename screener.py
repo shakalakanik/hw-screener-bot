@@ -48,16 +48,18 @@ MAX_SIGNAL_AGE_H = 12
 # HTML 6.78.x: чекбокс «без ночи» (noNight). У пользователя в десктопном HTML он ВЫКЛЮЧЕН →
 # скан круглосуточно, а «авто» часов входа = 0-24 (readF). Автоскан подписки следует этому.
 THE_BEST_NAME = "⭐ The Best"
-# Окно доставки крипты (по показанному времени сигнала = открытие H1 + 1ч, МСК), включительно.
-# Только фильтр отправки — расчёт сигналов (паритет с HTML) не меняется.
-CRYPTO_SEND_FROM = int(os.getenv("CRYPTO_SEND_FROM", "10"))
-CRYPTO_SEND_TO = int(os.getenv("CRYPTO_SEND_TO", "22"))
+# Доставка крипты = HTML «без ночи» (8.01 scanSymbol: hl=(час открытия H1-бара МСК); пропуск, если !(9 ≤ hl < 23)).
+# 30-минутка относится к своему часовому бару (09:00–09:30 → бар 09:00 → можно; 08:30–09:00 → бар 08:00 → ночь).
+# Итог: показанное время входа 09:30 … 23:00 МСК (бар 22:00 → вход 23:00 / 22:30 ещё можно). 19.10: «в 9.30 присылать, как в файле».
+CRYPTO_DAY_FROM_H, CRYPTO_DAY_TO_H = 9, 23   # часы открытия H1-бара МСК: [9, 23)
 
 
 def crypto_send_hour_ok(signal_ts: int) -> bool:
-    """True, если показанное время сигнала (открытие бара + 1ч, МСК) в [FROM, TO] включительно."""
-    h = (time.gmtime((int(signal_ts) + 3_600_000) / 1000).tm_hour + 3) % 24
-    return CRYPTO_SEND_FROM <= h <= CRYPTO_SEND_TO
+    """True, если сигнал не «ночной» по правилу HTML noNight: час открытия H1-бара (МСК) в [9, 23)."""
+    h = (time.gmtime(int(signal_ts) // 3_600_000 * 3600).tm_hour + 3) % 24
+    return CRYPTO_DAY_FROM_H <= h < CRYPTO_DAY_TO_H
+
+
 CRYPTO_NO_NIGHT = os.getenv("CRYPTO_NO_NIGHT", "1") == "1"   # десктоп HTML: «без ночи» ВКЛ
 MAX_SIGNAL_AGE_MS = MAX_SIGNAL_AGE_H * 3_600_000
 # Lookback детекции = max age (не ищем то, что всё равно не отправим).
@@ -1422,8 +1424,8 @@ async def _deliver_html(
             if (ts_chk < min_send_ts if min_send_ts is not None
                     else now_ms - ts_chk > MAX_SIGNAL_AGE_MS):
                 st["too_old"] += 1
-            elif c.get("market", "crypto") == "crypto" and not crypto_send_hour_ok(c["signal_ts"]):
-                st["night"] += 1   # ночь: не шлём и не помечаем отправленным
+            elif c.get("market", "crypto") == "crypto" and not crypto_send_hour_ok(int(c.get("bar_ts", c["signal_ts"]))):
+                st["night"] += 1   # ночь (HTML без ночи: по исходному бару; 30-минутка — bar_ts): не шлём и не помечаем отправленным
             elif c.get("market") == "ru" and _ru_weekend(int(c.get("bar_ts", c["signal_ts"])) + 3_600_000):
                 st["night"] += 1   # MOEX: сб/вс (торги выходного дня) — не шлём
             elif storage.was_sent_to_chat(chat_id, c["ticker"], c["signal_ts"],
