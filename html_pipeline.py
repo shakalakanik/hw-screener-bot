@@ -47,6 +47,44 @@ def sw_of(card: dict, f: dict | None) -> int:
     return 1 if (f or {}).get("_swing") else 0
 
 
+def be_r_of(card: dict) -> float:
+    """HTML beROf(t): свинг часовой пробой MOEX — 0 (без безубытка), дневной шорт — 1.5, иначе BE_TRIGGER_R."""
+    sw = sw_of(card, None)
+    return RU_SW["beH"] if sw == 1 else RU_SW["beD"] if sw == 2 else BE_TRIGGER_R
+
+
+def be_level(card: dict):
+    """HTML fmtBE(t): цена, на которой стоп переносится в точку входа (+beR·R от входа в сторону тейка). None — без безубытка."""
+    try:
+        e, st = float(card.get("last", card.get("entry"))), float(card["stop"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    be_r = be_r_of(card)
+    if not be_r > 0:
+        return None
+    risk = abs(e - st)
+    long_ = str(card.get("side", "")).upper() == "LONG" if card.get("side") else _d(card) == 1
+    return e + be_r * risk if long_ else e - be_r * risk
+
+
+def fmt_html(v) -> str:
+    """HTML fmt(v)."""
+    if v is None:
+        return "—"
+    a = abs(v)
+    if a >= 1000:
+        return f"{v:.1f}"
+    if a >= 1:
+        return f"{v:.3f}"
+    if a >= 0.01:
+        return f"{v:.5f}"
+    if not a:
+        return "0.000"
+    m, ex = f"{v:.3e}".split("e")   # JS toPrecision(4): экспонента только при порядке < −6
+    ex = int(ex)
+    return f"{m}e{ex}" if ex < -6 else f"{v:.{3 - ex}f}"
+
+
 def sw_risk_cap(card: dict, risk: float, f: dict | None) -> float:
     return min(risk, RU_SW["stopMaxPct"] * card["last"]) if sw_of(card, f) == 1 else risk
 

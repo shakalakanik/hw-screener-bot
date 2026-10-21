@@ -290,6 +290,15 @@ MAIN_KEYBOARD = main_keyboard()
 _MARKET_LABEL = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа", "algo": "⚡ Крипта (Алго)"}
 
 
+def _be_str(card: dict) -> str:
+    """Уровень безубытка как в HTML fmtBE(): +1.5R от входа в сторону тейка (свинг MOEX — «—»)."""
+    from html_pipeline import be_level, fmt_html
+    try:
+        return fmt_html(be_level(card))
+    except Exception:
+        return "—"
+
+
 def _format_card(card: dict) -> str:
     side_emoji = "🟢" if card["side"] == "LONG" else "🔴"
     bias_map   = {"up": "↑ up", "down": "↓ down", "flat": "→ flat"}
@@ -329,7 +338,8 @@ def _format_card(card: dict) -> str:
             f"🧩 Условия: {card.get('algo_combo') or '—'}",
             f"📥 Вход: <code>{entry:.4f}</code>",
             f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
-            f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
+            f"🛡 Безубыток: <code>{_be_str(card)}</code>",
+        f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
             f"🕐 Сигнал: {time_str}",
         ])
 
@@ -341,6 +351,7 @@ def _format_card(card: dict) -> str:
         f"🎯 Уровень: <code>{level:.4f}</code>",
         f"📥 Вход: <code>{entry:.4f}</code>",
         f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
+        f"🛡 Безубыток: <code>{_be_str(card)}</code>",
         f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
         f"⭐ Оценка: <b>{card['score']:.1f}</b> / 10" if card.get("score") is not None
         else f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
