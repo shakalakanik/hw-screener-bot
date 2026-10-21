@@ -46,6 +46,16 @@ sw = bot._format_card({**card, "ticker": "SBER", "market": "ru", "strategy": "br
 chk("TG: свинг MOEX — «—»", "Безубыток: <code>—</code>" in sw, sw)
 chk("TG: карточка разбирается обратно", (bot._parse_card_from_message(type("M", (), {"html_text": txt})()) or {}).get("ticker") == "PEPEUSDT")
 
+# все цены карточки — HTML fmt(); мелкие монеты не превращаются в 0.0000; разбор карточки обратно
+for lbl, v in (("Уровень", card["level"]), ("Вход", card["last"]), ("Стоп-лосс", card["stop"]), ("Тейк-профит", card["take"])):
+    chk(f"TG: {lbl} = HTML fmt", f"{lbl}: <code>{hp.fmt_html(v)}</code>" in txt, txt)
+chk("TG: нет 0.0000", "0.0000<" not in txt, txt)
+sb = bot._format_card({**card, "ticker": "SBER", "market": "ru", "strategy": "brk", "swm": 0, "last": 301.55, "stop": 298.5, "take": 310.7, "level": 301.0})
+chk("TG: SBER цены 301.000/301.550/298.500/310.700", all(f"<code>{x}</code>" in sb for x in ("301.000", "301.550", "298.500", "310.700")), sb)
+tiny = {**card, "last": 1.2345e-7, "stop": 1.26e-7, "take": 1.1e-7, "level": 1.23e-7}
+pc = bot._parse_card_from_message(type("M", (), {"html_text": bot._format_card(tiny)})()) or {}
+chk("TG: разбор 1.234e-7 обратно", abs((pc.get("last") or pc.get("entry") or 0) - 1.2345e-7) < 1e-10 and abs((pc.get("stop") or 0) - 1.26e-7) < 1e-10, pc)
+
 # статус «безубыток» в боте срабатывает ровно на этом уровне
 H = 3_600_000
 base = {"market": "crypto", "strategy": "fbo", "side": "LONG", "last": 100.0, "atr_d": 10.0, "signal_ts": 0, "ticker": "AAAUSDT", "feat": {}}
