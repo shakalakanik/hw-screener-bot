@@ -290,6 +290,15 @@ MAIN_KEYBOARD = main_keyboard()
 _MARKET_LABEL = {"crypto": "🌐 Крипта", "ru": "🇷🇺 Мосбиржа", "algo": "⚡ Крипта (Алго)"}
 
 
+def _px(v) -> str:
+    """Цена в карточке — как HTML fmt() (мелкие монеты вроде PEPE не превращаются в 0.0000)."""
+    from html_pipeline import fmt_html
+    try:
+        return fmt_html(float(v))
+    except (TypeError, ValueError):
+        return "—"
+
+
 def _be_str(card: dict) -> str:
     """Уровень безубытка как в HTML fmtBE(): +1.5R от входа в сторону тейка (свинг MOEX — «—»)."""
     from html_pipeline import be_level, fmt_html
@@ -336,10 +345,10 @@ def _format_card(card: dict) -> str:
             f"{market_label}  ·  {strategy_label}",
             tpl_line.rstrip("\n"),
             f"🧩 Условия: {card.get('algo_combo') or '—'}",
-            f"📥 Вход: <code>{entry:.4f}</code>",
-            f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
+            f"📥 Вход: <code>{_px(entry)}</code>",
+            f"⛔ Стоп-лосс: <code>{_px(stop)}</code>  (−{risk_pct:.1f}%)",
             f"🛡 Безубыток: <code>{_be_str(card)}</code>",
-        f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
+        f"💰 Тейк-профит: <code>{_px(take)}</code>  (+{tp_pct:.1f}%)",
             f"🕐 Сигнал: {time_str}",
         ])
 
@@ -348,11 +357,11 @@ def _format_card(card: dict) -> str:
         f"{side_emoji} <b>{card['ticker']}</b> — {card['side']}",
         f"{market_label}  ·  {strategy_label}",
         tpl_line.rstrip("\n"),
-        f"🎯 Уровень: <code>{level:.4f}</code>",
-        f"📥 Вход: <code>{entry:.4f}</code>",
-        f"⛔ Стоп-лосс: <code>{stop:.4f}</code>  (−{risk_pct:.1f}%)",
+        f"🎯 Уровень: <code>{_px(level)}</code>",
+        f"📥 Вход: <code>{_px(entry)}</code>",
+        f"⛔ Стоп-лосс: <code>{_px(stop)}</code>  (−{risk_pct:.1f}%)",
         f"🛡 Безубыток: <code>{_be_str(card)}</code>",
-        f"💰 Тейк-профит: <code>{take:.4f}</code>  (+{tp_pct:.1f}%)",
+        f"💰 Тейк-профит: <code>{_px(take)}</code>  (+{tp_pct:.1f}%)",
         f"⭐ Оценка: <b>{card['score']:.1f}</b> / 10" if card.get("score") is not None
         else f"💪 Сила: {'★' * card['strength']}{'☆' * (5 - card['strength'])}",
         f"🕐 Сигнал: {time_str}",
@@ -390,7 +399,7 @@ def _parse_card_from_message(msg) -> dict | None:
 
     def _code_after(label: str) -> float | None:
         mm = re.search(
-            re.escape(label) + r"[^<]*<code>\s*([0-9]+(?:\.[0-9]+)?)\s*</code>",
+            re.escape(label) + r"[^<]*<code>\s*([0-9]+(?:\.[0-9]+)?(?:e[-+]?[0-9]+)?)\s*</code>",
             raw,
             re.I,
         )
@@ -400,7 +409,7 @@ def _parse_card_from_message(msg) -> dict | None:
             except ValueError:
                 return None
         mm = re.search(
-            re.escape(label) + r"[^\d]*([0-9]+(?:\.[0-9]+)?)",
+            re.escape(label) + r"[^\d]*([0-9]+(?:\.[0-9]+)?(?:e[-+]?[0-9]+)?)",
             plain,
             re.I,
         )
