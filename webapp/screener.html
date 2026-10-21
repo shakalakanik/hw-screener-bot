@@ -2891,11 +2891,13 @@ function fmtStop(t){
   return `${fmt(st)} <span class="muted" style="font-size:11px">(${pct.toFixed(2)}%)</span>`;
 }
 function fmtBE(t){
+  if(t&&t.mkt==='us') return '—';   // у США безубытка нет
   // Цена, на которой сработает безубыток (+1.5R от входа в сторону тейка) — удобно под уведомление.
   const e=t.e, st=t.st;
   if(e==null||st==null||isNaN(e)||isNaN(st)) return '—';
-  const risk=Math.abs(e-st);
-  const lvl=t.d?e+BE_TRIGGER_R*risk:e-BE_TRIGGER_R*risk;
+  const risk=Math.abs(e-st), beR_=beROf(t);
+  if(!(beR_>0)) return '—';   // 7.37: свинг по часовому пробою — без безубытка
+  const lvl=t.d?e+beR_*risk:e-beR_*risk;
   return fmt(lvl);
 }
 /* 6.95: Мосбиржа — объём 5м и вход из капитала в рублях: «20 тыс ₽», «1.25 млн ₽». Вход = 10% объёма пятиминутки

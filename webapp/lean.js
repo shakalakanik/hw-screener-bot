@@ -580,6 +580,12 @@
   }
   setTimeout(syncRuMode, 500);
 
+  function jBE(row) {
+    var t = journalWatchItem(row);
+    if (!t || !t.e || !t.st) return '—';
+    try { if (typeof fmtBE === 'function') return fmtBE(t); } catch (e) {}
+    return '—';
+  }
   function journalCardHtml(row) {
     var c = row.card || {};
     var side = String(c.side || '');
@@ -616,6 +622,8 @@
         '<div><span>уровень</span> <b>' + jFmt(level) + '</b></div>' +
         '<div><span>вход</span> <b>' + jFmt(entry) + '</b></div>' +
         '<div><span>стоп-лосс</span> <b class="stop">' + jFmt(stop) + '  (−' + risk.toFixed(1) + '%)</b></div>' +
+        // HTML fmtBE(t): цена переноса стопа в безубыток (+1.5R; свинг MOEX — «—»), тот же beROf, что и статус «безубыток»
+        '<div><span>безубыток</span> <b>' + jEsc(jBE(row)) + '</b></div>' +
         '<div><span>тейк-профит</span> <b class="take">' + jFmt(take) + '  (+' + tp.toFixed(1) + '%)</b></div>' +
         '<div><span>оценка</span> ' + score + '</div>' +
         '<div><span>статус</span> <b class="hw-j-status" data-jid="' + jEsc(row.id) + '">' + jStatusHtml(jStatusGet(row.id)) + '</b></div>' +
